@@ -1,0 +1,35 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ── Virtual envs ────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Secrets / local config ──────────────────────────────
+.env
+.env.*
+.claude/settings.local.json
+
+# ── Runtime data (regenerated per run) ──────────────────
+data/logs/
+data/uploads/
+data/outputs/
+data/verification.db
+
+# ── OS / editor cruft ───────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# keep the folders themselves so the app's makedirs is a no-op
+!data/uploads/.gitkeep
+!data/outputs/.gitkeep

@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Payment Verification — Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script>
+    // set theme before paint to avoid a flash
+    (function () {
+      var t = localStorage.getItem("pv-theme");
+      if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", t);
+    })();
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script>window.__CFG__ = { model: {{ model|tojson }}, deepLead: {{ deep_lead|tojson }} };</script>
+</head>
+<body>
+  <div class="shell">
+    <!-- ── rail ─────────────────────────────────────────────── -->
+    <aside class="rail">
+      <div class="rail-brand">
+        <div class="mark" aria-hidden="true"></div>
+        <div>
+          <div class="brandword">Verify<span>/OCR</span></div>
+          <div class="brandsub">Payment console</div>
+        </div>
+      </div>
+
+      <nav class="rail-nav">
+        <button class="nav-item active" data-view="dashboard"><span class="idx">01</span><span>Dashboard</span></button>
+        <button class="nav-item" data-view="verify"><span class="idx">02</span><span>Verify</span></button>
+      </nav>
+
+      <div class="rail-foot">
+        <button id="themeToggle" class="theme-btn" title="Toggle theme"><span class="tt-dot"></span><span id="themeLabel">Dark</span></button>
+        <div class="model-chip">
+          <span class="live-dot"></span>
+          <div><div class="mc-model" id="mcModel">model</div><div class="mc-url" id="mcUrl"></div></div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── stage ────────────────────────────────────────────── -->
+    <main class="stage">
+      <header class="stage-top">
+        <div class="stage-head">
+          <div class="eyebrow" id="pageEyebrow">Overview</div>
+          <h1 id="pageTitle">Dashboard</h1>
+          <p class="stage-sub" id="pageSub">Live verification overview</p>
+        </div>
+        <div class="stage-tools">
+          <label class="field-search">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><line x1="16.5" y1="16.5" x2="21" y2="21" stroke="currentColor" stroke-width="2"/></svg>
+            <input id="globalSearch" placeholder="Search lead, lender, method" autocomplete="off">
+          </label>
+          <button class="btn line" id="refreshBtn" title="Refresh" aria-label="Refresh">↻</button>
+          <button class="btn solid" id="newRunBtn">＋ New run</button>
+        </div>
+      </header>
+
+      <!-- ═══ DASHBOARD ═══ -->
+      <section class="view" id="view-dashboard">
+        <div class="statband" id="statCards"></div>
+
+        <div class="panelrow">
+          <section class="panel">
+            <div class="panel-head"><h3>Status distribution</h3><span class="tag">SHARE</span></div>
+            <div class="donut-wrap">
+              <canvas id="donut"></canvas>
+              <div class="donut-center"><div class="dc-num" id="donutTotal">0</div><div class="dc-lbl">Leads</div></div>
+            </div>
+            <div class="legend" id="donutLegend"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Payment methods</h3><span class="tag">TOP 8</span></div>
+            <canvas id="methodBar" height="240"></canvas>
+          </section>
+        </div>
+
+        <section class="panel tablepanel">
+          <div class="tabrow">
+            <div class="chips" id="statusChips">
+              <button class="chip active" data-status="all">All</button>
+              <button class="chip" data-status="verified"><i class="dot v"></i>Verified</button>
+              <button class="chip" data-status="unverified"><i class="dot u"></i>Unverified</button>
+              <button class="chip" data-status="manual_review"><i class="dot m"></i>Manual</button>
+              <button class="chip" data-status="duplicate"><i class="dot d"></i>Duplicate</button>
+              <button class="chip" data-status="non_document"><i class="dot n"></i>Non-doc</button>
+            </div>
+            <span class="count" id="tableCount">—</span>
+          </div>
+          <div class="tablewrap">
+            <table>
+              <thead><tr><th>Lead</th><th>Lender</th><th>Status</th><th>Method</th><th>Outcome</th><th>Updated</th></tr></thead>
+              <tbody id="leadsBody"></tbody>
+            </table>
+            <div class="empty hidden" id="tableEmpty">No leads yet. Run a verification to populate the console.</div>
+          </div>
+        </section>
+      </section>
+
+      <!-- ═══ VERIFY ═══ -->
+      <section class="view hidden" id="view-verify">
+        <div class="verifyrow">
+          <!-- batch -->
+          <section class="panel">
+            <div class="panel-head"><h3>Batch — CSV / Excel</h3><span class="tag">QUEUE</span></div>
+            <p class="lede">Each row is enqueued as a durable job. Workers drain the queue; progress streams below. A restart mid-run resumes automatically.</p>
+            <div class="dropzone" id="csvDrop">
+              <div class="dz-mark">＋</div>
+              <div class="dz-main" id="csvName">Drop a CSV / Excel — or click</div>
+              <div class="dz-sub">must contain an image URL / path column</div>
+              <input type="file" id="csvFile" accept=".csv,.xlsx,.xls" hidden>
+            </div>
+            <div class="opts">
+              <label class="fld">Image column<input id="imageCol" value="payment_document"></label>
+              <label class="fld">Lead-ID column<input id="idCol" placeholder="row index if blank"></label>
+              <label class="fld wide">Image root <span class="hint">(local filenames only)</span><input id="imageRoot" placeholder="C:\path\to\images"></label>
+              <label class="switch-row"><span>Test mode <span class="hint">— ex_* cols, no model</span></span>
+                <span class="switch"><input type="checkbox" id="precomputed"><span class="slider"></span></span></label>
+            </div>
+            <button class="btn solid big" id="runCsv" disabled>Run batch</button>
+
+            <div class="run-panel hidden" id="runPanel">
+              <div class="progress"><div class="bar" id="progBar"></div></div>
+              <div class="run-meta"><span id="progText">0 / 0</span><span id="progElapsed"></span></div>
+              <div class="mini-counts" id="miniCounts"></div>
+              <div class="live-list" id="liveList"></div>
+              <div class="done-banner hidden" id="doneBanner">
+                <span>Batch complete</span>
+                <a class="btn line small" id="dlBtn" href="#">Download CSV</a>
+              </div>
+            </div>
+          </section>
+
+          <!-- single image -->
+          <section class="panel">
+            <div class="panel-head"><h3>Single image</h3><span class="tag">INSTANT</span></div>
+            <p class="lede">Drop one receipt. Add expected values to verify, or leave blank just to see the extraction.</p>
+            <div class="dropzone" id="imgDrop">
+              <div class="dz-mark">▣</div>
+              <div class="dz-main" id="imgName">Drop an image — or click</div>
+              <div class="dz-sub">PNG · JPG · WEBP</div>
+              <input type="file" id="imgFile" accept="image/*" hidden>
+            </div>
+            <img id="imgPreview" class="img-preview hidden" alt="preview">
+            <div class="opts">
+              <label class="fld">Lender<input id="siLender" placeholder="e.g. SMFG_RURAL"></label>
+              <label class="fld">Amount<input id="siAmount" placeholder="5300"></label>
+              <label class="fld">Date<input id="siDate" placeholder="2025-10-10"></label>
+              <label class="fld">Loan a/c<input id="siLan" placeholder="optional"></label>
+            </div>
+            <button class="btn solid big" id="runImg" disabled>Extract &amp; verify</button>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ── lead drawer ─────────────────────────────────────────── -->
+  <div class="scrim" id="scrim"></div>
+  <aside class="drawer" id="drawer" aria-label="Lead detail">
+    <div class="drawer-head">
+      <div>
+        <div class="dh-eyebrow">Lead</div>
+        <div class="dh-id mono" id="dLeadId">—</div>
+        <span class="badge" id="dStatus">—</span>
+      </div>
+      <div class="dh-actions">
+        <a class="btn line small" id="dRawLink" target="_blank">Raw JSON</a>
+        <button class="btn line small" id="drawerClose" aria-label="Close">✕</button>
+      </div>
+    </div>
+    <div class="drawer-body" id="drawerBody"></div>
+  </aside>
+
+  <div class="toasts" id="toasts"></div>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

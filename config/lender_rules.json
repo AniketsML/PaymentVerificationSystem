@@ -1,0 +1,408 @@
+{
+  "ACRE_HDBPOOL": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "ACRE_JCF": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "ADMIN": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "AGRIM": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "ARCIL": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "ARTH_IMPACT": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "AXIO": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "BAJAJ_AUTO": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 7,
+    "amount_tolerance_rupees": 1.0
+  },
+  "BOBCARD": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 2,
+    "amount_tolerance_rupees": 1.0
+  },
+  "CASHE": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "CASHE_NACL": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "CREDITT": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "CSB": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "FEDERAL_BANK": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 1,
+    "amount_tolerance_rupees": 1.0
+  },
+  "HDBFS": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "HDBFS_PL": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "IARC": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "JANA_SF": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "JANA_SF_TW": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "KHATABOOK": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "KISSHT": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 6,
+    "amount_tolerance_rupees": 1.0
+  },
+  "KREDITBEE": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "KREDITBEE_SOUTH": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "KREDITBEE_SPL": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 7,
+    "amount_tolerance_rupees": 1.0
+  },
+  "MOBIKWIK": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 7,
+    "amount_tolerance_rupees": 1.0
+  },
+  "MOBIKWIK_SOE": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "MONEYVIEW": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 1,
+    "amount_tolerance_rupees": 1.0
+  },
+  "PAHAL_FINANCE": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 7,
+    "amount_tolerance_rupees": 1.0
+  },
+  "PAYME": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 2,
+    "amount_tolerance_rupees": 1.0
+  },
+  "QUID_CASH": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 7,
+    "amount_tolerance_rupees": 1.0
+  },
+  "SALARYSE": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "SLICE": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 7,
+    "amount_tolerance_rupees": 1.0
+  },
+  "SMART_COIN": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "SMFG_AUTO_PAY": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver",
+      "loan_account_number"
+    ],
+    "needs_lan": true,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "SMFG_DIGITAL": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver",
+      "loan_account_number"
+    ],
+    "needs_lan": true,
+    "date_tolerance_days": 2,
+    "amount_tolerance_rupees": 1.0
+  },
+  "SMFG_PL": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver",
+      "loan_account_number"
+    ],
+    "needs_lan": true,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "SMFG_RURAL": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver",
+      "loan_account_number"
+    ],
+    "needs_lan": true,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0,
+    "reconciliation_dependent": true
+  },
+  "SMFG_URBAN": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver",
+      "loan_account_number"
+    ],
+    "needs_lan": true,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  },
+  "TATA_CAPITAL": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 7,
+    "amount_tolerance_rupees": 1.0
+  },
+  "__default__": {
+    "mandatory_fields": [
+      "date",
+      "amount",
+      "receiver"
+    ],
+    "needs_lan": false,
+    "date_tolerance_days": 3,
+    "amount_tolerance_rupees": 1.0
+  }
+}
