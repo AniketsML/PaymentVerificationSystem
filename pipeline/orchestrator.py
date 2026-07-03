@@ -15,14 +15,13 @@ Final statuses:
     unverified     - a mandatory field failed / unreadable (reason logged)
     non_document   - not a valid payment document, or image discarded at validation
     duplicate      - exact re-submission (lead_code + loan + amount + month) — no OCR spent
-    manual_review  - a different loan account under a known lead_code (suspicious)
 """
 from __future__ import annotations
 
 import time
 
 from pipeline import image_qc, image_source, ocr_classify, extract, verify
-from pipeline.models import (VERIFIED, UNVERIFIED, NON_DOCUMENT, MANUAL_REVIEW,
+from pipeline.models import (VERIFIED, UNVERIFIED, NON_DOCUMENT,
                              DUPLICATE, PASS, FAIL)
 
 
@@ -117,12 +116,16 @@ def process_lead(lead_id: str, lender: str, image_path: str, row: dict,
                outcome.get("reason", "all mandatory fields matched"),
                data=outcome, ms=_elapsed_ms(t0))
 
-    # dedup flagged a different loan a/c under a known lead_code -> force manual review,
-    # but keep the full verification result attached for the human reviewer.
+    # dedup flagged a different loan a/c under a known lead_code. It needs a human
+    # look, and every `unverified` lead is manually checked anyway, so we surface it
+    # as `unverified` (with the dedup concern) rather than a separate bucket. The full
+    # verification result stays nested under `verification` for the reviewer.
     if manual_reason:
-        outcome = {"reason": manual_reason, "verdict": "manual_review",
+        vreason = outcome.get("reason")
+        outcome = {"reason": manual_reason + (f"; {vreason}" if vreason else ""),
+                   "flag": "different_loan_account_same_lead_code",
                    "verification": outcome, "verification_status": status}
-        status = MANUAL_REVIEW
+        status = UNVERIFIED
 
     return _finish(lead_id, lender, status, outcome, doc.payment_method,
                    doc.to_dict(), logger)

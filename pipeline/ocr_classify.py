@@ -38,13 +38,40 @@ def classify_payment_method(document_type: str, full_text: str) -> str:
     return "Other"
 
 
-def looks_like_payment(extraction: dict) -> bool:
-    if not extraction.get("is_payment_document"):
-        return False
+# fields whose presence is deterministic evidence that this IS a payment document
+_EVIDENCE_FIELDS = ("amount", "reference_id", "loan_account_number", "date")
+
+
+def _present(v) -> bool:
+    return v is not None and str(v).strip().lower() not in ("", "null", "none", "nan")
+
+
+def payment_evidence(extraction: dict) -> dict:
+    """The deterministic signals behind the non-document vs payment-candidate call.
+    Any single positive signal is enough to treat the image as a payment document
+    and route it to verification — a real payment proof is never discarded."""
     txt = (extraction.get("full_text") or "").lower()
-    has_marker = any(m in txt for m in _PAYMENT_MARKERS)
-    has_value = any(extraction.get(k) for k in ("amount", "reference_id", "loan_account_number"))
-    return has_marker or has_value
+    return {
+        "model_says_payment": bool(extraction.get("is_payment_document")),
+        "markers": [m for m in _PAYMENT_MARKERS if m in txt],
+        "fields": [k for k in _EVIDENCE_FIELDS if _present(extraction.get(k))],
+    }
+
+
+def is_payment_candidate(extraction: dict) -> bool:
+    """Deterministic gate for the non-document decision.
+
+        True  -> treat as a payment document; verify.py decides verified/unverified.
+        False -> genuinely a non-document (safe to discard).
+
+    We return False ONLY when every signal is absent at once: the model does not
+    think it is a payment document, AND no payment keyword appears in the OCR text,
+    AND no payment field (amount / reference / LAN / date) was extracted. If even
+    one signal is positive the lead is routed to verification instead of being
+    discarded — so `non_document` carries zero false positives, and everything
+    uncertain lands in `unverified` for a human. Reproducible from the extraction."""
+    ev = payment_evidence(extraction)
+    return ev["model_says_payment"] or bool(ev["markers"]) or bool(ev["fields"])
 
 
 def run(image, row: dict, ocr_client) -> tuple[bool, str, dict, dict]:
@@ -58,6 +85,7 @@ def run(image, row: dict, ocr_client) -> tuple[bool, str, dict, dict]:
                                      extraction.get("full_text", ""))
     extraction["payment_method"] = method
 
+    ev = payment_evidence(extraction)
     vmeta = extraction.get("_meta", {}) or {}
     metrics = {
         "document_type": extraction.get("document_type", ""),
@@ -66,10 +94,19 @@ def run(image, row: dict, ocr_client) -> tuple[bool, str, dict, dict]:
         "model": vmeta.get("model", ""),
         "model_ms": vmeta.get("elapsed_ms", ""),
         "model_error": vmeta.get("error", ""),
+        "evidence": ev,
     }
 
-    if looks_like_payment(extraction):
-        return True, "valid payment document", extraction, metrics
+    if is_payment_candidate(extraction):
+        why = []
+        if ev["model_says_payment"]:
+            why.append("model=payment_document")
+        if ev["fields"]:
+            why.append("fields:" + ",".join(ev["fields"]))
+        if ev["markers"]:
+            why.append(f"{len(ev['markers'])} text marker(s)")
+        return True, "payment document (" + "; ".join(why) + ")", extraction, metrics
 
-    describes = extraction.get("describes") or extraction.get("document_type") or "not a payment receipt"
-    return False, f"not a valid payment document ({describes})", extraction, metrics
+    # every signal absent -> genuinely a non-document (deterministic, no evidence)
+    describes = extraction.get("describes") or extraction.get("document_type") or "no payment content"
+    return False, f"non-document — no payment evidence ({describes})", extraction, metrics

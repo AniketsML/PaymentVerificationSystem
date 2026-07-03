@@ -371,8 +371,7 @@
     ],
     "needs_lan": true,
     "date_tolerance_days": 3,
-    "amount_tolerance_rupees": 1.0,
-    "reconciliation_dependent": true
+    "amount_tolerance_rupees": 1.0
   },
   "SMFG_URBAN": {
     "mandatory_fields": [

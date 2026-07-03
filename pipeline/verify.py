@@ -84,22 +84,54 @@ def check_date(doc_date, sys_date, tol_days) -> tuple[bool, str]:
     return False, f"date mismatch (gap {gap}d > {tol_days}d - possible old/recycled receipt)"
 
 
+def _lender_self_names(lender: str) -> list:
+    """Candidate names derived from the lender's own code, used ONLY as a fallback
+    when no receiver allowlist is configured. 'MOBIKWIK_SOE' -> ['MOBIKWIK SOE',
+    'MOBIKWIK']. Tokens shorter than 4 chars are dropped so a tiny/generic code
+    cannot spuriously match unrelated text (keeps zero-false-positives intact)."""
+    code = str(lender or "").strip()
+    if not code:
+        return []
+    out, seen = [], set()
+    for c in (code.replace("_", " "), code.split("_")[0]):
+        n = _norm_name(c)
+        if len(n) >= 4 and n not in seen:
+            seen.add(n)
+            out.append(c)
+    return out
+
+
 def check_receiver(doc_receiver, doc_text, lender) -> tuple[bool, str]:
     allow = accepted_receivers(lender)
-    if not allow:
-        return False, f"no accepted-receiver list configured for {lender}"
+    if allow:
+        cand = _norm_name(doc_receiver)
+        text = _norm_name(doc_text)
+        for name in allow:
+            n = _norm_name(name)
+            if not n:
+                continue
+            # matched if the receiver field equals/contains it, or it appears in the receipt text
+            if cand and (n == cand or n in cand or cand in n):
+                return True, f"receiver matches '{name}'"
+            if n in text:
+                return True, f"receiver '{name}' found on document"
+        return False, f"receiver not among accepted names for {lender}"
+
+    # ── no allowlist configured: fall back to the lender's OWN name ────────────
+    # A document whose payee clearly IS the lender is still positive evidence. We
+    # require the full lender name to appear in the receiver field or anywhere in
+    # the OCR text (strict direction only — we do NOT accept the receiver being a
+    # mere fragment of the lender name), so this never manufactures a false match.
     cand = _norm_name(doc_receiver)
     text = _norm_name(doc_text)
-    for name in allow:
+    for name in _lender_self_names(lender):
         n = _norm_name(name)
-        if not n:
-            continue
-        # matched if the receiver field equals/contains it, or it appears in the receipt text
-        if cand and (n == cand or n in cand or cand in n):
-            return True, f"receiver matches '{name}'"
-        if n in text:
-            return True, f"receiver '{name}' found on document"
-    return False, f"receiver not among accepted names for {lender}"
+        if cand and (n == cand or n in cand):
+            return True, f"receiver matches lender name '{name}' (no allowlist configured)"
+        if n and n in text:
+            return True, f"lender name '{name}' found on document (no allowlist configured)"
+    return False, (f"no accepted-receiver list configured for {lender}, "
+                   f"and lender name not found on document")
 
 
 def check_lan(doc_lan, sys_lan) -> tuple[bool, str]:

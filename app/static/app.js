@@ -15,6 +15,11 @@
   let state = { status: "all", q: "" };
   let charts = {};
 
+  // per-column filters for the leads table. null = no filter; a Set = allowed values.
+  let allRows = [];
+  const COL_FILTERS = { lead_id: null, lender: null, payment_method: null, outcome_text: null };
+  const rowVal = (r, col) => String(r[col] ?? "") || "—";
+
   /* ── toast ─────────────────────────────── */
   function toast(msg, kind = "") {
     const t = document.createElement("div");
@@ -66,7 +71,6 @@
       ["tot", "Total leads", total],
       ["ok", "Verified", counts.verified || 0],
       ["bad", "Unverified", counts.unverified || 0],
-      ["warn", "Manual review", counts.manual_review || 0],
       ["dup", "Duplicate", counts.duplicate || 0],
       ["gray", "Non-document", counts.non_document || 0],
     ];
@@ -81,7 +85,7 @@
   function renderDonut(counts) {
     const C = palette();
     $("#donutTotal").textContent = (counts.total || 0).toLocaleString();
-    const keys = ["verified", "unverified", "manual_review", "duplicate", "non_document"];
+    const keys = ["verified", "unverified", "duplicate", "non_document"];
     const data = keys.map(k => counts[k] || 0);
     $("#donutLegend").innerHTML = keys.map((k, i) =>
       `<span class="li"><span class="sw" style="background:${C[k]}"></span>${k} · <b>${data[i]}</b></span>`).join("");
@@ -127,8 +131,22 @@
     const url = `/api/leads?status=${encodeURIComponent(state.status)}&q=${encodeURIComponent(state.q)}&limit=400`;
     let rows = [];
     try { rows = await (await fetch(url)).json(); } catch (e) { toast("Failed to load leads", "bad"); }
+    allRows = rows;
+    for (const k in COL_FILTERS) COL_FILTERS[k] = null;   // fresh view -> reset column filters
+    closeColFilter();
+    renderLeadRows();
+  }
+
+  function passesColFilters(r) {
+    return Object.entries(COL_FILTERS).every(([col, set]) => set === null || set.has(rowVal(r, col)));
+  }
+
+  function renderLeadRows() {
+    const rows = allRows.filter(passesColFilters);
     const body = $("#leadsBody");
-    $("#tableCount").textContent = `${rows.length} lead${rows.length === 1 ? "" : "s"}`;
+    const filtered = rows.length !== allRows.length;
+    $("#tableCount").textContent = `${rows.length} lead${rows.length === 1 ? "" : "s"}` +
+      (filtered ? ` of ${allRows.length}` : "");
     $("#tableEmpty").classList.toggle("hidden", rows.length > 0);
     body.innerHTML = rows.map(r => `
       <tr data-id="${esc(r.lead_id)}">
@@ -140,6 +158,63 @@
         <td class="cell-time mono">${fmtTime(r.updated_at)}</td>
       </tr>`).join("");
     $$("#leadsBody tr").forEach(tr => tr.onclick = () => openLead(tr.dataset.id));
+    $$("th[data-col]").forEach(th => th.classList.toggle("filtered", COL_FILTERS[th.dataset.col] !== null));
+  }
+
+  /* ── per-column value filter (Excel-style dropdown on a header) ─────────── */
+  let colPopup = null;
+  function closeColFilter() {
+    if (!colPopup) return;
+    colPopup.remove(); colPopup = null;
+    document.removeEventListener("mousedown", colDocDown, true);
+  }
+  function colDocDown(e) {
+    if (colPopup && !colPopup.contains(e.target) && !e.target.closest("th[data-col]")) closeColFilter();
+  }
+  function openColFilter(col, th) {
+    const reopen = colPopup && colPopup.dataset.col === col;
+    closeColFilter();
+    if (reopen) return;                       // clicking the same header again closes it
+
+    const counts = new Map();
+    allRows.forEach(r => { const v = rowVal(r, col); counts.set(v, (counts.get(v) || 0) + 1); });
+    const values = [...counts.keys()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    const active = COL_FILTERS[col];
+
+    const pop = document.createElement("div");
+    pop.className = "colfilter"; pop.dataset.col = col;
+    pop.innerHTML = `
+      <div class="cf-search"><input type="text" placeholder="Filter ${values.length} values…" autocomplete="off"></div>
+      <div class="cf-actions"><button data-act="all">Select all</button><button data-act="none">Clear</button></div>
+      <div class="cf-list">${values.map(v => `
+        <label class="cf-item"><input type="checkbox" value="${esc(v)}" ${active === null || active.has(v) ? "checked" : ""}>
+          <span class="cf-v" title="${esc(v)}">${esc(v)}</span><span class="cf-n">${counts.get(v)}</span></label>`).join("")}</div>`;
+    document.body.appendChild(pop);
+
+    const rect = th.getBoundingClientRect();
+    pop.style.top = `${Math.round(rect.bottom + 4)}px`;
+    pop.style.left = `${Math.round(Math.min(rect.left, window.innerWidth - pop.offsetWidth - 12))}px`;
+    colPopup = pop;
+
+    const apply = () => {
+      const boxes = $$(".cf-item input", pop);
+      const checked = boxes.filter(b => b.checked).map(b => b.value);
+      COL_FILTERS[col] = (checked.length === values.length) ? null : new Set(checked);
+      renderLeadRows();
+    };
+    $$(".cf-item input", pop).forEach(b => b.onchange = apply);
+    pop.querySelector('[data-act="all"]').onclick = () => { $$(".cf-item input", pop).forEach(b => b.checked = true); apply(); };
+    pop.querySelector('[data-act="none"]').onclick = () => { $$(".cf-item input", pop).forEach(b => b.checked = false); apply(); };
+    const search = pop.querySelector(".cf-search input");
+    search.oninput = () => {
+      const q = search.value.toLowerCase();
+      $$(".cf-item", pop).forEach(it => it.classList.toggle("hidden", !it.textContent.toLowerCase().includes(q)));
+    };
+    search.focus();
+    document.addEventListener("mousedown", colDocDown, true);
+    window.addEventListener("resize", closeColFilter, { once: true });
+    const tw = document.querySelector(".tablewrap");
+    if (tw) tw.addEventListener("scroll", closeColFilter, { once: true });
   }
 
   function refreshAll() { loadStats(); loadLeads(); }
@@ -437,12 +512,13 @@
     $("#refreshBtn").onclick = refreshAll;
     $("#drawerClose").onclick = closeDrawer;
     $("#scrim").onclick = closeDrawer;
-    document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
+    document.addEventListener("keydown", e => { if (e.key === "Escape") { closeColFilter(); closeDrawer(); } });
 
     $$("#statusChips .chip").forEach(c => c.onclick = () => {
       $$("#statusChips .chip").forEach(x => x.classList.remove("active"));
       c.classList.add("active"); state.status = c.dataset.status; loadLeads();
     });
+    $$("th[data-col]").forEach(th => th.onclick = () => openColFilter(th.dataset.col, th));
     $("#globalSearch").addEventListener("input", debounce(e => {
       state.q = e.target.value.trim(); switchView("dashboard"); loadLeads();
     }));

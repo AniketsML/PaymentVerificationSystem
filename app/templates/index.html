@@ -88,7 +88,6 @@
               <button class="chip active" data-status="all">All</button>
               <button class="chip" data-status="verified"><i class="dot v"></i>Verified</button>
               <button class="chip" data-status="unverified"><i class="dot u"></i>Unverified</button>
-              <button class="chip" data-status="manual_review"><i class="dot m"></i>Manual</button>
               <button class="chip" data-status="duplicate"><i class="dot d"></i>Duplicate</button>
               <button class="chip" data-status="non_document"><i class="dot n"></i>Non-doc</button>
             </div>
@@ -96,7 +95,14 @@
           </div>
           <div class="tablewrap">
             <table>
-              <thead><tr><th>Lead</th><th>Lender</th><th>Status</th><th>Method</th><th>Outcome</th><th>Updated</th></tr></thead>
+              <thead><tr>
+                <th class="th-filter" data-col="lead_id">Lead<span class="th-caret" aria-hidden="true">▾</span></th>
+                <th class="th-filter" data-col="lender">Lender<span class="th-caret" aria-hidden="true">▾</span></th>
+                <th>Status</th>
+                <th class="th-filter" data-col="payment_method">Method<span class="th-caret" aria-hidden="true">▾</span></th>
+                <th class="th-filter" data-col="outcome_text">Outcome<span class="th-caret" aria-hidden="true">▾</span></th>
+                <th>Updated</th>
+              </tr></thead>
               <tbody id="leadsBody"></tbody>
             </table>
             <div class="empty hidden" id="tableEmpty">No leads yet. Run a verification to populate the console.</div>
