@@ -38,8 +38,11 @@ def classify_payment_method(document_type: str, full_text: str) -> str:
     return "Other"
 
 
-# fields whose presence is deterministic evidence that this IS a payment document
-_EVIDENCE_FIELDS = ("amount", "reference_id", "loan_account_number", "date")
+# Hard payment fields — their presence is concrete evidence this IS a payment document.
+# NOTE: `date` is deliberately NOT here. A lone date is not payment proof (calendars,
+# random screenshots, product photos all carry dates); a genuine payment proof always
+# also shows an amount, a reference/UTR, a LAN, or a payment keyword.
+_EVIDENCE_FIELDS = ("amount", "reference_id", "loan_account_number")
 
 
 def _present(v) -> bool:
@@ -48,13 +51,18 @@ def _present(v) -> bool:
 
 def payment_evidence(extraction: dict) -> dict:
     """The deterministic signals behind the non-document vs payment-candidate call.
-    Any single positive signal is enough to treat the image as a payment document
-    and route it to verification — a real payment proof is never discarded."""
+
+    The decision uses ONLY payment *content* — a payment keyword in the OCR text or a
+    hard field (amount / reference / LAN). It deliberately does NOT use the model's
+    `is_payment_document` flag, which is fallible in both directions: the model
+    over-accepts non-payments (a keyboard/photo it wrongly calls a receipt) and
+    occasionally rejects real ones. `model_says_payment` is kept here for logging/
+    debugging only — it does not drive the verdict."""
     txt = (extraction.get("full_text") or "").lower()
     return {
-        "model_says_payment": bool(extraction.get("is_payment_document")),
         "markers": [m for m in _PAYMENT_MARKERS if m in txt],
         "fields": [k for k in _EVIDENCE_FIELDS if _present(extraction.get(k))],
+        "model_says_payment": bool(extraction.get("is_payment_document")),  # logged, not decisive
     }
 
 
@@ -62,16 +70,17 @@ def is_payment_candidate(extraction: dict) -> bool:
     """Deterministic gate for the non-document decision.
 
         True  -> treat as a payment document; verify.py decides verified/unverified.
-        False -> genuinely a non-document (safe to discard).
+        False -> genuinely a non-document (not a payment proof) — safe to discard.
 
-    We return False ONLY when every signal is absent at once: the model does not
-    think it is a payment document, AND no payment keyword appears in the OCR text,
-    AND no payment field (amount / reference / LAN / date) was extracted. If even
-    one signal is positive the lead is routed to verification instead of being
-    discarded — so `non_document` carries zero false positives, and everything
-    uncertain lands in `unverified` for a human. Reproducible from the extraction."""
+    True iff the image carries real payment content: a payment keyword in the OCR text
+    OR a hard field (amount / reference / LAN). A genuine payment proof always shows at
+    least one of these (an amount, a UTR, a LAN, or a word like 'paid'/'amount'/'₹'/
+    'no dues'), so it is NEVER discarded → `non_document` has zero false positives. An
+    image with none of them (a keyboard, a photo, a random object) is a true
+    non-document. Anything payment-like that then fails field matching becomes
+    `unverified`, the human-reviewed bucket. Reproducible from the extraction."""
     ev = payment_evidence(extraction)
-    return ev["model_says_payment"] or bool(ev["markers"]) or bool(ev["fields"])
+    return bool(ev["markers"]) or bool(ev["fields"])
 
 
 def run(image, row: dict, ocr_client) -> tuple[bool, str, dict, dict]:
@@ -99,8 +108,6 @@ def run(image, row: dict, ocr_client) -> tuple[bool, str, dict, dict]:
 
     if is_payment_candidate(extraction):
         why = []
-        if ev["model_says_payment"]:
-            why.append("model=payment_document")
         if ev["fields"]:
             why.append("fields:" + ",".join(ev["fields"]))
         if ev["markers"]:

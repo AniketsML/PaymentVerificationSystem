@@ -37,8 +37,8 @@ JOB_LEASE_SECONDS = int(os.environ.get("JOB_LEASE_SECONDS", "300"))   # crashed-
 # cannot tell real white UI from a blank white image. Blank detection is done via
 # contrast_std instead - true blanks are near-flat regardless of brightness.
 IMAGE_QC = {
-    "min_width": 300,            # px - anything smaller is a thumbnail/corrupt
-    "min_height": 500,
+    # NOTE: no min_width/min_height gate — small but legitimate receipts/screenshots
+    # were being discarded. Broken tiny images are still caught by blur/contrast below.
     "dark_brightness_max": 15,   # mean gray below this = near-black
     "blur_laplacian_min": 50.0,  # variance-of-Laplacian below this = unusably blurry
     "low_contrast_std_min": 8.0,  # near-flat image = blank/no content (any brightness)

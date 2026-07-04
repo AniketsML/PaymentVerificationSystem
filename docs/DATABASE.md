@@ -55,9 +55,9 @@ What the dashboard and Metabase read.
 |---|---|---|
 | `lead_id` | TEXT PK | |
 | `lender` | TEXT | |
-| `verification_status` | TEXT | `verified` · `unverified` · `manual_review` · `duplicate` · `non_document` |
+| `verification_status` | TEXT | `verified` · `unverified` · `duplicate` · `non_document` (no `manual_review` — dedup‑flagged leads are `unverified`) |
 | `payment_method` | TEXT | PhonePe / GPay / … / empty = non‑document or duplicate |
-| `outcome` | JSONB | verified fields, or the failure reason + `failed_fields` (for `manual_review`, the verify result is nested under `verification`) |
+| `outcome` | JSONB | verified fields, or the failure reason + `failed_fields`. For a dedup‑flagged `unverified` lead (different loan a/c under a known `lead_code`), the outcome carries `flag` + reason and the verify result is nested under `verification`. |
 | `extracted` | JSONB | the `ExtractedDocument` (doc fields + `field_labels`); empty for `duplicate` (no OCR ran) |
 | `updated_at` | TIMESTAMPTZ | |
 
@@ -117,6 +117,10 @@ WHERE stage='stage2_ocr_classify' AND status='FAIL' GROUP BY 1 ORDER BY 2 DESC;
 ```
 
 **Dedup outcomes (new / duplicate / emi / manual_review / skip):**
+> The `manual_review` verdict is the dedup's *internal* label for "different loan a/c
+> under a known `lead_code`". Its lead's final `verification_status` is `unverified`,
+> not `manual_review` — this query reads the dedup verdict from the event, not the final
+> status.
 ```sql
 SELECT data->>'verdict' AS verdict, count(*) FROM lead_events
 WHERE stage='stage_dedup' GROUP BY 1 ORDER BY 2 DESC;

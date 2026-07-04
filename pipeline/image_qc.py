@@ -2,13 +2,15 @@
 STAGE 1 - Basic image validation. NO preprocessing, NO enhancement.
 
 We do not touch the pixels. We compute a few deterministic quality metrics
-(resolution, brightness, blur, contrast) purely to DISCARD images that are too
-broken to be worth a vision-model call:
+(brightness, blur, contrast) purely to DISCARD images that are too broken to be
+worth a vision-model call:
 
-    - too small        (below min resolution)
     - effectively black / blank white
     - unusably blurry
     - flat / no content (near-zero contrast)
+
+There is deliberately NO minimum-resolution gate — small but legitimate receipts
+and screenshots were being discarded. Resolution is still measured and logged.
 
 Everything that passes goes straight to the model, untouched. FAIL reasons are
 explicit ("too dark", "too blurry", ...) and logged, so a discarded image has a
@@ -48,8 +50,9 @@ def metrics(img: Image.Image) -> dict:
 
 def _judge(m: dict) -> tuple[bool, str]:
     q = settings.IMAGE_QC
-    if m["width"] < q["min_width"] or m["height"] < q["min_height"]:
-        return False, f"resolution too low ({m['width']}x{m['height']})"
+    # NOTE: no minimum-resolution gate. Small but legitimate receipts/screenshots were
+    # being discarded; a genuinely broken tiny image is still caught by the blur/blank
+    # checks below (or handled downstream by the model). Width/height are still logged.
     if m["brightness"] < q["dark_brightness_max"]:
         return False, f"image effectively black (brightness {m['brightness']})"
     # NO brightness upper bound: white-background receipts are bright but valid.

@@ -33,13 +33,13 @@ All optional — sensible defaults are baked in. Override for production.
 ## `config/settings.py`
 
 **Image QC thresholds** (`IMAGE_QC`) — pixel‑quality gate only; images that fail are
-discarded as `non_document`. **No brightness upper bound** — white‑background
-receipts (GPay/PhonePe cards) are bright but valid; blank white is caught by low
-contrast instead.
+discarded as `non_document`. **No minimum‑resolution gate** — small but legitimate
+receipts/screenshots were being discarded; truly broken tiny images are still caught by
+blur/contrast. **No brightness upper bound** either — white‑background receipts
+(GPay/PhonePe cards) are bright but valid; blank white is caught by low contrast.
 
 | Key | Default | Discards when |
 |---|---|---|
-| `min_width` / `min_height` | `300` / `500` | image smaller than this (thumbnail/corrupt) |
 | `dark_brightness_max` | `15` | mean gray below this (near‑black) |
 | `blur_laplacian_min` | `50.0` | focus measure below this (unusably blurry) |
 | `low_contrast_std_min` | `8.0` | contrast std below this (blank/flat, any brightness) |
@@ -69,7 +69,7 @@ One object per lender code (`institute_name`). Verification reads this.
 | `needs_lan` | Whether the LAN check runs. |
 | `date_tolerance_days` | Max allowed gap between document date and system `payment_date`. |
 | `amount_tolerance_rupees` | Max allowed difference in amount (default ₹1). |
-| `reconciliation_dependent` | *(optional)* If `true`, the lender is **never** auto‑verified from a document (e.g. `SMFG_RURAL` cash collection) — always `unverified`. |
+| `reconciliation_dependent` | *(optional)* If `true`, the lender is **never** auto‑verified from a document — always `unverified`. The mechanism still exists, but **no lender currently sets it** (`SMFG_RURAL` was reclassified as normally verifiable). Use it only when a document can never prove its own payment (e.g. cash needing a deposit‑reconciliation feed). |
 
 `__default__` is used for any lender code not present (date + amount + receiver,
 ±3 days, ±₹1, no LAN).
@@ -87,19 +87,29 @@ matches against.
 
 Matching is normalized (lowercase, alphanumeric only) and lenient: a lead's receiver
 passes if any listed name equals/contains the document's receiver field **or** appears
-anywhere in the OCR text. A lender **missing** from this file has an empty allowlist,
-so its receiver check can never pass → those leads are `unverified` even with a
-correct document.
+anywhere in the OCR text.
+
+**Missing lender → fallback (not an automatic fail).** A lender absent from this file
+has no explicit allowlist; the receiver check then falls back to the lender's **own
+name** (from `institute_name`, e.g. `VARTHANA` → "Varthana", `MOBIKWIK_SOE` →
+"MobiKwik"). A document whose payee clearly *is* the lender still passes. The match is
+strict (the full lender name must appear; codes shorter than 4 chars are ignored to
+avoid spurious hits). Add explicit names here when you want tighter matching or the
+lender's payee differs from its code (e.g. a payment aggregator like `Easebuzz`).
 
 ---
 
 ## Common tasks
 
 **Onboard a new lender** (e.g. `VARTHANA`):
-1. Add its accepted payee names to `lender_receivers.json`.
+1. *(Optional)* Add its accepted payee names to `lender_receivers.json`. If you skip
+   this, the receiver check falls back to the lender's own name (above) — so a lender
+   whose payee matches its `institute_name` works with no config at all. Add names only
+   when the payee differs from the code (aggregators, banks, etc.).
 2. Optionally add a rule to `lender_rules.json` (else `__default__` applies).
-No restart of the pipeline logic needed beyond restarting the process so the JSON is
-re‑read (the files are loaded at import in [pipeline/verify.py](../pipeline/verify.py)).
+**Restart the process** after any config edit so the JSON is re‑read — the files are
+loaded once at import in [pipeline/verify.py](../pipeline/verify.py), so a running server keeps the old
+values until restarted.
 
 **Loosen a lender's date window** (e.g. No‑Dues certificates issued days late):
 set `"date_tolerance_days": 15` on that lender in `lender_rules.json`.

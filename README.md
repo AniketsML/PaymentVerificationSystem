@@ -24,17 +24,21 @@ CSV / Excel upload
                                     ▼  process_lead(...)
    D  DEDUP       CSV identity (lead_code+loan+amount+month) — BEFORE any OCR
                     exact re-submission ............ → duplicate  (no model call)
-                    different loan a/c, same lead ... → manual_review
+                    different loan a/c, same lead ... → unverified (flagged for review)
    0  LOAD IMAGE   fetch URL/local, decode ......... fail → non_document
    1  IMAGE QC     resolution/brightness/blur/contrast (NO enhancement) → non_document
-   2  MEDHA VLM    OCR + "is this a valid payment doc?" + payment method → non_document
+   2  MEDHA VLM    OCR + payment method; non_document ONLY on zero payment
+                    evidence (model + text + fields all negative) — else → verify
    3  EXTRACT      structured fields (amount/date/receiver/LAN) + labels
    4  VERIFY       deterministic match vs the CSV row + lender rules
                     all mandatory matched → verified
                     a mandatory mismatch  → unverified
 ```
 
-**Outcomes:** `verified` · `unverified` · `manual_review` · `duplicate` · `non_document`.
+**Outcomes:** `verified` · `unverified` · `duplicate` · `non_document`. A lead is
+only `verified` on positively matched evidence and only `non_document` when there is
+**no** payment evidence at all; everything in between (including dedup‑flagged and
+formerly `manual_review` leads) is `unverified` for a human to check.
 **Mandatory fields:** every lender → date + amount + receiver; SMFG lenders → also loan account number (LAN).
 **Duplicate identity:** `lead_code + loan_account_number + amount + payment-month` (see [docs/ARCHITECTURE.md §7](docs/ARCHITECTURE.md#7-duplicate-guard)).
 

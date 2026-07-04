@@ -103,12 +103,12 @@ and order are unchanged.
 
 | Stage | Event name | What it does | Failure → |
 |---|---|---|---|
-| D | `stage_dedup` | **CSV‑identity duplicate guard, runs first — before any OCR** ([pg_dedup.py](../observability/pg_dedup.py)). See §7. | `duplicate` (exact match, no model call) · continues + flags `manual_review` (different loan a/c) |
+| D | `stage_dedup` | **CSV‑identity duplicate guard, runs first — before any OCR** ([pg_dedup.py](../observability/pg_dedup.py)). See §7. | `duplicate` (exact match, no model call) · continues + flags a different loan a/c (final status `unverified`) |
 | 0 | `stage0_load_image` | Fetch pixels from URL/local/data‑URI and decode ([image_source.py](../pipeline/image_source.py)). Skipped in test/precomputed mode. | `non_document` ("image could not be loaded: …") |
-| 1 | `stage1_image_qc` | **Basic validation only, no enhancement** ([image_qc.py](../pipeline/image_qc.py)): min resolution, not near‑black, not too blurry, not blank/flat. | `non_document` (image discarded, reason logged) |
-| 2 | `stage2_ocr_classify` | Call the **Medha** vision model, then decide "valid payment document?" + label the payment method ([ocr_classify.py](../pipeline/ocr_classify.py)). Logs the **raw model response**, model latency, and extracted fields. | `non_document` (what the image is, logged) |
+| 1 | `stage1_image_qc` | **Basic validation only, no enhancement** ([image_qc.py](../pipeline/image_qc.py)): not near‑black, not too blurry, not blank/flat. **No minimum‑resolution gate** (small legit receipts were being discarded). | `non_document` (image discarded, reason logged) |
+| 2 | `stage2_ocr_classify` | Call the **Medha** vision model, then apply the **deterministic non‑document gate** + label the payment method ([ocr_classify.py](../pipeline/ocr_classify.py)). Logs the **raw model response**, model latency, extracted fields, and the `evidence` behind the decision. | `non_document` **only** when there is zero payment evidence (see §5); anything with a hint of evidence continues to verify |
 | 3 | `stage3_extract` | Build the structured `ExtractedDocument` and field labels ([extract.py](../pipeline/extract.py)). | — |
-| 4 | `stage4_verify` | Deterministic match vs the CSV row + lender rules ([verify.py](../pipeline/verify.py)). | `unverified` (which field failed) — or `manual_review` if the dedup flagged it |
+| 4 | `stage4_verify` | Deterministic match vs the CSV row + lender rules ([verify.py](../pipeline/verify.py)). | `unverified` (which field failed — or the dedup different‑loan flag) |
 | — | `lead_closed` | Persist the final row to `lead_results`. | — |
 
 **Image handling detail:** in live mode the image is downloaded once and passed as a
@@ -128,11 +128,21 @@ document. If a document is wrongly accepted/rejected, check them in this order:
    `is_payment_document` (true/false) and a `document_type`. This is the primary
    classifier. Loan **No‑Dues / NOC / closure** certificates are explicitly told to
    count as valid payment proof.
-2. **The deterministic marker gate** ([ocr_classify.py](../pipeline/ocr_classify.py) `looks_like_payment`) — even
-   if the model says `true`, the lead is only accepted if the OCR text contains a
-   payment **marker keyword** (`_PAYMENT_MARKERS`, which includes No‑Dues terms) **or**
-   an extracted value (amount / reference / LAN). This guards against the model
-   over‑accepting blank/irrelevant images.
+2. **The deterministic non‑document gate** ([ocr_classify.py](../pipeline/ocr_classify.py) `is_payment_candidate` /
+   `payment_evidence`) — this decides `non_document` vs "payment candidate" from actual
+   **payment content only**: a payment **marker keyword** in the OCR text
+   (`_PAYMENT_MARKERS`, which includes No‑Dues terms) **or** a hard extracted field
+   (**amount / reference / LAN**). It deliberately does **not** use the model's
+   `is_payment_document` flag (it over‑accepts non‑payments like a keyboard photo and
+   occasionally rejects real ones) and does **not** count a lone **date** (calendars,
+   screenshots and product photos all carry dates). A lead is `non_document` **only
+   when there is no payment content at all**; if any marker or hard field is present it
+   goes to verification. A genuine payment proof always shows an amount / reference /
+   LAN or a word like *paid / amount / ₹ / no dues*, so it is **never** discarded
+   (`non_document` = zero false positives), while a keyboard/photo/random object with
+   none of these is a true non‑document. Anything payment‑like that then fails matching
+   becomes `unverified`. Reproducible from the extraction; logged under
+   `metrics.evidence` (`markers`, `fields`, and `model_says_payment` for context only).
 3. **Payment‑method keywords** ([config/settings.py](../config/settings.py) `PAYMENT_METHOD_KEYWORDS`) — only
    decides *which* method label to show (PhonePe/GPay/…); does not affect valid/invalid.
 
@@ -157,21 +167,32 @@ Unknown lenders fall back to `__default__` (date + amount + receiver, ±3 days, 
 - `check_date` — parses both dates (day‑first, fuzzy); pass if `|gap| ≤ date_tolerance_days`.
 - `check_amount` — numeric; pass if `|doc − system| ≤ amount_tolerance_rupees` (₹1).
 - `check_receiver` — the document's receiver (or **anywhere in the OCR text**) must
-  match a name in that lender's allowlist ([config/lender_receivers.json](../config/lender_receivers.json)).
+  match a name in that lender's allowlist ([config/lender_receivers.json](../config/lender_receivers.json)). **Fallback:**
+  if a lender has **no allowlist configured**, the check falls back to the lender's own
+  name (from `institute_name`) — a document whose payee clearly *is* the lender still
+  passes (strict match: the full lender name must appear; short/generic codes are
+  ignored). Explicit allowlists always take precedence.
 - `check_lan` (SMFG only) — digits equal, or one contains the other (len ≥ 8).
 
 **Decision:**
 - **all** mandatory checks pass → `verified`.
 - any mandatory check fails (mismatch or unreadable) → `unverified`, with a reason
   string naming each failed field.
-- Lenders flagged `reconciliation_dependent` (e.g. `SMFG_RURAL`) are **never**
-  auto‑verified from a document — they always return `unverified` and need a
-  cash‑reconciliation feed.
+- a lead the dedup flagged (a different loan account under a known `lead_code`) is
+  forced to `unverified` even if the fields match — the dedup concern is recorded in
+  the outcome (`flag` + reason) and the field‑by‑field verify result is nested under
+  `outcome.verification` for the reviewer.
+- `reconciliation_dependent` (optional per‑lender flag) still forces `unverified`
+  regardless of the fields, but **no lender currently sets it** — `SMFG_RURAL` was
+  reclassified as normally verifiable. Set the flag on a lender only if a document can
+  never prove its payment on its own (e.g. cash that must be reconciled against a
+  deposit feed).
 
 > Two things that legitimately cause `unverified` on a *correct* document: a receiver
-> whose lender isn't in the allowlist, and a date/amount that's genuinely outside
-> tolerance (e.g. a No‑Dues certificate issued days after the payment). Both are
-> config fixes, not code. See [DEBUGGING.md](DEBUGGING.md).
+> that is **neither** in the lender's allowlist **nor** the lender's own name (the
+> fallback), and a date/amount that's genuinely outside tolerance (e.g. a No‑Dues
+> certificate issued days after the payment). Both are config fixes, not code. See
+> [DEBUGGING.md](DEBUGGING.md).
 
 ---
 
@@ -195,11 +216,14 @@ lead_code trimmed.
 | `lead_code` never seen | `new` | record identity → process normally |
 | exact 4‑tuple already processed | **`duplicate`** | short‑circuit **before OCR** — final status `duplicate` |
 | same lead **+ same loan**, different month/amount | `emi` | legitimate installment → process normally |
-| `lead_code` seen, but a **different loan account** | **`manual_review`** | still runs full OCR (reviewer sees the data), final status `manual_review` |
+| `lead_code` seen, but a **different loan account** | **`manual_review`** *(internal verdict)* | still runs full OCR (reviewer sees the data); **final status `unverified`**, with the dedup concern in the outcome |
 
-- Runs at stage **D** (first). Only exact duplicates short‑circuit; `manual_review`
-  continues through OCR + verify and the result is attached under
-  `outcome.verification`.
+- Runs at stage **D** (first). Only exact duplicates short‑circuit; the different‑loan
+  case continues through OCR + verify and is surfaced as `unverified` — the dedup verdict
+  string (`manual_review`) still appears in the `stage_dedup` event data, but the lead's
+  final `verification_status` is `unverified` and the verify result is attached under
+  `outcome.verification`. (There is no separate `manual_review` final status; every such
+  lead is manually checked in the `unverified` bucket.)
 - `seen_payments` (the old reference ledger) is gone; `processed_payments` is
   backfilled from history so dedup works across uploads. `truncate_all()` clears it for
   a fresh run; in production you retain and backfill it from payment history.

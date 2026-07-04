@@ -35,10 +35,9 @@ disagrees.
 | Status | Meaning | Decided at |
 |---|---|---|
 | `verified` | All mandatory fields matched on positive evidence. | `stage4_verify` |
-| `unverified` | A mandatory field mismatched/unreadable, or the lender is reconciliation‑dependent. | `stage4_verify` |
+| `unverified` | A mandatory field mismatched/unreadable, **or** the dedup flagged a different loan account under a known `lead_code` (verify result nested under `outcome.verification`). This is the single "needs a human" bucket. | `stage_dedup` → `stage4_verify` |
 | `duplicate` | Exact re‑submission — same `lead_code + loan + amount + month` already processed. Short‑circuits before OCR. | `stage_dedup` |
-| `manual_review` | A different loan account under an already‑seen `lead_code` (suspicious). Full OCR still runs; verify result is under `outcome.verification`. | `stage_dedup` → `stage4_verify` |
-| `non_document` | Image couldn't be loaded, was discarded at QC, or the model said it isn't a payment document. | `stage0` / `stage1` / `stage2` |
+| `non_document` | Image couldn't be loaded, was discarded at QC, **or** there was **zero** payment evidence (model + OCR text + extracted fields all negative). Borderline cases go to `unverified`, not here. | `stage0` / `stage1` / `stage2` |
 | `failed` *(job only)* | The pipeline threw an exception `max_attempts` times. See `jobs.last_error`. | worker |
 
 ---
@@ -51,33 +50,46 @@ Look at which stage FAILed (`... WHERE lead_id=X ORDER BY id`):
 - **`stage0_load_image` FAIL** — the image URL couldn't be fetched/decoded (dead link,
   403, non‑image). Reason names the error. Fix the source URL/access.
 - **`stage1_image_qc` FAIL** — discarded on pixel quality. Reason is precise
-  ("resolution too low", "too blurry", "blank / no content", "near‑black"). If it's a
-  *real* receipt being rejected, loosen the relevant threshold in
-  `settings.IMAGE_QC` (see [CONFIGURATION.md](CONFIGURATION.md)).
-- **`stage2_ocr_classify` FAIL** — the model said it isn't a payment document, **or**
-  the deterministic marker gate found no payment markers/values. Check
-  `data.raw_model_response` and `data.full_text` on that event. If it's a valid proof
-  the model mislabelled, that's a prompt/marker matter (see
-  [ARCHITECTURE.md §5](ARCHITECTURE.md#5-classification--where-valid-document-is-decided)).
+  ("too blurry", "blank / no content", "near‑black"). There is **no** resolution gate
+  anymore, so small images are not rejected here. If it's a *real* receipt being
+  rejected, loosen the relevant threshold in `settings.IMAGE_QC` (see [CONFIGURATION.md](CONFIGURATION.md)).
+- **`stage2_ocr_classify` FAIL** — reaching `non_document` here means the image has
+  **no payment content**: no payment marker in the OCR text **and** no hard field
+  (amount / reference / LAN). The model's `is_payment_document` flag and a lone date do
+  **not** count — so a keyboard/photo/random object the model mislabels as a receipt
+  still lands here, correctly. Check `metrics.evidence`, `data.raw_model_response`, and
+  `data.full_text` on that event. If it's a valid proof but the OCR text/fields were
+  empty, that's a prompt/OCR/marker matter (see
+  [ARCHITECTURE.md §5](ARCHITECTURE.md#5-classification--where-valid-document-is-decided)). If any marker or
+  hard field existed, the lead would have gone to `unverified`, not `non_document`.
 
 ### Expected `verified`, got `unverified`
 Read `outcome.reason` on the result — it names each failed field:
 
-- **`receiver: receiver not among accepted names for <LENDER>`** — the lender isn't in
-  `lender_receivers.json`, or the printed payee isn't in its allowlist. **Most common
-  cause of a "wrong" unverified.** Add the lender/name (see [CONFIGURATION.md](CONFIGURATION.md)).
+- **`receiver: receiver not among accepted names for <LENDER>`** — the lender *has* an
+  allowlist, but the printed payee isn't in it. Add the payee name (see [CONFIGURATION.md](CONFIGURATION.md)).
+- **`receiver: no accepted-receiver list configured for <LENDER>, and lender name not
+  found on document`** — the lender has **no allowlist**, so the check fell back to the
+  lender's own name and that didn't appear on the document either. Either the payee
+  genuinely isn't the lender (correct `unverified`), or add the lender's real payee
+  names to `lender_receivers.json`.
 - **`date: date mismatch (gap Nd > Md …)`** — document date is outside the lender's
   `date_tolerance_days`. Legit for No‑Dues/late certificates → widen the tolerance.
 - **`amount: amount mismatch (doc X vs system Y)`** — the receipt amount differs from
   the CSV `payment_amount` (compare in the drawer). If the receipt shows a different
   figure (e.g. total vs instalment), it's a data question, not a bug.
 - **`loan_account_number …`** *(SMFG)* — LAN unreadable or different.
-- **`requires cash-deposit reconciliation …`** — `reconciliation_dependent` lender
-  (e.g. `SMFG_RURAL`); never verifiable from the document alone.
+- **`different loan account under an already-seen lead_code …`** — the dedup flag. The
+  lead ran full OCR; the field‑by‑field verify result is under `outcome.verification`.
+  It's `unverified` on purpose (needs a human), even if the fields matched.
+- **`requires cash-deposit reconciliation …`** — only if a lender is explicitly
+  `reconciliation_dependent`. **No lender is by default** (`SMFG_RURAL` is now normally
+  verifiable); you'll only see this if you set the flag yourself.
 
-> Duplicates and dedup‑flagged leads are **not** `unverified` — they get their own
-> `duplicate` / `manual_review` status at `stage_dedup` (before OCR). See the status
-> reference above and [ARCHITECTURE.md §7](ARCHITECTURE.md#7-duplicate-guard).
+> **Exact duplicates** get their own `duplicate` status at `stage_dedup` (before OCR).
+> A **different‑loan‑account** flag no longer has a separate status — it runs full OCR
+> and lands in `unverified` with the concern in `outcome.flag` / `outcome.reason`. See
+> the status reference above and [ARCHITECTURE.md §7](ARCHITECTURE.md#7-duplicate-guard).
 
 ### Got `verified`, but you think it's wrong (false positive)
 Open the drawer and compare **CSV input vs Extracted**. Likely causes:
