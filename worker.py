@@ -32,9 +32,13 @@ _stop = threading.Event()
 def process_job(job: dict, logger, dedup) -> str:
     row = job["row_json"] or {}
     precomputed = bool(job["precomputed"])
+    is_test = bool(job.get("is_test"))
     ocr = PrecomputedOCR() if precomputed else MedhaVisionOCR()
+    # test runs use the REAL pipeline — including duplicate detection, which is scoped to
+    # the sandbox ledger by is_test. Every write carries is_test so rows are born flagged.
     res = process_lead(job["lead_id"], job.get("lender", ""), job.get("image_url", ""),
-                       row, ocr, logger, skip_image_qc=precomputed, dedup=dedup)
+                       row, ocr, logger, skip_image_qc=precomputed,
+                       dedup=dedup, is_test=is_test)
     return res["verification_status"]
 
 
@@ -46,6 +50,12 @@ def run_worker_loop(name="worker", idle_sleep=0.75):
             if not job:
                 _stop.wait(idle_sleep)
                 continue
+            if job.get("prev_status") == "in_progress":
+                # a prior attempt's lease expired (worker crash/hang) and we re-claimed it
+                logger.log(job["lead_id"], "lease_reclaim", "PASS",
+                           reason=f"reclaimed expired lease (attempt {(job.get('prev_attempts') or 0) + 1})",
+                           metrics={"prev_attempts": job.get("prev_attempts")},
+                           is_test=bool(job.get("is_test")))
             try:
                 status = process_job(job, logger, dedup)
                 jobs.complete(job["job_id"], status)

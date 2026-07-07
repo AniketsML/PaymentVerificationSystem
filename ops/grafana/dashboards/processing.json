@@ -1,0 +1,102 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "title": "Payment Verification — Processing",
+  "tags": ["payment-verification", "processing"],
+  "time": { "from": "now-2d", "to": "now" },
+  "refresh": "30s",
+  "timezone": "browser",
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Pending",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "text", "value": null } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "auto" },
+      "targets": [ { "refId": "A", "format": "table", "rawQuery": true, "rawSql": "SELECT count(*) AS pending FROM jobs WHERE status='pending'", "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" } } ]
+    },
+    {
+      "id": 2, "type": "stat", "title": "In progress",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "blue", "value": null } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "auto" },
+      "targets": [ { "refId": "A", "format": "table", "rawQuery": true, "rawSql": "SELECT count(*) AS in_progress FROM jobs WHERE status='in_progress'", "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" } } ]
+    },
+    {
+      "id": 3, "type": "stat", "title": "Failed jobs",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "auto" },
+      "targets": [ { "refId": "A", "format": "table", "rawQuery": true, "rawSql": "SELECT count(*) AS failed FROM jobs WHERE status='failed'", "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" } } ]
+    },
+    {
+      "id": 4, "type": "stat", "title": "Model errors (total)",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "auto" },
+      "targets": [ { "refId": "A", "format": "table", "rawQuery": true, "rawSql": "SELECT count(*) AS model_errors FROM lead_events WHERE stage='stage2_ocr_classify' AND COALESCE(metrics->>'model_error','') <> ''", "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" } } ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Model latency (Medha call) — p50 / p95 / p99",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" },
+      "fieldConfig": { "defaults": { "unit": "ms", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 6, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "format": "time_series", "rawQuery": true, "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" }, "rawSql": "SELECT $__timeGroupAlias(ts, '1m'), percentile_cont(0.5) WITHIN GROUP (ORDER BY ms) AS \"p50\", percentile_cont(0.95) WITHIN GROUP (ORDER BY ms) AS \"p95\", percentile_cont(0.99) WITHIN GROUP (ORDER BY ms) AS \"p99\" FROM lead_events WHERE stage='stage2_ocr_classify' AND ms IS NOT NULL AND $__timeFilter(ts) GROUP BY 1 ORDER BY 1" } ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Throughput — leads closed / min",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 60, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "targets": [ { "refId": "A", "format": "time_series", "rawQuery": true, "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" }, "rawSql": "SELECT $__timeGroupAlias(ts, '1m'), count(*) AS \"leads closed\" FROM lead_events WHERE stage='lead_closed' AND $__timeFilter(ts) GROUP BY 1 ORDER BY 1" } ]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Model errors over time",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "red" }, "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 70, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "targets": [ { "refId": "A", "format": "time_series", "rawQuery": true, "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" }, "rawSql": "SELECT $__timeGroupAlias(ts, '5m'), count(*) AS \"model errors\" FROM lead_events WHERE stage='stage2_ocr_classify' AND COALESCE(metrics->>'model_error','') <> '' AND $__timeFilter(ts) GROUP BY 1 ORDER BY 1" } ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Outcomes over time",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 70, "stacking": { "mode": "normal" }, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [ { "refId": "A", "format": "time_series", "rawQuery": true, "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" }, "rawSql": "SELECT $__timeGroupAlias(ts, '5m'), count(*) FILTER (WHERE data->>'verification_status'='verified') AS verified, count(*) FILTER (WHERE data->>'verification_status'='unverified') AS unverified, count(*) FILTER (WHERE data->>'verification_status'='non_document') AS non_document, count(*) FILTER (WHERE data->>'verification_status'='duplicate') AS duplicate FROM lead_events WHERE stage='lead_closed' AND $__timeFilter(ts) GROUP BY 1 ORDER BY 1" } ]
+    },
+    {
+      "id": 9, "type": "table", "title": "Time per stage (whole dataset)",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 21 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto" } }, "overrides": [] },
+      "options": { "showHeader": true },
+      "targets": [ { "refId": "A", "format": "table", "rawQuery": true, "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" }, "rawSql": "SELECT stage, count(*) AS n, round(avg(ms)) AS avg_ms, round(percentile_cont(0.95) WITHIN GROUP (ORDER BY ms)) AS p95_ms FROM lead_events WHERE ms IS NOT NULL GROUP BY stage ORDER BY avg(ms) DESC NULLS LAST" } ]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Truncated responses (finish_reason = length)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "orange" }, "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 70, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "targets": [ { "refId": "A", "format": "time_series", "rawQuery": true, "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" }, "rawSql": "SELECT $__timeGroupAlias(ts, '5m'), count(*) AS \"truncated\" FROM lead_events WHERE stage='stage2_ocr_classify' AND metrics->>'finish_reason'='length' AND $__timeFilter(ts) GROUP BY 1 ORDER BY 1" } ]
+    },
+    {
+      "id": 11, "type": "table", "title": "Model HTTP status distribution",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto" } }, "overrides": [] },
+      "options": { "showHeader": true },
+      "targets": [ { "refId": "A", "format": "table", "rawQuery": true, "datasource": { "type": "grafana-postgresql-datasource", "uid": "pv-postgres" }, "rawSql": "SELECT COALESCE(metrics->>'http_status','(none)') AS http_status, count(*) AS n FROM lead_events WHERE stage='stage2_ocr_classify' GROUP BY 1 ORDER BY 2 DESC" } ]
+    }
+  ]
+}

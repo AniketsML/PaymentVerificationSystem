@@ -178,6 +178,12 @@ Unknown lenders fall back to `__default__` (date + amount + receiver, ±3 days, 
 - **all** mandatory checks pass → `verified`.
 - any mandatory check fails (mismatch or unreadable) → `unverified`, with a reason
   string naming each failed field.
+- **Direction guard:** a document that reads as an **incoming credit to the submitter's
+  own account** ("credited to your account", with no paid/debited/sent‑to language) is
+  never auto‑verified — it is not proof of an *outgoing* loan repayment, so it is routed
+  to `unverified` (flag `incoming_credit`) even if every field matches. Any
+  outgoing‑payment phrase stands the guard down, so genuine debit/paid receipts are
+  unaffected.
 - a lead the dedup flagged (a different loan account under a known `lead_code`) is
   forced to `unverified` even if the fields match — the dedup concern is recorded in
   the outcome (`flag` + reason) and the field‑by‑field verify result is nested under

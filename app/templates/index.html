@@ -31,9 +31,15 @@
         </div>
       </div>
 
+      <div class="ws-switch" id="wsSwitch" role="tablist" aria-label="Workspace">
+        <button class="ws-opt active" data-scope="real"><span class="ws-dot live"></span>Live</button>
+        <button class="ws-opt" data-scope="test"><span class="ws-dot test"></span>Test</button>
+      </div>
+
       <nav class="rail-nav">
         <button class="nav-item active" data-view="dashboard"><span class="idx">01</span><span>Dashboard</span></button>
         <button class="nav-item" data-view="verify"><span class="idx">02</span><span>Verify</span></button>
+        <button class="nav-item" data-view="observability"><span class="idx">03</span><span>Observability</span></button>
       </nav>
 
       <div class="rail-foot">
@@ -47,6 +53,11 @@
 
     <!-- ── stage ────────────────────────────────────────────── -->
     <main class="stage">
+      <div class="scope-banner hidden" id="scopeBanner">
+        <span class="sb-badge">🧪 TEST WORKSPACE</span>
+        <span class="sb-text">Everything here — uploads, dashboard, observability — runs on <b>sandbox data</b>. It's temporary and auto-cleared; nothing touches your live records.</span>
+        <button class="btn line small" id="clearWsBtn">Clear workspace</button>
+      </div>
       <header class="stage-top">
         <div class="stage-head">
           <div class="eyebrow" id="pageEyebrow">Overview</div>
@@ -110,6 +121,74 @@
         </section>
       </section>
 
+      <!-- ═══ OBSERVABILITY ═══ -->
+      <section class="view hidden" id="view-observability">
+        <div class="statband" id="obsKpis"></div>
+
+        <!-- accuracy leads: is the system actually RIGHT? (ground truth = human review) -->
+        <div class="panelrow even">
+          <section class="panel">
+            <div class="panel-head"><h3>Verdict accuracy <span class="n">is it actually right?</span></h3><span class="tag" id="accTag">FROM REVIEW</span></div>
+            <div id="accKpis"></div>
+            <canvas id="accChart" height="170" style="margin-top:16px"></canvas>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Where the system is wrong</h3><span class="tag">OVERTURNED</span></div>
+            <div id="confusionBox"></div>
+          </section>
+        </div>
+
+        <div class="panelrow even">
+          <section class="panel">
+            <div class="panel-head"><h3>Model latency over time</h3><span class="tag">P50 · P95 · MS</span></div>
+            <canvas id="latChart" height="230"></canvas>
+            <div id="latNote" class="muted" style="font-size:12px;margin-top:10px"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Throughput</h3><span class="tag">LEADS / MIN</span></div>
+            <canvas id="tputChart" height="230"></canvas>
+          </section>
+        </div>
+
+        <div class="panelrow even">
+          <section class="panel">
+            <div class="panel-head"><h3>Time per stage</h3><span class="tag">AVG MS</span></div>
+            <canvas id="stageChart" height="250"></canvas>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Why leads are unverified</h3><span class="tag">FAILED FIELD</span></div>
+            <canvas id="reasonChart" height="250"></canvas>
+          </section>
+        </div>
+
+        <div class="panelrow even">
+          <section class="panel">
+            <div class="panel-head"><h3>Extraction fill-rate</h3><span class="tag">DRIFT SIGNAL</span></div>
+            <div id="fillRates"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Queue &amp; errors</h3><span class="tag">OPS</span></div>
+            <div id="queueBox"></div>
+          </section>
+        </div>
+
+        <section class="panel tablepanel">
+          <div class="tabrow"><div class="panel-head" style="border:0;margin:0;padding:0"><h3>Per-lender funnel</h3></div><span class="count" id="funnelCount">—</span></div>
+          <div class="tablewrap">
+            <table>
+              <thead><tr><th>Lender</th><th>Total</th><th>Verified</th><th>Unverified</th><th>Duplicate</th><th>Non-doc</th><th>Verify rate</th></tr></thead>
+              <tbody id="funnelBody"></tbody>
+            </table>
+            <div class="empty hidden" id="funnelEmpty">No leads yet.</div>
+          </div>
+        </section>
+
+        <section class="panel" id="coveragePanel" style="margin-top:22px">
+          <div class="panel-head"><h3>Config coverage gaps</h3><span class="tag" id="coverageTag">—</span></div>
+          <div id="coverageBox"></div>
+        </section>
+      </section>
+
       <!-- ═══ VERIFY ═══ -->
       <section class="view hidden" id="view-verify">
         <div class="verifyrow">
@@ -127,27 +206,14 @@
               <label class="fld">Image column<input id="imageCol" value="payment_document"></label>
               <label class="fld">Lead-ID column<input id="idCol" placeholder="row index if blank"></label>
               <label class="fld wide">Image root <span class="hint">(local filenames only)</span><input id="imageRoot" placeholder="C:\path\to\images"></label>
-              <label class="switch-row"><span>Test mode <span class="hint">— ex_* cols, no model</span></span>
-                <span class="switch"><input type="checkbox" id="precomputed"><span class="slider"></span></span></label>
             </div>
             <button class="btn solid big" id="runCsv" disabled>Run batch</button>
-
-            <div class="run-panel hidden" id="runPanel">
-              <div class="progress"><div class="bar" id="progBar"></div></div>
-              <div class="run-meta"><span id="progText">0 / 0</span><span id="progElapsed"></span></div>
-              <div class="mini-counts" id="miniCounts"></div>
-              <div class="live-list" id="liveList"></div>
-              <div class="done-banner hidden" id="doneBanner">
-                <span>Batch complete</span>
-                <a class="btn line small" id="dlBtn" href="#">Download CSV</a>
-              </div>
-            </div>
           </section>
 
           <!-- single image -->
           <section class="panel">
-            <div class="panel-head"><h3>Single image</h3><span class="tag">INSTANT</span></div>
-            <p class="lede">Drop one receipt. Add expected values to verify, or leave blank just to see the extraction.</p>
+            <div class="panel-head"><h3>Single image — quick check</h3><span class="tag">EPHEMERAL · NOT SAVED</span></div>
+            <p class="lede">Drop one receipt to run it through the real pipeline and see the result inline. Add expected values to verify, or leave blank just to see the extraction. <span class="muted">Nothing is saved — pure inspection, in any workspace.</span></p>
             <div class="dropzone" id="imgDrop">
               <div class="dz-mark">▣</div>
               <div class="dz-main" id="imgName">Drop an image — or click</div>
@@ -161,9 +227,23 @@
               <label class="fld">Date<input id="siDate" placeholder="2025-10-10"></label>
               <label class="fld">Loan a/c<input id="siLan" placeholder="optional"></label>
             </div>
-            <button class="btn solid big" id="runImg" disabled>Extract &amp; verify</button>
+            <button class="btn solid big" id="runImg" disabled>Run test</button>
+            <div id="imgResult" class="single-result hidden"></div>
           </section>
         </div>
+
+        <!-- full-width run panel (appears below both cards during a batch) -->
+        <section class="panel run-panel hidden" id="runPanel">
+          <div class="panel-head"><h3>Batch progress</h3><span class="tag" id="runScopeTag">LIVE</span></div>
+          <div class="progress"><div class="bar" id="progBar"></div></div>
+          <div class="run-meta"><span id="progText">0 / 0</span><span id="progElapsed"></span></div>
+          <div class="mini-counts" id="miniCounts"></div>
+          <div class="live-list" id="liveList"></div>
+          <div class="done-banner hidden" id="doneBanner">
+            <span>Batch complete</span>
+            <a class="btn line small" id="dlBtn" href="#">Download CSV</a>
+          </div>
+        </section>
       </section>
     </main>
   </div>
@@ -183,6 +263,16 @@
       </div>
     </div>
     <div class="drawer-body" id="drawerBody"></div>
+  </aside>
+
+  <!-- ── metric drill-down modal ─────────────────────────────── -->
+  <div class="modal-scrim" id="obsScrim"></div>
+  <aside class="modal" id="obsModal" aria-label="Metric detail">
+    <div class="modal-head">
+      <div><div class="dh-eyebrow">Detail</div><div class="modal-title" id="obsModalTitle">—</div></div>
+      <button class="btn line small" id="obsModalClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body" id="obsModalBody"></div>
   </aside>
 
   <div class="toasts" id="toasts"></div>

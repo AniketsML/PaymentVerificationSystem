@@ -16,8 +16,10 @@ duplicate ledger - re-running a lead never looks like a duplicate payment.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import time
 
 from psycopg.types.json import Jsonb
@@ -26,46 +28,130 @@ from config import settings
 from db import pg
 
 
+def _default_lead_id(row: dict) -> str:
+    """Stable content-hash id used when no id column is chosen. The SAME row re-uploaded
+    yields the SAME id (so resume/idempotency still works), but rows from a DIFFERENT
+    file no longer collide on LEAD-0..N and get silently skipped as 'already done'."""
+    blob = json.dumps(row, sort_keys=True, ensure_ascii=False, default=str)
+    return "LEAD-" + hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
+
+
 def _safe(obj):
     return json.loads(json.dumps(obj or {}, ensure_ascii=False, default=str))
 
 
+# Columns we'll look in for the image link, in priority order. The user-selected column
+# is tried first; these are fallbacks so a link is found even if the wrong column (or a
+# plural/singular variant) was chosen — maximising image visibility.
+_IMG_COL_FALLBACKS = ("payment_documents", "payment_document", "payment_proof",
+                      "payment_receipt", "document_url", "image_url", "image", "document")
+
+_URL_RE = re.compile(r'https?://[^\s"\'\\\]}<>]+')
+_IMG_EXT_RE = re.compile(r'\.(jpe?g|png|webp|gif|bmp|tiff?|heic|heif)(\?|#|$)', re.I)
+
+
+def _looks_like_image(link: str) -> bool:
+    """A link that is clearly an image — by data-URI type or a file extension. Used to
+    prefer the right URL when scanning unknown columns."""
+    s = (link or "").lower()
+    return s.startswith("data:image/") or bool(_IMG_EXT_RE.search(s))
+
+
+def _clean_source(value) -> str:
+    """Pull a loadable image source out of a raw cell value.
+
+    Handles plain URLs / local paths AND the JSON-array-encoded form some exports use,
+    e.g.  ["https://.../img.jpeg"]  or the double-escaped  "[\\"https://...\\"]"  — a
+    URL regex lifts the real link straight out of that garbage. Only the FIRST source is
+    used (one image per lead)."""
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    m = _URL_RE.search(s)
+    if m:
+        return m.group(0).rstrip('.,;')          # first http(s) URL, even inside ["..."]
+    # no URL — maybe a JSON array/string of local paths, else the raw value
+    if s[0] in '["':
+        try:
+            v = json.loads(s)
+            if isinstance(v, str) and v[:1] in '["':   # double-encoded
+                v = json.loads(v)
+            if isinstance(v, list):
+                return str(next((x for x in v if str(x).strip()), "")).strip()
+            if isinstance(v, str):
+                return v.strip()
+        except Exception:
+            return s.strip('[]"\\ ')
+    return s
+
+
 def _resolve_image(row: dict, image_col: str, image_root: str) -> str:
-    img = str(row.get(image_col, "") or "")
+    # 1) the selected column, then 2) the known fallback names — in priority order.
+    cols = [image_col] + [c for c in _IMG_COL_FALLBACKS if c != image_col]
+    img = ""
+    for col in cols:
+        img = _clean_source(row.get(col, ""))
+        if img:
+            break
+
+    # 3) dynamic fallback: no named column had a link -> scan EVERY remaining column for a
+    # URL/data-URI, so link-finding works regardless of how the column is named. Prefer an
+    # image-looking URL so an unrelated link (profile/source/callback) isn't grabbed by
+    # mistake; only fall back to a non-image URL when that's the sole candidate.
+    if not img:
+        seen = set(cols)
+        urls = []
+        for key, val in row.items():
+            if key in seen:
+                continue
+            c = _clean_source(val)
+            if c and (c.lower().startswith("http") or c.lower().startswith("data:")):
+                urls.append(c)
+        img = next((u for u in urls if _looks_like_image(u)), "")
+        if not img and len(urls) == 1:          # unambiguous single URL -> use it
+            img = urls[0]
+
     if image_root and img and not os.path.isabs(img) and not img.lower().startswith("http"):
         img = os.path.join(image_root, img)
     return img
 
 
 def enqueue_rows(rows: list, image_col="payment_document", id_col=None,
-                 image_root="", precomputed=False) -> dict:
-    batch_id = f"batch-{int(time.time())}"
+                 image_root="", precomputed=False, is_test=False) -> dict:
+    prefix = "test" if is_test else "batch"
+    batch_id = f"{prefix}-{int(time.time())}"
     enq = skipped = 0
     with pg.pool().connection() as c:
-        for idx, row in enumerate(rows):
-            lead_id = str(row.get(id_col) if id_col else f"LEAD-{idx}")
+        for row in rows:
+            chosen = str(row.get(id_col, "")).strip() if id_col else ""
+            lead_id = chosen or _default_lead_id(row)   # content-hash when no usable id
             r = c.execute(
                 "INSERT INTO jobs(job_id,batch_id,lead_id,lender,image_url,row_json,"
-                "precomputed,max_attempts) VALUES(%s,%s,%s,%s,%s,%s,%s,%s) "
+                "precomputed,max_attempts,is_test) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON CONFLICT (job_id) DO NOTHING",
                 (lead_id, batch_id, lead_id, row.get("institute_name", ""),
                  _resolve_image(row, image_col, image_root), Jsonb(_safe(row)),
-                 precomputed, settings.JOB_MAX_ATTEMPTS))
+                 precomputed, settings.JOB_MAX_ATTEMPTS, is_test))
             enq += r.rowcount
             skipped += (1 - r.rowcount)
-    return {"batch_id": batch_id, "total": len(rows), "enqueued": enq, "skipped": skipped}
+    return {"batch_id": batch_id, "total": len(rows), "enqueued": enq, "skipped": skipped,
+            "is_test": is_test}
 
 
 def claim_one(lease_seconds: int | None = None):
     lease = lease_seconds or settings.JOB_LEASE_SECONDS
     with pg.pool().connection() as c:
+        # identical claim (pending OR expired-lease), but also returns the row's PRIOR
+        # status/attempts so the worker can log a lease-reclaim (crash-recovery) event.
         return c.execute(
-            "UPDATE jobs SET status='in_progress', attempts=attempts+1, "
-            "lease_until = now() + make_interval(secs => %s), updated_at=now() "
-            "WHERE job_id = (SELECT job_id FROM jobs "
+            "WITH picked AS ("
+            "  SELECT job_id, status AS prev_status, attempts AS prev_attempts FROM jobs "
             "  WHERE status='pending' OR (status='in_progress' AND lease_until < now()) "
             "  ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1) "
-            "RETURNING *", (lease,)).fetchone()
+            "UPDATE jobs j SET status='in_progress', attempts=j.attempts+1, "
+            "  lease_until = now() + make_interval(secs => %s), updated_at=now() "
+            "FROM picked WHERE j.job_id = picked.job_id "
+            "RETURNING j.*, picked.prev_status, picked.prev_attempts", (lease,)).fetchone()
 
 
 def complete(job_id: str, verification_status: str):

@@ -12,7 +12,7 @@
   const fmtTime = (t) => (t || "").replace("T", " ").slice(0, 19);
   const debounce = (fn, ms = 280) => { let h; return (...a) => { clearTimeout(h); h = setTimeout(() => fn(...a), ms); }; };
 
-  let state = { status: "all", q: "" };
+  let state = { status: "all", q: "", scope: "real" };
   let charts = {};
 
   // per-column filters for the leads table. null = no filter; a Set = allowed values.
@@ -21,12 +21,12 @@
   const rowVal = (r, col) => String(r[col] ?? "") || "—";
 
   /* ── toast ─────────────────────────────── */
-  function toast(msg, kind = "") {
+  function toast(msg, kind = "", ms = 3200) {
     const t = document.createElement("div");
     t.className = "toast " + kind; t.innerHTML = msg;
     $("#toasts").appendChild(t);
-    setTimeout(() => { t.style.opacity = "0"; t.style.transform = "translateX(20px)"; t.style.transition = ".3s"; }, 3200);
-    setTimeout(() => t.remove(), 3600);
+    setTimeout(() => { t.style.opacity = "0"; t.style.transform = "translateX(20px)"; t.style.transition = ".3s"; }, ms);
+    setTimeout(() => t.remove(), ms + 400);
   }
   const badge = (s) => `<span class="badge b-${esc(s)}">${esc(s)}</span>`;
 
@@ -34,7 +34,17 @@
   const TITLES = {
     dashboard: ["Overview", "Dashboard", "Live verification overview"],
     verify: ["Run", "Verify", "Enqueue a batch or test a single receipt"],
+    observability: ["Operations", "Observability", "Latency, throughput, quality & drift"],
   };
+  let liveTimer = null;
+  function startLive(name) {
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+    // Observability polls live so it updates during a run (charts/KPIs redraw smoothly,
+    // no filter state to lose). The dashboard is left on manual/whole-view refresh to
+    // avoid re-animating the stat cards and resetting the leads-table column filters.
+    if (name === "observability") liveTimer = setInterval(loadObservability, 4000);
+  }
+
   function switchView(name) {
     $$(".nav-item").forEach(b => b.classList.toggle("active", b.dataset.view === name));
     $$(".view").forEach(v => v.classList.toggle("hidden", v.id !== "view-" + name));
@@ -42,6 +52,8 @@
     $("#pageTitle").textContent = TITLES[name][1];
     $("#pageSub").textContent = TITLES[name][2];
     if (name === "dashboard") refreshAll();
+    if (name === "observability") loadObservability();
+    startLive(name);
   }
 
   /* ── theme ─────────────────────────────── */
@@ -52,6 +64,7 @@
     // charts bake in colors at creation — rebuild them for the new palette
     Object.values(charts).forEach(c => c.destroy()); charts = {};
     if (!$("#view-dashboard").classList.contains("hidden")) loadStats();
+    if (!$("#view-observability").classList.contains("hidden")) loadObservability();
   }
 
   /* ── stat cards + charts ───────────────── */
@@ -122,13 +135,36 @@
   /* ── leads table ───────────────────────── */
   async function loadStats() {
     try {
-      const s = await (await fetch("/api/stats")).json();
+      const s = await (await fetch("/api/stats?scope=" + state.scope)).json();
       renderStats(s.counts); renderDonut(s.counts); renderMethods(s.methods || []);
     } catch (e) { toast("Failed to load stats", "bad"); }
   }
 
+  // The Test Workspace: one switch flips the ENTIRE app — uploads, dashboard, donut,
+  // methods, leads table AND observability — between real ("Live") and sandbox data.
+  function setScope(scope) {
+    if (state.scope === scope) return;
+    state.scope = scope;
+    document.body.classList.toggle("scope-test", scope === "test");
+    $("#scopeBanner").classList.toggle("hidden", scope !== "test");
+    $$("#wsSwitch .ws-opt").forEach(b => b.classList.toggle("active", b.dataset.scope === scope));
+    refreshAll();
+    if (!$("#view-observability").classList.contains("hidden")) loadObservability();
+    if (scope === "test") toast("Entered Test Workspace — sandbox data only", "");
+  }
+
+  async function clearWorkspace() {
+    if (!confirm("Clear the Test Workspace? This deletes all sandbox data. Your live records and the OCR cache are untouched.")) return;
+    try {
+      const r = await (await fetch("/api/clear_test", { method: "POST" })).json();
+      toast(`Workspace cleared — ${r.results || 0} sandbox lead${r.results === 1 ? "" : "s"} removed`, "ok");
+      refreshAll();
+      if (!$("#view-observability").classList.contains("hidden")) loadObservability();
+    } catch (e) { toast("Clear failed", "bad"); }
+  }
+
   async function loadLeads() {
-    const url = `/api/leads?status=${encodeURIComponent(state.status)}&q=${encodeURIComponent(state.q)}&limit=400`;
+    const url = `/api/leads?status=${encodeURIComponent(state.status)}&q=${encodeURIComponent(state.q)}&scope=${state.scope}&limit=400`;
     let rows = [];
     try { rows = await (await fetch(url)).json(); } catch (e) { toast("Failed to load leads", "bad"); }
     allRows = rows;
@@ -218,6 +254,302 @@
   }
 
   function refreshAll() { loadStats(); loadLeads(); }
+
+  /* ── observability ─────────────────────────────────────────────────────── */
+  const fmtMs = (ms) => ms == null ? "—" :
+    ms >= 1000 ? (ms / 1000).toFixed(ms >= 10000 ? 0 : 1) + "s" : Math.round(ms) + "ms";
+  const STAGE_SHORT = {
+    lead_received: "Received", stage_dedup: "Dedup", stage0_load_image: "Load image",
+    stage1_image_qc: "Image QC", stage2_ocr_classify: "OCR + model", stage3_extract: "Extract",
+    stage4_verify: "Verify", lead_closed: "Closed",
+  };
+
+  async function loadObservability() {
+    let d;
+    try { d = await (await fetch("/api/observability?scope=" + state.scope)).json(); }
+    catch (e) { toast("Failed to load observability", "bad"); return; }
+    renderObsKpis(d);
+    renderLatChart(d.latency_series || []);
+    renderLatNote(d.latency || {}, d.ocr_cache || {});
+    renderTputChart(d.throughput_series || []);
+    renderHBar("stage", "stageChart",
+      (d.stage_timings || []).filter(r => r.avg_ms != null).slice(0, 8)
+        .map(r => STAGE_SHORT[r.stage] || r.stage),
+      (d.stage_timings || []).filter(r => r.avg_ms != null).slice(0, 8)
+        .map(r => Math.round(r.avg_ms || 0)), cssVar("--accent"));
+    renderHBar("reason", "reasonChart",
+      (d.unverified_reasons || []).slice(0, 8).map(r => r.field),
+      (d.unverified_reasons || []).slice(0, 8).map(r => r.n), cssVar("--bad"),
+      (field) => openDetail("unverified_field", { field }));
+    renderAccuracy(d.accuracy || {}, d.accuracy_series || [], d.confusion || []);
+    renderFillRates(d.fillrates || {}, d.fillrate_series || []);
+    renderQueue(d.queue || {}, d.errors || {}, d.ocr_cache || {});
+    renderFunnel(d.lender_funnel || []);
+    renderCoverage(d.config_coverage || []);
+  }
+
+  const pctStr = (v) => v == null ? "—" : v + "%";
+  function renderAccuracy(a, series, confusion) {
+    const reviewed = a.reviewed || 0;
+    $("#accTag").textContent = reviewed
+      ? `${reviewed} REVIEWED · ${pctStr(a.coverage_pct)} OF ${a.total_results || 0}`
+      : "NO REVIEWS YET";
+    if (!reviewed) {
+      $("#accKpis").innerHTML = `<p class="lede">No verdicts reviewed yet. Open any lead and use the <b>Review</b> panel to confirm or correct its verdict — accuracy, precision and drift populate here as reviews come in. <span class="muted">This is the system's only measure of whether it's actually right.</span></p>`;
+      if (charts.acc) { charts.acc.destroy(); charts.acc = null; }
+      $("#confusionBox").innerHTML = `<p class="muted">Nothing overturned yet — review some leads to surface where the system is wrong.</p>`;
+      return;
+    }
+    // headline correctness KPIs — verified precision is the star metric
+    const cards = [
+      ["ok", "Verified precision", pctStr(a.verified_precision_pct), null,
+        `${a.verified_overturned || 0}/${a.verified_reviewed || 0} overturned`],
+      ["tot", "Agreement", pctStr(a.agreement_pct), null,
+        `${a.confirmed || 0}/${reviewed} confirmed`],
+      ["warn", "Unverified over-flag", pctStr(a.unverified_overturn_pct), null,
+        `${a.unverified_overturned || 0}/${a.unverified_reviewed || 0} were fine`],
+      ["bad", "Overturned", a.overturned || 0, "overturned", "click to inspect"],
+    ];
+    $("#accKpis").innerHTML = `<div class="acc-kpis">` + cards.map(([c, l, v, det, sub]) =>
+      `<div class="acc-kpi ${c}${det ? " clickable" : ""}"${det ? ` data-detail="${det}"` : ""}>
+        <div class="acc-n">${esc(String(v))}</div><div class="acc-l">${l}</div>
+        <div class="acc-sub">${esc(sub)}</div></div>`).join("") + `</div>`;
+    $$("#accKpis [data-detail]").forEach(el => el.onclick = () => openDetail(el.dataset.detail));
+
+    // drift line: agreement % per day
+    if (window.Chart) {
+      if (charts.acc) charts.acc.destroy();
+      charts.acc = new Chart($("#accChart"), {
+        type: "line",
+        data: { labels: series.map(r => r.t), datasets: [{
+          label: "agreement %", data: series.map(r => r.agreement_pct),
+          borderColor: cssVar("--ok"), backgroundColor: "transparent", tension: 0.3 }] },
+        options: {
+          plugins: { legend: { display: false } },
+          elements: { point: { radius: 2 }, line: { borderWidth: 2 } },
+          scales: {
+            x: { grid: { display: false }, border: { color: cssVar("--line-strong") }, ticks: { ...AX(), maxTicksLimit: 8 } },
+            y: { grid: { color: cssVar("--line") }, border: { display: false }, ticks: { ...AX(), callback: v => v + "%" }, min: 0, max: 100 },
+          },
+        },
+      });
+    }
+
+    // confusion: system verdict -> corrected verdict, for overturned cases
+    if (!confusion.length) {
+      $("#confusionBox").innerHTML = `<p class="muted">No overturned verdicts — everything reviewed so far was confirmed. ✓</p>`;
+    } else {
+      const max = Math.max(...confusion.map(r => r.n));
+      $("#confusionBox").innerHTML =
+        `<p class="lede" style="margin-bottom:14px">Every reviewer correction, most common first. <b>verified → unverified</b> is a false positive the system let through; <b>unverified → verified</b> is over-flagging.</p>` +
+        confusion.map(r => {
+          const w = Math.round((r.n / max) * 100);
+          const bad = r.system_status === "verified";
+          return `<div class="conf-row">
+            <span class="conf-from ${bad ? "bad" : "warn"}">${esc(r.system_status)}</span>
+            <span class="conf-arrow">→</span>
+            <span class="conf-to">${esc(r.corrected_status)}</span>
+            <div class="conf-track"><div class="conf-bar ${bad ? "bad" : "warn"}" style="width:${w}%"></div></div>
+            <span class="conf-n mono">${r.n}</span></div>`;
+        }).join("");
+    }
+  }
+
+  function renderLatNote(lat, cache) {
+    const el = $("#latNote"); if (!el) return;
+    const calls = lat.n || 0;
+    if (calls) {
+      el.textContent = `${calls} model call${calls === 1 ? "" : "s"} measured` +
+        (cache.served_from_cache ? ` · ${cache.served_from_cache} more served from cache (skipped the model)` : "");
+    } else if (cache.stage2_total) {
+      el.innerHTML = `No model calls to measure — all <b>${cache.stage2_total}</b> lead${cache.stage2_total === 1 ? " was" : "s were"} served from the extraction cache. ` +
+        `Percentiles need real model calls: clear the OCR cache (or run new images) to populate them.`;
+    } else {
+      el.textContent = "Run a batch to populate latency.";
+    }
+  }
+
+  function renderObsKpis(d) {
+    const lat = d.latency || {}, q = d.queue || {};
+    const tail = (d.throughput_series || []).slice(-5);
+    const rate = tail.length ? Math.round(tail.reduce((a, b) => a + (b.n || 0), 0) / tail.length) : 0;
+    const cards = [
+      ["tot", "Model p50", fmtMs(lat.p50)],
+      ["warn", "Model p95", fmtMs(lat.p95)],
+      ["bad", "Model p99", fmtMs(lat.p99)],
+      ["ok", "Leads / min", rate],
+      ["gray", "Retried", q.retried || 0],
+      ["bad", "Failed", q.failed || 0, "failed_jobs"],
+    ];
+    $("#obsKpis").innerHTML = cards.map(([c, l, v, det]) =>
+      `<div class="stat ${c}${det ? " clickable" : ""}"${det ? ` data-detail="${det}"` : ""}><div class="n">${esc(v)}</div><div class="l">${l}</div></div>`).join("");
+    $$("#obsKpis [data-detail]").forEach(el => el.onclick = () => openDetail(el.dataset.detail));
+  }
+
+  const AX = (mono = true) => ({ color: cssVar("--ink-faint"),
+    font: { family: mono ? "JetBrains Mono" : "Hanken Grotesk", size: mono ? 10 : 12 } });
+
+  function renderLatChart(series) {
+    if (!window.Chart) return;
+    if (charts.lat) charts.lat.destroy();
+    charts.lat = new Chart($("#latChart"), {
+      type: "line",
+      data: {
+        labels: series.map(r => r.t),
+        datasets: [
+          { label: "p50", data: series.map(r => Math.round(r.p50 || 0)), borderColor: cssVar("--accent"), backgroundColor: "transparent" },
+          { label: "p95", data: series.map(r => Math.round(r.p95 || 0)), borderColor: cssVar("--bad"), backgroundColor: "transparent" },
+        ],
+      },
+      options: {
+        plugins: { legend: { display: true, labels: { color: cssVar("--ink-soft"), boxWidth: 10, font: { size: 11 } } } },
+        elements: { point: { radius: 0 }, line: { tension: 0.3, borderWidth: 2 } },
+        scales: {
+          x: { grid: { display: false }, border: { color: cssVar("--line-strong") }, ticks: { ...AX(), maxTicksLimit: 8 } },
+          y: { grid: { color: cssVar("--line") }, border: { display: false }, ticks: AX(), beginAtZero: true },
+        },
+      },
+    });
+  }
+
+  function renderTputChart(series) {
+    if (!window.Chart) return;
+    if (charts.tput) charts.tput.destroy();
+    charts.tput = new Chart($("#tputChart"), {
+      type: "bar",
+      data: { labels: series.map(r => r.t), datasets: [{ data: series.map(r => r.n || 0), backgroundColor: cssVar("--ok"), maxBarThickness: 14 }] },
+      options: {
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { display: false }, border: { color: cssVar("--line-strong") }, ticks: { ...AX(), maxTicksLimit: 8 } },
+          y: { grid: { color: cssVar("--line") }, border: { display: false }, ticks: { ...AX(), precision: 0 }, beginAtZero: true },
+        },
+      },
+    });
+  }
+
+  function renderHBar(key, canvasId, labels, data, color, onBarClick) {
+    if (!window.Chart) return;
+    if (charts[key]) charts[key].destroy();
+    charts[key] = new Chart($("#" + canvasId), {
+      type: "bar",
+      data: { labels, datasets: [{ data, backgroundColor: color, barThickness: 15 }] },
+      options: {
+        indexAxis: "y", plugins: { legend: { display: false } },
+        onClick: onBarClick ? (e, els) => { if (els.length) onBarClick(labels[els[0].index]); } : undefined,
+        onHover: onBarClick ? (e, els) => { e.native.target.style.cursor = els.length ? "pointer" : "default"; } : undefined,
+        scales: {
+          x: { grid: { color: cssVar("--line") }, border: { display: false }, ticks: AX(), beginAtZero: true },
+          y: { grid: { display: false }, border: { color: cssVar("--line-strong") }, ticks: AX(false) },
+        },
+      },
+    });
+  }
+
+  function sparkline(values, color, w = 66, h = 18) {
+    const v = (values || []).filter(x => x != null);
+    if (v.length < 2) return `<span class="spark-empty">—</span>`;
+    const min = Math.min(...v), max = Math.max(...v), rng = (max - min) || 1;
+    const pts = v.map((x, i) => `${(i / (v.length - 1) * w).toFixed(1)},${(h - ((x - min) / rng) * (h - 2) - 1).toFixed(1)}`).join(" ");
+    const trend = v[v.length - 1] - v[0];
+    const tc = trend < -2 ? "var(--bad)" : trend > 2 ? "var(--ok)" : "var(--ink-faint)";
+    return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5"/></svg>`
+      + `<span class="spark-d" style="color:${tc}">${trend > 0 ? "▲" : trend < 0 ? "▼" : "→"}${Math.abs(Math.round(trend))}</span>`;
+  }
+
+  function renderFillRates(f, series) {
+    const n = f.n || 0;
+    if (!n) { $("#fillRates").innerHTML = `<p class="muted" style="padding:6px 0">No extracted leads yet.</p>`; return; }
+    const fields = [["amount", f.amount], ["date", f.date], ["receiver", f.receiver], ["lan", f.lan]];
+    const seriesFor = (k) => (series || []).map(r => r[k]);
+    const multiDay = (series || []).length >= 2;
+    $("#fillRates").innerHTML =
+      `<p class="lede" style="margin-bottom:14px">Of ${n.toLocaleString()} leads that reached extraction — how often each field was read.${multiDay ? " Sparkline shows the per-day trend — a falling line is model/format drift." : " A drop over time signals model/format drift."} <span class="muted">Click a row to see the leads it was missing on.</span></p>` +
+      fields.map(([k, v]) => {
+        const pct = Math.round((v || 0) / n * 100);
+        const spark = multiDay ? `<span class="fill-spark">${sparkline(seriesFor(k), cssVar("--accent"))}</span>` : "";
+        return `<div class="fill-row clickable" data-field="${k}"><span class="fill-k">${k}</span>
+          <div class="fill-track"><div class="fill-bar" style="width:${pct}%"></div></div>
+          ${spark}<span class="fill-v mono">${pct}%</span></div>`;
+      }).join("");
+    $$("#fillRates [data-field]").forEach(el => el.onclick = () => openDetail("missing_field", { field: el.dataset.field }));
+  }
+
+  function renderQueue(q, err, cache) {
+    const cells = [["done", q.done || 0], ["pending", q.pending || 0], ["in progress", q.in_progress || 0],
+                   ["failed", q.failed || 0, "failed_jobs"], ["retried", q.retried || 0],
+                   ["model errors", err.model_errors || 0, "model_errors"]];
+    let html = `<div class="obs-kv">` + cells.map(([k, v, det]) =>
+      `<div class="obs-kv-cell${det ? " clickable" : ""}"${det ? ` data-detail="${det}"` : ""}><div class="obs-kv-n">${v}</div><div class="obs-kv-l">${k}</div></div>`).join("") + `</div>`;
+    if (cache && (cache.stage2_total || cache.entries)) {
+      html += `<div class="cache-line"><span class="tag">EXTRACTION CACHE</span>` +
+        `<span><b>${cache.hit_rate_pct == null ? "—" : cache.hit_rate_pct + "%"}</b> hit-rate</span>` +
+        `<span class="muted">${cache.served_from_cache || 0} served from ${cache.entries || 0} cached images · saved model calls</span></div>`;
+    }
+    const fj = err.failed_jobs || [];
+    if (fj.length) {
+      html += `<div style="margin-top:16px"><div class="tag" style="margin-bottom:10px">TOP FAILURES</div>` +
+        fj.map(f => `<div class="cov-item"><span class="mono" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.err)}</span><span class="count">${f.n}</span></div>`).join("") + `</div>`;
+    }
+    $("#queueBox").innerHTML = html;
+    $$("#queueBox [data-detail]").forEach(el => el.onclick = () => openDetail(el.dataset.detail));
+  }
+
+  function renderFunnel(rows) {
+    $("#funnelCount").textContent = `${rows.length} lender${rows.length === 1 ? "" : "s"}`;
+    $("#funnelEmpty").classList.toggle("hidden", rows.length > 0);
+    $("#funnelBody").innerHTML = rows.map(r => {
+      const rate = r.total ? Math.round(r.verified / r.total * 100) : 0;
+      return `<tr>
+        <td>${esc(r.lender)}</td>
+        <td class="mono">${r.total}</td>
+        <td class="mono" style="color:var(--ok)">${r.verified}</td>
+        <td class="mono" style="color:var(--bad)">${r.unverified}</td>
+        <td class="mono" style="color:var(--dup)">${r.duplicate}</td>
+        <td class="mono" style="color:var(--neutral)">${r.non_document}</td>
+        <td class="mono">${rate}%</td></tr>`;
+    }).join("");
+  }
+
+  function renderCoverage(rows) {
+    $("#coverageTag").textContent = rows.length ? `${rows.length} NEED CONFIG` : "ALL CONFIGURED";
+    if (!rows.length) {
+      $("#coverageBox").innerHTML = `<p class="muted">Every lender in the data has an explicit rule and receiver allowlist.</p>`;
+      return;
+    }
+    $("#coverageBox").innerHTML =
+      `<p class="lede" style="margin-bottom:12px">These lenders appear in the data but lack explicit config. They still work (defaults + receiver fallback), but adding config tightens matching. <span class="muted">Click a lender to see its leads.</span></p>` +
+      rows.map(r => `<div class="cov-item clickable" data-lender="${esc(r.lender)}">
+        <span style="flex:1">${esc(r.lender)} <span class="count">· ${r.n}</span></span>
+        ${r.explicit_rule ? "" : `<span class="fchip bad">no rule</span>`}
+        ${r.receiver_list ? "" : `<span class="fchip bad">no receiver list</span>`}
+      </div>`).join("");
+    $$("#coverageBox [data-lender]").forEach(el => el.onclick = () => openDetail("lender", { lender: el.dataset.lender }));
+  }
+
+  /* ── drill-down modal (a clicked metric -> the underlying leads) ────────── */
+  function closeObsModal() {
+    $("#obsModal").classList.remove("open"); $("#obsScrim").classList.remove("open");
+  }
+  async function openDetail(kind, params = {}) {
+    const qs = new URLSearchParams({ kind, scope: state.scope, ...params }).toString();
+    $("#obsModalTitle").textContent = "Loading…";
+    $("#obsModalBody").innerHTML = `<div class="empty">Loading…</div>`;
+    $("#obsModal").classList.add("open"); $("#obsScrim").classList.add("open");
+    let d;
+    try { d = await (await fetch("/api/observability/detail?" + qs)).json(); }
+    catch (e) { $("#obsModalBody").innerHTML = `<div class="empty">Failed to load detail.</div>`; return; }
+    const cols = d.columns || [], rows = d.rows || [];
+    $("#obsModalTitle").textContent = `${d.title || "Detail"} · ${rows.length}`;
+    if (!rows.length) { $("#obsModalBody").innerHTML = `<div class="empty">No matching leads.</div>`; return; }
+    $("#obsModalBody").innerHTML = `<table><thead><tr>${cols.map(c => `<th>${esc(c)}</th>`).join("")}</tr></thead>
+      <tbody>${rows.map(r => `<tr data-id="${esc(r.lead_id || "")}"${r.lead_id ? ' class="clickable"' : ""}>
+        ${cols.map(c => `<td class="${c === "lead_id" ? "lead-id mono" : (c === "error" ? "cell-outcome" : "")}">${esc(r[c] ?? "")}</td>`).join("")}
+      </tr>`).join("")}</tbody></table>`;
+    $$("#obsModalBody tr[data-id]").forEach(tr => {
+      if (tr.dataset.id) tr.onclick = () => { closeObsModal(); openLead(tr.dataset.id); };
+    });
+  }
 
   /* ── lead drawer ───────────────────────── */
   const STAGE_LABEL = {
@@ -340,6 +672,64 @@
       <details><summary>raw outcome</summary><pre>${esc(JSON.stringify(outcome, null, 2))}</pre></details></div>`;
   }
 
+  /* ── human-review loop ─────────────────────────────────────────────────── */
+  const STATUS_OPTS = ["verified", "unverified", "non_document", "duplicate"];
+  const savedReviewer = () => { try { return localStorage.getItem("pv_reviewer") || ""; } catch (e) { return ""; } };
+
+  function reviewHtml(status, review) {
+    let state = "";
+    if (review) {
+      const who = esc(review.reviewer || "—"), when = fmtTime(review.ts) || "";
+      if (review.decision === "overturned") {
+        state = `<div class="rv-state overturned">
+          <span class="rv-badge over">OVERTURNED</span>
+          system said <b>${esc(review.system_status)}</b> → reviewer set
+          <b>${esc(review.corrected_status)}</b>
+          <div class="rv-meta">by ${who} · ${when}${review.note ? ` · “${esc(review.note)}”` : ""}</div></div>`;
+      } else {
+        state = `<div class="rv-state confirmed">
+          <span class="rv-badge ok">CONFIRMED</span> reviewer agreed with <b>${esc(review.system_status)}</b>
+          <div class="rv-meta">by ${who} · ${when}${review.note ? ` · “${esc(review.note)}”` : ""}</div></div>`;
+      }
+    }
+    const opts = STATUS_OPTS.filter(s => s !== status)
+      .map(s => `<option value="${s}">${s}</option>`).join("");
+    return `<div class="d-section rv-section">
+      <h4>Review <span class="n">confirm or correct the verdict</span></h4>
+      ${state}
+      <div class="rv-form">
+        <input id="rvReviewer" class="rv-input" placeholder="your name / email" value="${esc(savedReviewer())}" autocomplete="off">
+        <input id="rvNote" class="rv-input" placeholder="note (optional)" autocomplete="off">
+        <div class="rv-actions">
+          <button id="rvConfirm" class="rv-btn ok">✓ Confirm “${esc(status)}”</button>
+          <span class="rv-or">or correct to</span>
+          <select id="rvStatus" class="rv-input rv-sel">${opts}</select>
+          <button id="rvOverturn" class="rv-btn bad">Overturn</button>
+        </div>
+      </div></div>`;
+  }
+
+  async function submitReview(leadId, status, decision) {
+    const reviewer = ($("#rvReviewer").value || "").trim();
+    const note = ($("#rvNote").value || "").trim();
+    try { if (reviewer) localStorage.setItem("pv_reviewer", reviewer); } catch (e) {}
+    const body = { decision, reviewer, note };
+    if (decision === "overturned") body.corrected_status = $("#rvStatus").value;
+    try {
+      const r = await fetch(`/api/lead/${encodeURIComponent(leadId)}/review`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); toast(e.error || "Review failed", "bad"); return; }
+      toast(decision === "overturned" ? "Verdict overturned" : "Verdict confirmed", "ok");
+      openLead(leadId);            // refresh the drawer to show the new review state
+    } catch (e) { toast("Review failed", "bad"); }
+  }
+
+  function wireReview(leadId, status) {
+    const c = $("#rvConfirm"), o = $("#rvOverturn");
+    if (c) c.onclick = () => submitReview(leadId, status, "confirmed");
+    if (o) o.onclick = () => submitReview(leadId, status, "overturned");
+  }
+
   function renderDrawer(j) {
     const status = (j.final && j.final.verification_status) || "unknown";
     $("#dLeadId").textContent = j.lead_id;
@@ -362,7 +752,9 @@
       ${imgHtml}
       ${compare}
       ${outcomeHtml(status, j.outcome)}
+      ${status !== "unknown" ? reviewHtml(status, j.review) : ""}
       ${lifecycleHtml(j.journey)}`;
+    if (status !== "unknown") wireReview(j.lead_id, status);
   }
 
   function lifecycleHtml(journey) {
@@ -409,12 +801,13 @@
   async function runCsvStream() {
     const file = $("#csvFile").files[0];
     if (!file) return;
+    const isTest = state.scope === "test";      // uploads follow the active workspace
     const fd = new FormData();
     fd.append("file", file);
     fd.append("image_col", $("#imageCol").value || "payment_document");
     if ($("#idCol").value) fd.append("id_col", $("#idCol").value);
     if ($("#imageRoot").value) fd.append("image_root", $("#imageRoot").value);
-    if ($("#precomputed").checked) fd.append("precomputed", "on");
+    if (isTest) fd.append("test", "on");
 
     const btn = $("#runCsv"); btn.disabled = true; btn.innerHTML = `<span class="spinner"></span> Enqueuing…`;
     let r;
@@ -422,10 +815,20 @@
     catch (e) { toast("Upload failed", "bad"); btn.disabled = false; btn.textContent = "Run batch"; return; }
     if (r.error) { toast(esc(r.error), "bad"); btn.disabled = false; btn.textContent = "Run batch"; return; }
 
+    const rst = $("#runScopeTag"); if (rst) rst.textContent = isTest ? "TEST WORKSPACE" : "LIVE";
+    // loud warning when nothing (or everything) was skipped as "already done" — the
+    // classic footgun of re-uploading with matching lead IDs.
+    if (r.enqueued === 0 && r.total > 0) {
+      toast(`⚠ 0 of ${r.total} enqueued — all rows already exist (same lead IDs). Nothing was processed. Use a unique Lead-ID column or new IDs to re-run.`, "bad", 9000);
+      $("#runPanel").classList.add("hidden");
+      btn.disabled = false; btn.textContent = "Run batch";
+      return;
+    }
+    if (r.skipped > 0) toast(`⚠ ${r.skipped} of ${r.total} row${r.total === 1 ? "" : "s"} skipped (already processed)`, "warn", 7000);
     $("#runPanel").classList.remove("hidden"); $("#doneBanner").classList.add("hidden");
     $("#liveList").innerHTML = ""; $("#progBar").style.width = "0%"; miniCounts({});
     $("#dlBtn").href = "/download/" + encodeURIComponent(r.batch_id);
-    toast(`Enqueued ${r.enqueued} lead${r.enqueued === 1 ? "" : "s"}${r.skipped ? ` · ${r.skipped} already done (skipped)` : ""}`, "ok");
+    toast(`${isTest ? "TEST · " : ""}Enqueued ${r.enqueued} lead${r.enqueued === 1 ? "" : "s"}`, "ok");
     btn.innerHTML = `<span class="spinner"></span> Processing…`;
 
     if (pollTimer) clearInterval(pollTimer);
@@ -465,7 +868,7 @@
     pollTimer = setInterval(poll, 1500);
   }
 
-  /* ── single image ──────────────────────── */
+  /* ── single image (ephemeral test — nothing saved) ─────────────────────── */
   async function runImage() {
     const file = $("#imgFile").files[0]; if (!file) return;
     const fd = new FormData();
@@ -478,10 +881,23 @@
     try {
       const r = await (await fetch("/api/verify_image", { method: "POST", body: fd })).json();
       if (r.error) throw new Error(r.error);
+      renderSingleResult(r);
       toast(`Result: ${badge(r.verification_status)}`, r.verification_status === "verified" ? "ok" : "");
-      openLead(r.lead_id);
-    } catch (e) { toast("Extraction failed: " + esc(e.message || e), "bad"); }
-    btn.disabled = false; btn.textContent = "Extract & verify";
+    } catch (e) { toast("Test failed: " + esc(e.message || e), "bad"); }
+    btn.disabled = false; btn.textContent = "Run test";
+  }
+
+  function renderSingleResult(r) {
+    const box = $("#imgResult");
+    const status = r.verification_status || "unknown";
+    box.innerHTML = `
+      <div class="sr-head">${badge(status)}<span class="sr-method">${esc(r.payment_method || "—")}</span>
+        <span class="sr-eph">ephemeral · not saved</span></div>
+      <div class="d-section"><h4>Verification <span class="n">expected ↔ document</span></h4>
+        ${comparisonHtml(r.csv_row, r.extracted, verifyOutcome(r.outcome))}
+        ${extraExtractedHtml(r.extracted || {})}</div>
+      ${outcomeHtml(status, r.outcome)}`;
+    box.classList.remove("hidden");
   }
 
   /* ── dropzone wiring ───────────────────── */
@@ -509,10 +925,15 @@
 
     $$(".nav-item").forEach(b => b.onclick = () => switchView(b.dataset.view));
     $("#newRunBtn").onclick = () => switchView("verify");
-    $("#refreshBtn").onclick = refreshAll;
+    $("#refreshBtn").onclick = () =>
+      $("#view-observability").classList.contains("hidden") ? refreshAll() : loadObservability();
+    $$("#wsSwitch .ws-opt").forEach(b => b.onclick = () => setScope(b.dataset.scope));
+    $("#clearWsBtn").onclick = clearWorkspace;
     $("#drawerClose").onclick = closeDrawer;
     $("#scrim").onclick = closeDrawer;
-    document.addEventListener("keydown", e => { if (e.key === "Escape") { closeColFilter(); closeDrawer(); } });
+    $("#obsModalClose").onclick = closeObsModal;
+    $("#obsScrim").onclick = closeObsModal;
+    document.addEventListener("keydown", e => { if (e.key === "Escape") { closeColFilter(); closeObsModal(); closeDrawer(); } });
 
     $$("#statusChips .chip").forEach(c => c.onclick = () => {
       $$("#statusChips .chip").forEach(x => x.classList.remove("active"));

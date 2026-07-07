@@ -66,19 +66,34 @@ Look at which stage FAILed (`... WHERE lead_id=X ORDER BY id`):
 ### Expected `verified`, got `unverified`
 Read `outcome.reason` on the result — it names each failed field:
 
-- **`receiver: receiver not among accepted names for <LENDER>`** — the lender *has* an
-  allowlist, but the printed payee isn't in it. Add the payee name (see [CONFIGURATION.md](CONFIGURATION.md)).
+- **`receiver: receiver '<payee>' is not among accepted names for <LENDER>`** — the
+  extracted payee is a **readable but different party** (a person, a UPI handle, another
+  company). This now **fails closed**: a stray mention of the lender elsewhere in the OCR
+  text can *not* rescue it (that was the old ~10% false-positive path). If `<payee>` is
+  actually the same entity under another name (e.g. "Jana Small Finance Bank" for JANA),
+  add it to the lender's allowlist in `lender_receivers.json` and it auto-verifies next run.
+- **`receiver: receiver unreadable and no accepted name found on document for <LENDER>`**
+  — the payee field was empty *and* no accepted name appeared (as a whole word) in the text.
 - **`receiver: no accepted-receiver list configured for <LENDER>, and lender name not
-  found on document`** — the lender has **no allowlist**, so the check fell back to the
-  lender's own name and that didn't appear on the document either. Either the payee
-  genuinely isn't the lender (correct `unverified`), or add the lender's real payee
-  names to `lender_receivers.json`.
+  found on document`** — the lender has **no allowlist**, the payee field didn't match the
+  lender's own name, and the lender name wasn't in the text. Add real payee names to
+  `lender_receivers.json`.
+
+  > **Receiver matching, in one line:** the extracted **payee field** decides it. A
+  > matching field → verified; a *populated but different* field → unverified (fails
+  > closed); an *empty* field → falls back to a whole-word name match in the OCR text.
+  > This is what makes `verified` genuinely zero-false-positive on the receiver.
 - **`date: date mismatch (gap Nd > Md …)`** — document date is outside the lender's
   `date_tolerance_days`. Legit for No‑Dues/late certificates → widen the tolerance.
 - **`amount: amount mismatch (doc X vs system Y)`** — the receipt amount differs from
   the CSV `payment_amount` (compare in the drawer). If the receipt shows a different
   figure (e.g. total vs instalment), it's a data question, not a bug.
 - **`loan_account_number …`** *(SMFG)* — LAN unreadable or different.
+- **`looks like an incoming credit to your own account …`** — the direction guard. The
+  document reads as money *received* ("credited to your account"), not an outgoing
+  repayment, so it is never auto‑verified (flag `incoming_credit`). If it's genuinely a
+  valid payment, the OCR text should carry paid/debited/sent‑to wording; otherwise it's
+  correctly held for human review.
 - **`different loan account under an already-seen lead_code …`** — the dedup flag. The
   lead ran full OCR; the field‑by‑field verify result is under `outcome.verification`.
   It's `unverified` on purpose (needs a human), even if the fields matched.
@@ -137,14 +152,46 @@ in `jobs` (resume working as designed). To force a re‑run, delete first (below
 - **Model errors** surface in `stage2_ocr_classify` → `metrics.model_error` and
   `data.model_meta`. The client catches transport errors and returns a non‑document
   with the error text rather than crashing.
-- **Latency**: `metrics.model_ms` per lead. The Medha call dominates runtime; scale
-  with more workers/processes. First call after idle is slower (cold start).
+- **Latency**: `metrics.model_ms` per lead — the *real* model time (the Observability
+  latency panel uses this, not the whole stage2 wall-clock). The Medha call dominates
+  runtime; scale with more workers/processes. First call after idle is slower (cold start).
+- **Extraction cache**: an image already read is served from `ocr_cache` (keyed on image
+  bytes + model + prompt version) — `model_meta.cache = hit`, no model call. Re-running the
+  same leads to test classification is therefore near-instant. A **prompt change** must bump
+  `PROMPT_VERSION` in `ocr/medha_client.py` (or set `OCR_CACHE=0`) so stale reads aren't reused.
+- **Overload / connection resets (10054)**: a circuit breaker (`_BREAKER` in the client)
+  opens after `OCR_BREAKER_THRESHOLD` consecutive failures and makes workers wait a growing
+  cooldown — backpressure instead of a retry-storm. If everything stalls with the model down,
+  that's the breaker working; it recovers automatically on the first success.
 - **Streaming**: controlled by `MEDHA_STREAM`. The client assembles streamed chunks;
   set `MEDHA_STREAM=0` to debug against a single response.
 - **Offline repro**: run the lead in **Test mode** (precomputed `ex_*` columns) to
   exercise the whole pipeline with no model call.
 
 ---
+
+## Human review & accuracy
+
+Every `verified` / `unverified` verdict can be **confirmed or overturned** by a reviewer,
+from the **Review** panel in the lead drawer. Each action is an append-only row in
+`lead_reviews` (system verdict, decision, corrected status, reviewer, note, timestamp) —
+the audit trail and the ground truth behind the **Verdict accuracy** panel in Observability.
+
+- **Verified precision** — of reviewed `verified` leads, how many stood (weren't overturned).
+  This is the direct measure of the zero-false-positive goal.
+- **Agreement** — overall confirm rate; **Unverified over-flag** — how many held leads were
+  actually fine (system too strict); **Agreement over time** — the drift line.
+- The **Where the system is wrong** list is the system→corrected confusion; each clicked
+  number opens the underlying leads.
+
+```sql
+-- current review state per lead
+SELECT DISTINCT ON (lead_id) lead_id, system_status, decision, corrected_status, reviewer
+FROM lead_reviews ORDER BY lead_id, id DESC;
+```
+
+If the accuracy panel says "no reviews yet", nobody has reviewed anything — it populates as
+reviews come in. Reviewing even a sample per lender gives a real precision read.
 
 ## Reprocess or reset
 
@@ -165,6 +212,12 @@ UPDATE jobs SET status='pending', attempts=0, last_error=NULL WHERE status='fail
 ```bash
 python -c "from db import pg; pg.truncate_all()"
 ```
-Wipes `lead_events`, `lead_results`, `processed_payments`, `jobs`. Note this also
-clears the payment duplicate ledger — intended for a clean re‑run, not for production.
-To seed the ledger from existing leads instead, run `PaymentDedup().backfill()`.
+Wipes `lead_events`, `lead_results`, `processed_payments`, `jobs`, `lead_reviews`. Note
+this also clears the payment duplicate ledger and the review history — intended for a clean
+re‑run, not for production. To seed the ledger from existing leads instead, run
+`PaymentDedup().backfill()`.
+
+> The **extraction cache (`ocr_cache`) is intentionally NOT wiped** — so re‑running the
+> same leads after a reset is near‑instant (no model calls) while still exercising the
+> current deterministic classification/verify logic. Clear it explicitly only if you want
+> fresh model reads: `DELETE FROM ocr_cache;` (or bump `PROMPT_VERSION`).

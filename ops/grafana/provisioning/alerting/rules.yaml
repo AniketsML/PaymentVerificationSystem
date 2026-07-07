@@ -1,0 +1,106 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: pv-processing
+    folder: Payment Verification
+    interval: 1m
+    rules:
+      # ── Medha returned errors in the last 10 minutes ─────────────────────────
+      - uid: pv-alert-model-errors
+        title: Medha model errors (last 10m)
+        condition: C
+        for: 0m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: The Medha model returned errors in the last 10 minutes (connection resets / 5xx / timeouts).
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: pv-postgres
+            model:
+              refId: A
+              format: table
+              rawQuery: true
+              rawSql: >
+                SELECT count(*) AS value FROM lead_events
+                WHERE stage='stage2_ocr_classify'
+                  AND COALESCE(metrics->>'model_error','') <> ''
+                  AND ts > now() - interval '10 minutes'
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # ── Model p95 latency above 60s over the last 10 minutes ─────────────────
+      - uid: pv-alert-latency-p95
+        title: Model p95 latency high (>60s, last 10m)
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: Medha p95 latency exceeded 60s over the last 10 minutes — the model server is saturating.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: pv-postgres
+            model:
+              refId: A
+              format: table
+              rawQuery: true
+              rawSql: >
+                SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY ms) AS value
+                FROM lead_events
+                WHERE stage='stage2_ocr_classify' AND ms IS NOT NULL
+                  AND ts > now() - interval '10 minutes'
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [60000] }
+
+      # ── Truncated model outputs (finish_reason=length) in the last 15 minutes ─
+      - uid: pv-alert-truncation
+        title: Truncated model outputs (last 15m)
+        condition: C
+        for: 0m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: Model responses were truncated (finish_reason=length) — raise max_tokens or the output silently becomes non_document.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: pv-postgres
+            model:
+              refId: A
+              format: table
+              rawQuery: true
+              rawSql: >
+                SELECT count(*) AS value FROM lead_events
+                WHERE stage='stage2_ocr_classify'
+                  AND metrics->>'finish_reason' = 'length'
+                  AND ts > now() - interval '15 minutes'
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }

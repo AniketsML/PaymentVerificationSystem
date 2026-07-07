@@ -103,6 +103,10 @@ def run(image, row: dict, ocr_client) -> tuple[bool, str, dict, dict]:
         "model": vmeta.get("model", ""),
         "model_ms": vmeta.get("elapsed_ms", ""),
         "model_error": vmeta.get("error", ""),
+        "http_status": vmeta.get("http_status"),
+        "finish_reason": vmeta.get("finish_reason"),
+        "prompt_tokens": vmeta.get("prompt_tokens"),
+        "completion_tokens": vmeta.get("completion_tokens"),
         "evidence": ev,
     }
 

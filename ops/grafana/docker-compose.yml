@@ -1,0 +1,35 @@
+# Grafana for the PROCESSING / infra side of observability.
+# Reads the same Postgres the app writes to (no exporter needed for these panels).
+#
+#   cd ops/grafana && docker compose up -d
+#   open http://localhost:3000   (login admin / admin — change on first login)
+#
+# The app's in-app "Observability" tab stays the source of truth for per-lead /
+# quality analytics; this dashboard is the aggregate ops view + alerting.
+services:
+  grafana:
+    image: grafana/grafana:latest
+    container_name: pv-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Postgres reached via the Docker host gateway (the DB runs on the host).
+      # Defaults match the app's settings.py; override in a .env file if yours differ.
+      PV_DB_HOST: ${PV_DB_HOST:-host.docker.internal}
+      PV_DB_PORT: ${PV_DB_PORT:-5432}
+      PV_DB_NAME: ${PV_DB_NAME:-payment_verification}
+      PV_DB_USER: ${PV_DB_USER:-postgres}
+      PV_DB_PASSWORD: ${PV_DB_PASSWORD:-postgres}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/etc/dashboards:ro
+      - pv-grafana-data:/var/lib/grafana
+    restart: unless-stopped
+
+volumes:
+  pv-grafana-data:

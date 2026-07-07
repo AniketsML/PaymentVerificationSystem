@@ -1,0 +1,17 @@
+apiVersion: 1
+
+datasources:
+  - name: PaymentVerification
+    uid: pv-postgres
+    type: postgres
+    access: proxy
+    url: ${PV_DB_HOST}:${PV_DB_PORT}
+    user: ${PV_DB_USER}
+    isDefault: true
+    jsonData:
+      database: ${PV_DB_NAME}
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    secureJsonData:
+      password: ${PV_DB_PASSWORD}

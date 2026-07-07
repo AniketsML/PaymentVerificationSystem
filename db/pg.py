@@ -14,6 +14,8 @@ Point DATABASE_URL at any Postgres (local or managed) - no code change.
 """
 from __future__ import annotations
 
+import threading
+
 from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
 
@@ -21,6 +23,12 @@ from config import settings
 
 # opened lazily so importing this module never requires a live DB
 _pool: ConnectionPool | None = None
+
+# schema is set up exactly once per process; the lock + flag stop the 8 worker threads
+# from running the (now lock-heavy) migrations concurrently, and a Postgres advisory lock
+# serializes it across processes too — otherwise concurrent DDL deadlocks.
+_schema_lock = threading.Lock()
+_schema_ready = False
 
 
 def pool() -> ConnectionPool:
@@ -49,6 +57,7 @@ CREATE TABLE IF NOT EXISTS lead_events (
     data     JSONB DEFAULT '{}'::jsonb
 );
 CREATE INDEX IF NOT EXISTS idx_events_lead ON lead_events(lead_id);
+CREATE INDEX IF NOT EXISTS idx_events_stage_ts ON lead_events(stage, ts DESC);
 
 CREATE TABLE IF NOT EXISTS lead_results (
     lead_id             TEXT PRIMARY KEY,
@@ -74,6 +83,22 @@ CREATE TABLE IF NOT EXISTS processed_payments (
 );
 CREATE INDEX IF NOT EXISTS idx_pp_leadcode ON processed_payments(lead_code);
 
+-- human-review ledger (append-only audit trail of every reviewer action).
+-- Closes the review loop AND is the ground truth behind accuracy telemetry:
+-- a reviewer either CONFIRMS the system verdict or OVERTURNS it to a corrected one.
+CREATE TABLE IF NOT EXISTS lead_reviews (
+    id              BIGSERIAL PRIMARY KEY,
+    lead_id         TEXT NOT NULL,
+    system_status   TEXT,                 -- what the pipeline decided (at review time)
+    decision        TEXT NOT NULL,        -- 'confirmed' | 'overturned'
+    corrected_status TEXT,                -- reviewer's verdict when overturned (else = system_status)
+    reviewer        TEXT,                 -- who reviewed (free text / email for now)
+    note            TEXT,
+    ts              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_reviews_lead ON lead_reviews(lead_id);
+CREATE INDEX IF NOT EXISTS idx_reviews_ts   ON lead_reviews(ts DESC);
+
 CREATE TABLE IF NOT EXISTS jobs (
     job_id       TEXT PRIMARY KEY,          -- idempotency key (= lead_id)
     batch_id     TEXT NOT NULL,
@@ -93,15 +118,143 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(status, lease_until);
 CREATE INDEX IF NOT EXISTS idx_jobs_batch ON jobs(batch_id);
+
+-- extraction cache: the vision-model call is the whole bottleneck, and the SAME image
+-- (re-runs, resubmissions) shouldn't be paid for twice. Keyed on image content + model
+-- + prompt version, so it only ever returns an extraction produced by the current prompt.
+CREATE TABLE IF NOT EXISTS ocr_cache (
+    cache_key   TEXT PRIMARY KEY,   -- sha256(jpeg bytes) : model : prompt_version
+    extraction  JSONB NOT NULL,
+    model       TEXT,
+    hits        INT NOT NULL DEFAULT 0,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+
+# additive migrations for existing databases (idempotent — safe on every boot)
+_MIGRATIONS = """
+ALTER TABLE jobs         ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE lead_results ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE lead_events  ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS idx_results_istest ON lead_results(is_test);
+CREATE INDEX IF NOT EXISTS idx_events_istest  ON lead_events(is_test);
+CREATE INDEX IF NOT EXISTS idx_jobs_istest    ON jobs(is_test);
+
+-- dedup ledger is scope-aware too: test runs dedup against their OWN payments (the Test
+-- workspace mirrors duplicate detection) without ever touching the real ledger. Replace
+-- the 4-col PK with a unique index that includes is_test so real+test identities coexist.
+ALTER TABLE processed_payments ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE processed_payments DROP CONSTRAINT IF EXISTS processed_payments_pkey;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pp_identity
+    ON processed_payments(lead_code, loan_acct, amount, pay_ym, is_test);
+
+-- reviews are ground truth for ACCURACY — they must be workspace-scoped or sandbox
+-- reviews poison the real precision/agreement numbers. Backfill from the lead's flag.
+ALTER TABLE lead_reviews ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
+UPDATE lead_reviews rv SET is_test = r.is_test
+    FROM lead_results r WHERE r.lead_id = rv.lead_id AND rv.is_test <> r.is_test;
+CREATE OR REPLACE VIEW lead_reviews_real AS SELECT * FROM lead_reviews WHERE NOT is_test;
+CREATE OR REPLACE VIEW lead_reviews_test AS SELECT * FROM lead_reviews WHERE is_test;
+
+-- Real-data views: the ONE place test-exclusion lives. All real-scope reads (dashboard,
+-- observability) query these, so a new query physically cannot leak sandbox rows into
+-- real metrics — the guarantee is structural, not "remember to add WHERE NOT is_test".
+CREATE OR REPLACE VIEW lead_results_real AS SELECT * FROM lead_results WHERE NOT is_test;
+CREATE OR REPLACE VIEW lead_events_real  AS SELECT * FROM lead_events  WHERE NOT is_test;
+CREATE OR REPLACE VIEW jobs_real         AS SELECT * FROM jobs         WHERE NOT is_test;
+-- test-only mirrors, so the dashboard + observability can be viewed scoped to sandbox data
+CREATE OR REPLACE VIEW lead_results_test AS SELECT * FROM lead_results WHERE is_test;
+CREATE OR REPLACE VIEW lead_events_test  AS SELECT * FROM lead_events  WHERE is_test;
+CREATE OR REPLACE VIEW jobs_test         AS SELECT * FROM jobs         WHERE is_test;
 """
 
 
 def init_schema() -> None:
-    with pool().connection() as c:
-        c.execute(SCHEMA)
+    """Idempotent, concurrency-safe. Runs the DDL once per process; a threading lock
+    (intra-process) plus a Postgres advisory lock (inter-process) serialize it so the
+    ALTER/CREATE VIEW statements can't deadlock against each other."""
+    global _schema_ready
+    if _schema_ready:
+        return
+    with _schema_lock:
+        if _schema_ready:
+            return
+        with pool().connection() as c:
+            c.execute("SELECT pg_advisory_lock(727274)")     # cross-process serialize
+            try:
+                c.execute(SCHEMA)
+                c.execute(_MIGRATIONS)
+            finally:
+                c.execute("SELECT pg_advisory_unlock(727274)")
+        _schema_ready = True
 
 
 def truncate_all() -> None:
     """Wipe every table - used to reset for a fresh run."""
     with pool().connection() as c:
-        c.execute("TRUNCATE lead_events, lead_results, processed_payments, jobs")
+        c.execute("TRUNCATE lead_events, lead_results, processed_payments, jobs, lead_reviews")
+
+
+def clear_test_data(batch_id: str | None = None) -> dict:
+    """Delete sandbox/test rows (is_test) — leaves real data and the OCR cache intact.
+    Pass a batch_id to purge only that test batch; otherwise all test data."""
+    with pool().connection() as c:
+        if batch_id:
+            leads = [r["lead_id"] for r in c.execute(
+                "SELECT lead_id FROM jobs WHERE is_test AND batch_id=%s", (batch_id,)).fetchall()]
+            if not leads:
+                return {"events": 0, "results": 0, "jobs": 0}
+            ev = c.execute("DELETE FROM lead_events  WHERE is_test AND lead_id = ANY(%s)", (leads,)).rowcount
+            lr = c.execute("DELETE FROM lead_results WHERE is_test AND lead_id = ANY(%s)", (leads,)).rowcount
+            jb = c.execute("DELETE FROM jobs         WHERE is_test AND batch_id=%s", (batch_id,)).rowcount
+            c.execute("DELETE FROM processed_payments WHERE is_test AND lead_id = ANY(%s)", (leads,))
+            c.execute("DELETE FROM lead_reviews       WHERE is_test AND lead_id = ANY(%s)", (leads,))
+        else:
+            ev = c.execute("DELETE FROM lead_events  WHERE is_test").rowcount
+            lr = c.execute("DELETE FROM lead_results WHERE is_test").rowcount
+            jb = c.execute("DELETE FROM jobs         WHERE is_test").rowcount
+            c.execute("DELETE FROM processed_payments WHERE is_test")
+            c.execute("DELETE FROM lead_reviews       WHERE is_test")
+    return {"events": ev, "results": lr, "jobs": jb}
+
+
+def purge_expired_test_data(days: float) -> dict:
+    """Delete test data older than `days` — TTL so sandbox rows don't accumulate forever.
+    Called on startup. days<=0 disables."""
+    if days is None or days <= 0:
+        return {"purged": 0}
+    with pool().connection() as c:
+        old = [r["lead_id"] for r in c.execute(
+            "SELECT lead_id FROM jobs WHERE is_test AND created_at < now() - make_interval(days => %s)",
+            (days,)).fetchall()]
+        if not old:
+            return {"purged": 0}
+        c.execute("DELETE FROM lead_events       WHERE is_test AND lead_id = ANY(%s)", (old,))
+        c.execute("DELETE FROM lead_results      WHERE is_test AND lead_id = ANY(%s)", (old,))
+        c.execute("DELETE FROM processed_payments WHERE is_test AND lead_id = ANY(%s)", (old,))
+        c.execute("DELETE FROM lead_reviews       WHERE is_test AND lead_id = ANY(%s)", (old,))
+        n = c.execute("DELETE FROM jobs WHERE is_test AND lead_id = ANY(%s)", (old,)).rowcount
+    return {"purged": n}
+
+
+def purge_expired_cache(days: int) -> int:
+    """TTL cap on the OCR cache so it doesn't grow forever. Only stale-and-unused entries
+    are dropped; anything read recently keeps a fresh created_at is NOT tracked, so this
+    uses age since first cached. 0 disables."""
+    if not days or days <= 0:
+        return 0
+    with pool().connection() as c:
+        return c.execute(
+            "DELETE FROM ocr_cache WHERE created_at < now() - make_interval(days => %s)",
+            (days,)).rowcount
+
+
+def sweep_orphan_reviews() -> int:
+    """Delete reviews whose lead no longer exists (left behind by wipes/clears that
+    predate review-cascading). Orphaned ground truth silently skews accuracy — and worse,
+    re-running the same lead_id would attach a STALE review to the new verdict."""
+    with pool().connection() as c:
+        return c.execute(
+            "DELETE FROM lead_reviews rv WHERE NOT EXISTS "
+            "(SELECT 1 FROM lead_results r WHERE r.lead_id = rv.lead_id)").rowcount

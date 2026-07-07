@@ -30,6 +30,25 @@ def is_url(source: str) -> bool:
     return s.startswith("http://") or s.startswith("https://")
 
 
+def _diagnose_non_image(raw: bytes, content_type: str) -> str:
+    """A URL that fetched OK (200) but doesn't decode as an image is almost always a
+    private/expired link whose body is an access-denied XML/HTML page — not a corrupt
+    image. Name that precisely. Returns "" when it looks like a genuinely bad image, so
+    the original reason is used unchanged."""
+    ct = (content_type or "").lower()
+    head = raw[:800].decode("utf-8", "ignore").lower() if raw else ""
+    private = ("accessdenied", "access denied", "signaturedoesnotmatch", "invalidaccesskeyid",
+               "expiredtoken", "request has expired", "requesttimetooskewed",
+               "authenticationrequired", "not authorized", "forbidden")
+    if any(m in head for m in private):
+        return "image URL is private / access denied — the link needs a valid signature or permission"
+    if "html" in ct or "<html" in head or head.lstrip().startswith("<!doctype html"):
+        return "image URL returned a web page, not an image (likely a private/expired/login link)"
+    if "xml" in ct or "<?xml" in head or "<error" in head:
+        return "image URL returned an error response, not an image (likely a private/expired link)"
+    return ""
+
+
 def load(source: str, timeout: Optional[int] = None) -> tuple[Optional[Image.Image], bytes, str]:
     """
     Returns (pil_image, raw_bytes, error).
@@ -40,6 +59,7 @@ def load(source: str, timeout: Optional[int] = None) -> tuple[Optional[Image.Ima
         return None, b"", "no image source provided"
 
     src = source.strip()
+    content_type = ""
     try:
         if src.startswith("data:"):
             raw = base64.b64decode(src.split(",", 1)[1])
@@ -48,6 +68,7 @@ def load(source: str, timeout: Optional[int] = None) -> tuple[Optional[Image.Ima
             r = requests.get(src, headers=_UA, timeout=timeout)
             r.raise_for_status()
             raw = r.content
+            content_type = r.headers.get("Content-Type", "")
             origin = "url"
         else:
             if not os.path.exists(src):
@@ -67,7 +88,10 @@ def load(source: str, timeout: Optional[int] = None) -> tuple[Optional[Image.Ima
         img = Image.open(io.BytesIO(raw))
         img.load()                       # force decode now so we fail here, not later
     except Exception as e:  # noqa: BLE001
-        return None, raw, f"unreadable/corrupt image ({type(e).__name__})"
+        # for a URL, a non-image body is usually a private/expired link — say so precisely;
+        # otherwise keep the original corrupt-image reason unchanged.
+        reason = _diagnose_non_image(raw, content_type) if origin == "url" else ""
+        return None, raw, reason or f"unreadable/corrupt image ({type(e).__name__})"
 
     return img, raw, ""
 

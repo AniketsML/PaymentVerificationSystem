@@ -22,7 +22,7 @@ All optional — sensible defaults are baked in. Override for production.
 | `JOB_MAX_ATTEMPTS` | `3` | Retries before a job is parked as `failed`. |
 | `JOB_LEASE_SECONDS` | `300` | Crash‑recovery lease; an `in_progress` job idle this long is re‑claimable. |
 | `MEDHA_API_URL` | `http://164.52.192.196:8002/v1` | Vision model endpoint (OpenAI‑compatible). |
-| `MEDHA_API_KEY` | `REMOVED-SECRET` | Bearer token. |
+| `MEDHA_API_KEY` | _(unset — put it in `.env`)_ | Bearer token. Never commit; see `.env.example`. |
 | `MEDHA_MODEL` | `Medha` | Model name. |
 | `MEDHA_STREAM` | `1` | `1` = stream the response; `0` = single response. |
 | `MEDHA_TIMEOUT` | `120` | Per‑request timeout (seconds). |

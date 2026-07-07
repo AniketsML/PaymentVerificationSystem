@@ -33,3 +33,6 @@ Thumbs.db
 # keep the folders themselves so the app's makedirs is a no-op
 !data/uploads/.gitkeep
 !data/outputs/.gitkeep
+
+# keep the template (but never the real .env)
+!.env.example

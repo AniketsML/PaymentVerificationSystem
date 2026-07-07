@@ -1,10 +1,35 @@
 """
 Central configuration for the Payment Verification System.
 All thresholds are explicit and deterministic - no magic numbers buried in code.
+
+Secrets (Medha API key, DB URL) are read from the environment or a gitignored `.env`
+at the project root — they are NEVER hardcoded here. See `.env.example`.
 """
 import os
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load_dotenv():
+    """Populate os.environ from a gitignored `.env` at the project root (dependency-free).
+    Existing environment variables always win, so real deploys can override the file."""
+    path = os.path.join(BASE_DIR, ".env")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key, val = key.strip(), val.strip().strip('"').strip("'")
+                os.environ.setdefault(key, val)
+    except Exception:
+        pass
+
+
+_load_dotenv()
 CONFIG_DIR = os.path.join(BASE_DIR, "config")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
@@ -45,12 +70,40 @@ IMAGE_QC = {
 }
 
 # ── Vision model (Medha - OpenAI-compatible chat/completions) ─────────────────
+# Endpoint + key come from the environment / .env — no secret is committed here.
 VISION_API_URL = os.environ.get("MEDHA_API_URL", "http://164.52.192.196:8002/v1")
-VISION_API_KEY = os.environ.get("MEDHA_API_KEY", "REMOVED-SECRET")
+VISION_API_KEY = os.environ.get("MEDHA_API_KEY", "")
 VISION_MODEL   = os.environ.get("MEDHA_MODEL", "Medha")
 VISION_STREAM  = os.environ.get("MEDHA_STREAM", "1") not in ("0", "false", "False", "")
 OCR_TIMEOUT_SECONDS = int(os.environ.get("MEDHA_TIMEOUT", "120"))
 IMAGE_FETCH_TIMEOUT = int(os.environ.get("IMAGE_FETCH_TIMEOUT", "30"))
+
+# Extraction cache: skip the model call for an image we've already read (keyed on image
+# content + model + prompt version). Safe for re-running the same leads to test the
+# deterministic classification/verify logic — only a prompt/model change re-invokes.
+OCR_CACHE = os.environ.get("OCR_CACHE", "1") not in ("0", "false", "False", "")
+OCR_CACHE_TTL_DAYS = int(os.environ.get("OCR_CACHE_TTL_DAYS", "30"))   # cap cache growth (0 = keep forever)
+
+# Circuit breaker: when Medha starts dropping connections (10054) / timing out under
+# load, retry-storming makes it worse. After N consecutive failures the breaker "opens"
+# and callers wait a growing cooldown, applying backpressure instead of hammering it.
+OCR_BREAKER_THRESHOLD = int(os.environ.get("OCR_BREAKER_THRESHOLD", "5"))
+OCR_BREAKER_COOLDOWN  = float(os.environ.get("OCR_BREAKER_COOLDOWN", "8"))    # base seconds
+OCR_BREAKER_MAX_WAIT  = float(os.environ.get("OCR_BREAKER_MAX_WAIT", "60"))   # cap
+
+# ── Web serving / access ──────────────────────────────────────────────────────
+WEB_THREADS = int(os.environ.get("WEB_THREADS", "8"))
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "64"))   # reject bigger uploads (OOM guard)
+# Optional HTTP Basic auth on the dashboard (the app carries borrower financial docs).
+# Enforced only when BOTH are set — set them to lock the LAN dashboard down. NEVER
+# commit real values; pass via env. /health stays open for probes.
+AUTH_USER = os.environ.get("PV_AUTH_USER", "")
+AUTH_PASS = os.environ.get("PV_AUTH_PASS", "")
+
+# Test Workspace data is disposable — it never becomes long-term storage. Test rows
+# older than this (days) are auto-purged on startup, and the "Clear workspace" button
+# wipes it on demand. 0 disables the auto-purge.
+TEST_TTL_DAYS = float(os.environ.get("TEST_TTL_DAYS", "1"))
 
 # payment-method keyword map (deterministic labelling)
 PAYMENT_METHOD_KEYWORDS = [
