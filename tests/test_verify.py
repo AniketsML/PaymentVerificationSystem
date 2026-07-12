@@ -72,6 +72,61 @@ def test_allowlisted_lender_accepts_listed_name_and_rejects_other():
     assert ok2 is False
 
 
+# ── receiver tiers: lender name -> allowlist -> UPI id (soft, token-anchored) ─
+def test_lender_own_name_matches_even_when_allowlist_lacks_it():
+    # KHATABOOK's allowlist only has SMFG names; the lender's own name is tier 1
+    # and must pass regardless.
+    ok, msg = check_receiver("Khatabook", "", "KHATABOOK")
+    assert ok is True and "lender name" in msg
+
+
+def test_soft_match_anchors_on_distinctive_token():
+    # 'HDB' is the main element of 'HDB Financial Services Limited' — enough.
+    ok, _ = check_receiver("HDB Fin Services", "", "HDBFS_PL")
+    assert ok is True
+
+
+def test_generic_words_alone_never_match():
+    # identical generic tail, different main element -> must fail closed.
+    ok, _ = check_receiver("Ram Financial Services", "", "HDBFS_PL")
+    assert ok is False
+
+
+def test_soft_match_tolerates_one_typo_in_distinctive_token():
+    ok, _ = check_receiver("ZZTst Corp", "", NOAL)          # zztest with a dropped 'e'
+    assert ok is True
+
+
+def test_upi_id_rescues_unknown_payee_name():
+    # THE new tier: shop-front payee name, but the UPI handle IS the lender.
+    ok, msg = check_receiver("Ram Kirana Store",
+                             "paid via UPI to smfgindia@icici ref 12345", "SMFG_PL")
+    assert ok is True and "smfgindia@icici" in msg
+
+
+def test_upi_lookalike_handle_does_not_match():
+    # 'janardhan' contains 'jana' but is NOT decomposable into the bank's name.
+    ok, _ = check_receiver("Ram Kirana Store",
+                           "from janardhan@oksbi paid rs 500", "JANA_SF")
+    assert ok is False
+
+
+def test_email_address_is_not_a_upi_id():
+    # a support email on the receipt is not evidence of where the money went
+    ok, _ = check_receiver("Ram Kirana Store",
+                           "helpdesk care@smfgindiacredit.co.in", "SMFG_PL")
+    assert ok is False
+
+
+def test_full_verify_via_upi_id_end_to_end():
+    d = doc(receiver="Ram Kirana Store",
+            text="paid to ram kirana store upi smfgindia@icici rs 5000",
+            lan="LN00112233")
+    status, outcome = run(d, {"institute_name": "SMFG_PL", "payment_amount": "5000",
+                              "payment_date": "2025-10-10", "loan_account_number": "LN00112233"})
+    assert status == "verified"
+
+
 # ── direction guard: incoming credit never auto-verifies ──────────────────────
 def test_incoming_credit_blocks_verify_even_when_fields_match():
     d = doc(receiver="ZZTEST CORP", text="Rs 5000 credited to your account on 2025-10-10")

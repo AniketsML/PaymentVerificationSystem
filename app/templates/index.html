@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ asset('style.css') }}">
   <script>
     // set theme before paint to avoid a flash
     (function () {
@@ -40,14 +40,25 @@
         <button class="nav-item active" data-view="dashboard"><span class="idx">01</span><span>Dashboard</span></button>
         <button class="nav-item" data-view="verify"><span class="idx">02</span><span>Verify</span></button>
         <button class="nav-item" data-view="observability"><span class="idx">03</span><span>Observability</span></button>
+        <button class="nav-item" data-view="approvals"><span class="idx">04</span><span>Approvals</span><span class="nav-badge hidden" id="apprBadge">0</span></button>
       </nav>
 
       <div class="rail-foot">
+        {% if user %}
+        <div class="user-chip" title="{{ user }}">
+          <div class="uc-av">{{ user[0]|upper }}</div>
+          <div class="uc-meta"><div class="uc-name">{{ user }}</div><div class="uc-role">Signed in</div></div>
+          <a class="uc-out" href="/logout" title="Sign out" aria-label="Sign out">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M14 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-2M17 15l3-3-3-3M9 12h11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </a>
+        </div>
+        {% endif %}
         <button id="themeToggle" class="theme-btn" title="Toggle theme"><span class="tt-dot"></span><span id="themeLabel">Dark</span></button>
-        <div class="model-chip">
+        <button class="model-chip" id="modelChip" title="Configure model endpoint">
           <span class="live-dot"></span>
           <div><div class="mc-model" id="mcModel">model</div><div class="mc-url" id="mcUrl"></div></div>
-        </div>
+          <svg class="mc-gear" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" stroke-width="2"/></svg>
+        </button>
       </div>
     </aside>
 
@@ -101,16 +112,20 @@
               <button class="chip" data-status="unverified"><i class="dot u"></i>Unverified</button>
               <button class="chip" data-status="duplicate"><i class="dot d"></i>Duplicate</button>
               <button class="chip" data-status="non_document"><i class="dot n"></i>Non-doc</button>
+              <button class="chip" data-status="unprocessed" title="Images that never reached OCR — missing URL, private link, download failure"><i class="dot p"></i>Unprocessed</button>
             </div>
+            <button class="cf-clear hidden" id="clearFilters" title="Remove all column filters">✕ Clear filters</button>
             <span class="count" id="tableCount">—</span>
           </div>
+          <!-- issue classification band — only for the Unprocessed section -->
+          <div class="issueband hidden" id="issueBand"></div>
           <div class="tablewrap">
             <table>
               <thead><tr>
                 <th class="th-filter" data-col="lead_id">Lead<span class="th-caret" aria-hidden="true">▾</span></th>
                 <th class="th-filter" data-col="lender">Lender<span class="th-caret" aria-hidden="true">▾</span></th>
                 <th>Status</th>
-                <th class="th-filter" data-col="payment_method">Method<span class="th-caret" aria-hidden="true">▾</span></th>
+                <th class="th-filter" data-col="payment_method" id="thMethod"><span id="thMethodLabel">Method</span><span class="th-caret" aria-hidden="true">▾</span></th>
                 <th class="th-filter" data-col="outcome_text">Outcome<span class="th-caret" aria-hidden="true">▾</span></th>
                 <th>Updated</th>
               </tr></thead>
@@ -176,7 +191,7 @@
           <div class="tabrow"><div class="panel-head" style="border:0;margin:0;padding:0"><h3>Per-lender funnel</h3></div><span class="count" id="funnelCount">—</span></div>
           <div class="tablewrap">
             <table>
-              <thead><tr><th>Lender</th><th>Total</th><th>Verified</th><th>Unverified</th><th>Duplicate</th><th>Non-doc</th><th>Verify rate</th></tr></thead>
+              <thead><tr><th>Lender</th><th>Total</th><th>Verified</th><th>Unverified</th><th>Duplicate</th><th>Non-doc</th><th>Unprocessed</th><th>Verify rate</th></tr></thead>
               <tbody id="funnelBody"></tbody>
             </table>
             <div class="empty hidden" id="funnelEmpty">No leads yet.</div>
@@ -187,6 +202,31 @@
           <div class="panel-head"><h3>Config coverage gaps</h3><span class="tag" id="coverageTag">—</span></div>
           <div id="coverageBox"></div>
         </section>
+      </section>
+
+      <!-- ═══ APPROVALS (receiver mismatches awaiting a human) ═══ -->
+      <section class="view hidden" id="view-approvals">
+        <div class="statband" id="apprKpis"></div>
+        <p class="appr-hint muted">Click a receiver to see its leads · tick checkboxes to decide many at once · Approve teaches the lender's accepted receivers and re-verifies instantly · Reject hides the pair for good.</p>
+
+        <div id="apprGroups"></div>
+        <div class="empty hidden" id="apprEmpty">Nothing awaiting a decision — every receiver mismatch has been handled. 🎉</div>
+
+        <!-- floating bulk-action bar (appears when receivers are selected) -->
+        <div class="bulkbar hidden" id="apprBulk" role="toolbar" aria-label="Bulk decision">
+          <span class="bb-count" id="bbCount">0 receivers</span>
+          <span class="bb-meta" id="bbMeta"></span>
+          <div class="bb-actions">
+            <button class="btn line small" id="bbClear">Clear</button>
+            <button class="al-btn bad" id="bbReject">Reject</button>
+            <button class="al-btn ok" id="bbApprove">Approve selected</button>
+          </div>
+        </div>
+
+        <details class="appr-hist" id="apprHistWrap">
+          <summary><span>Decision history</span><span class="count" id="apprHistTag">0</span></summary>
+          <div id="apprHistory"></div>
+        </details>
       </section>
 
       <!-- ═══ VERIFY ═══ -->
@@ -275,7 +315,59 @@
     <div class="modal-body" id="obsModalBody"></div>
   </aside>
 
+  <!-- ── model API config modal ──────────────────────────────── -->
+  <div class="modal-scrim" id="cfgScrim"></div>
+  <aside class="modal cfg-modal" id="cfgModal" aria-label="Model API configuration">
+    <div class="modal-head">
+      <div><div class="dh-eyebrow">Endpoint</div><div class="modal-title">Model API</div></div>
+      <button class="btn line small" id="cfgClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="lede" style="margin-bottom:18px">Point the pipeline at a different Medha host / port / key. Changes apply to the <b>next lead</b> — no restart.</p>
+      <div class="cfg-field"><label>Endpoint URL</label>
+        <input id="cfgUrl" class="rv-input" placeholder="http://host:8002/v1" autocomplete="off"></div>
+      <div class="cfg-field"><label>API key <span class="hint" id="cfgKeyHint"></span></label>
+        <input id="cfgKey" class="rv-input" type="password" placeholder="leave blank to keep current" autocomplete="off"></div>
+      <div class="cfg-row">
+        <div class="cfg-field" style="flex:1"><label>Model</label>
+          <input id="cfgModel" class="rv-input" placeholder="Medha" autocomplete="off"></div>
+        <label class="cfg-switch"><span>Stream</span>
+          <span class="switch"><input type="checkbox" id="cfgStream"><span class="slider"></span></span></label>
+      </div>
+      <div class="cfg-test hidden" id="cfgTestResult"></div>
+      <div class="cfg-actions">
+        <button class="btn line" id="cfgTest">Test connection</button>
+        <button class="btn solid" id="cfgSave">Save</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── receiver decision modal (approvals) ─────────────────── -->
+  <div class="modal-scrim" id="apprScrim"></div>
+  <aside class="modal appr-modal" id="apprModal" aria-label="Receiver decision">
+    <div class="modal-head">
+      <div style="min-width:0">
+        <div class="am-eyebrow ok" id="amEyebrow">Approve receiver</div>
+        <div class="modal-title am-name" id="amTitle">—</div>
+        <div class="am-for" id="amFor"></div>
+      </div>
+      <button class="btn line small" id="amClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body am-body">
+      <div class="am-list hidden" id="amList"></div>
+      <div class="am-nums" id="amNums"></div>
+      <div class="am-lines" id="amLines"></div>
+      <label class="am-notewrap">Note <span class="hint">(optional — kept in the decision history)</span>
+        <input class="am-note" id="amNote" placeholder="e.g. confirmed with collections team" autocomplete="off">
+      </label>
+    </div>
+    <div class="am-actions">
+      <button class="btn line" id="amCancel">Cancel</button>
+      <button class="al-btn am-go ok" id="amConfirm">✓ Approve</button>
+    </div>
+  </aside>
+
   <div class="toasts" id="toasts"></div>
-  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script src="{{ asset('app.js') }}"></script>
 </body>
 </html>

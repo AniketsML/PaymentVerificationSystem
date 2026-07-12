@@ -124,10 +124,14 @@ class OCRClient(Protocol):
 class MedhaVisionOCR:
     def __init__(self, api_url: str | None = None, api_key: str | None = None,
                  model: str | None = None, stream: bool | None = None):
-        self.api_url = (api_url or settings.VISION_API_URL).rstrip("/")
-        self.api_key = api_key or settings.VISION_API_KEY
-        self.model = model or settings.VISION_MODEL
-        self.stream = settings.VISION_STREAM if stream is None else stream
+        # read the LIVE runtime config (portal-editable) so a moved endpoint/key/model
+        # takes effect on the next lead with no restart; explicit args still override.
+        from config import runtime
+        cfg = runtime.model_config()
+        self.api_url = (api_url or cfg["url"]).rstrip("/")
+        self.api_key = api_key or cfg["key"]
+        self.model = model or cfg["model"]
+        self.stream = cfg["stream"] if stream is None else stream
 
     def extract(self, image: Optional[Image.Image], row: dict) -> dict:
         if image is None:

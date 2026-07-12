@@ -3,16 +3,23 @@ STAGE 4 - Deterministic verification.
 
 Matches the document against the system record on the mandatory fields for the
 lender:
-    - every lender : date, amount, receiver-name (against that lender's allowlist)
+    - every lender : date, amount, receiver-name (tiered: lender's own name ->
+                     approved allowlist -> receiver UPI id on the document)
     - SMFG lenders : ALSO loan_account_number (LAN)
 
 100% deterministic, no model calls. A field is only "matched" on positive
-evidence; anything unconfirmed keeps the lead OUT of `verified`.
+evidence; anything unconfirmed keeps the lead OUT of `verified`. Receiver
+matching is soft but token-anchored: a match must carry a DISTINCTIVE element
+of the accepted name (hdb/smfg/jana...), never just generic words
+(bank/finance/services...). See check_receiver for the full hierarchy.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
+import threading
 from datetime import datetime
 
 from config import settings
@@ -23,6 +30,43 @@ with open(settings.LENDER_RECEIVERS_PATH, encoding="utf-8") as f:
     LENDER_RECEIVERS = json.load(f)
 with open(settings.LENDER_RULES_PATH, encoding="utf-8") as f:
     LENDER_RULES = json.load(f)
+
+_CONFIG_LOCK = threading.Lock()
+
+
+def reload_config() -> None:
+    """Re-read the lender config from disk IN PLACE, so every module holding a
+    reference to these dicts (metrics, workers) sees the update immediately."""
+    with open(settings.LENDER_RECEIVERS_PATH, encoding="utf-8") as f:
+        LENDER_RECEIVERS.clear()
+        LENDER_RECEIVERS.update(json.load(f))
+    with open(settings.LENDER_RULES_PATH, encoding="utf-8") as f:
+        LENDER_RULES.clear()
+        LENDER_RULES.update(json.load(f))
+
+
+def add_receiver(lender: str, name: str) -> bool:
+    """Append an approved receiver name to the lender's allowlist and persist it
+    (atomic temp-file replace, thread-safe). Returns False if already present.
+    This is how a human receiver-approval permanently teaches the config."""
+    lender, name = str(lender or "").strip(), str(name or "").strip()
+    if not lender or not name:
+        return False
+    with _CONFIG_LOCK:
+        with open(settings.LENDER_RECEIVERS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        existing = data.get(lender, [])
+        if any(_norm_name(n) == _norm_name(name) for n in existing):
+            reload_config()                      # ensure memory matches disk anyway
+            return False
+        data[lender] = existing + [name]
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(settings.LENDER_RECEIVERS_PATH),
+                                   suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, settings.LENDER_RECEIVERS_PATH)
+        reload_config()
+    return True
 
 
 # ── normalisers ───────────────────────────────────────────────────────────────
@@ -108,6 +152,132 @@ def _field_matches(n: str, cand: str) -> bool:
     return bool(cand) and (n == cand or n in cand or cand in n)
 
 
+# ── soft (token-anchored) matching ────────────────────────────────────────────
+# Generic corporate/finance words carry no identity: a soft match must anchor on a
+# DISTINCTIVE token of the accepted name ("hdb", "smfg", "jana"), never on these.
+# "Ram Financial Services" must NOT match "HDB Financial Services" even though the
+# generic tail is identical.
+_GENERIC_TOKENS = frozenset("""
+    bank banking finance financial finserv fintech services service limited ltd
+    pvt private company co corporation corp enterprises enterprise group india
+    indian small credit card cards loan loans capital payment payments pay app
+    technologies technology solutions international care and the of for
+""".split())
+
+
+def _distinctive(norm_name: str) -> list:
+    return [t for t in norm_name.split() if len(t) >= 3 and t not in _GENERIC_TOKENS]
+
+
+def _lev_le(a: str, b: str, k: int) -> bool:
+    """Levenshtein distance <= k (bounded DP with early exit)."""
+    if abs(len(a) - len(b)) > k:
+        return False
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        if min(cur) > k:
+            return False
+        prev = cur
+    return prev[-1] <= k
+
+
+def _tok_match(t: str, c: str) -> bool:
+    """A distinctive token matches a receiver token exactly, or within 1 typo for
+    tokens >= 4 chars (2 typos >= 8). 3-char tokens ('hdb', 'bob') must be exact."""
+    if t == c:
+        return True
+    if len(t) >= 8:
+        return _lev_le(t, c, 2)
+    if len(t) >= 4:
+        return _lev_le(t, c, 1)
+    return False
+
+
+def _soft_match(cand: str, name: str) -> bool:
+    """Field-level soft match: today's equality/containment, plus a distinctive-token
+    anchor — 'HDB Fin Services' matches 'HDB Financial Services Limited' because the
+    main element 'hdb' is present; generic words alone can never carry a match."""
+    n = _norm_name(name)
+    if not n or not cand:
+        return False
+    if _field_matches(n, cand):
+        return True
+    ctoks = cand.split()
+    return any(_tok_match(t, c) for t in _distinctive(n) for c in ctoks)
+
+
+# ── receiver UPI id (tier 3) ──────────────────────────────────────────────────
+# A UPI handle names the beneficiary account, so it can rescue a payee printed under
+# a personal/shop name. Domain must not be followed by .tld — that's an email, and a
+# support email on the receipt is NOT evidence of where the money went.
+_UPI_RE = re.compile(r"\b([a-z0-9][a-z0-9._-]{1,63})@([a-z][a-z0-9]{1,15})(?!\.?[a-z])",
+                     re.IGNORECASE)
+
+
+def _upi_handles(raw_text) -> list:
+    """Deterministic UPI-handle extraction from the ORIGINAL OCR text (normalisation
+    strips '@'). Returns unique (local_part, full_handle), lowercased."""
+    out, seen = [], set()
+    for m in _UPI_RE.finditer(str(raw_text or "").lower()):
+        full = m.group(0)
+        if full not in seen:
+            seen.add(full)
+            out.append((m.group(1), full))
+    return out
+
+
+def _seg_carries_name(seg: str, toks: list, distinct: set) -> bool:
+    """Can this handle segment be read ENTIRELY as pieces of the accepted name —
+    whole tokens, prefixes (>=3 chars) of tokens, or digit runs — with at least one
+    full DISTINCTIVE token present? 'janabank' = jana+bank -> yes; 'janardhan' has
+    'jana' but 'rdhan' is not part of the name -> no false positive."""
+    n = len(seg)
+    dp = [0] * (n + 1)          # 0 unreachable · 1 reachable · 2 reachable w/ anchor
+    dp[0] = 1
+    for i in range(n):
+        if not dp[i]:
+            continue
+        j = i
+        while j < n and seg[j].isdigit():
+            j += 1
+        if j > i:
+            dp[j] = max(dp[j], dp[i])
+        for t in toks:
+            cp = 0
+            while cp < len(t) and i + cp < n and seg[i + cp] == t[cp]:
+                cp += 1
+            for length in range(3, cp + 1):
+                if length == len(t):
+                    dp[i + length] = max(dp[i + length], 2 if t in distinct else dp[i])
+                else:
+                    dp[i + length] = max(dp[i + length], dp[i])
+            if len(t) < 3 and cp == len(t):          # short whole tokens ('of', 'pl')
+                dp[i + cp] = max(dp[i + cp], dp[i])
+    return dp[n] == 2
+
+
+def _upi_receiver_hit(raw_text, names) -> tuple | None:
+    """Does any UPI handle on the document carry an accepted name? Checks each
+    dot/dash-separated segment of the local part. Returns (matched_name, handle)."""
+    handles = _upi_handles(raw_text)
+    if not handles:
+        return None
+    for name in names:
+        n = _norm_name(name)
+        toks = n.split()
+        distinct = set(_distinctive(n))
+        if not distinct:
+            continue
+        for local, full in handles:
+            for seg in re.split(r"[._-]", local):
+                if seg and _seg_carries_name(seg, toks, distinct):
+                    return name, full
+    return None
+
+
 def _word_in_text(n: str, text: str) -> bool:
     """Whole-word (boundary) match of an accepted name inside the OCR body text. Stricter
     than a raw substring so a generic fragment can't leak a false match — used only when
@@ -118,42 +288,55 @@ def _word_in_text(n: str, text: str) -> bool:
 
 
 def check_receiver(doc_receiver, doc_text, lender) -> tuple[bool, str]:
-    """Zero-false-positive receiver check.
+    """Receiver check — a strict tier hierarchy, 100% deterministic (no model calls):
 
-    Priority:
-      1. The extracted receiver/payee FIELD matches an accepted name  → PASS (strong).
-      2. The receiver field is POPULATED but matches NONE of them → FAIL closed. A
-         readable payee that is a *different party* is positive evidence the money did
-         NOT go to the lender; a stray mention of the lender elsewhere on the page must
-         NOT rescue it. (This is what previously produced ~10% false-positive verifies.)
-      3. The receiver field is EMPTY/unreadable → fall back to a whole-word match of an
-         accepted name in the body OCR text. Word-boundary only, so a generic token
-         can't manufacture a match.
+      1. Payee FIELD vs the lender's OWN name (always first, soft token-anchored).
+      2. Payee FIELD vs the lender's approved allowlist (soft token-anchored).
+      3. Receiver UPI ID on the document vs both sets. A UPI handle identifies the
+         beneficiary ACCOUNT, so it may rescue a payee printed under another name
+         ("Ram Kirana Store" + smfgindia@icici -> verified). Lookalikes are rejected:
+         the handle must decompose into the accepted name's own tokens.
+      4. Payee field EMPTY -> whole-word match of an accepted name in the body OCR
+         text (word-boundary only, so a generic fragment can't manufacture a match).
+      5. Otherwise FAIL closed -> the lead stays unverified (Approvals queue).
+
+    "Soft" means anchored on a DISTINCTIVE token of the accepted name (exact, or
+    within 1 typo for tokens >= 4 chars); generic words (bank/finance/services...)
+    can never carry a match on their own.
     """
     allow = accepted_receivers(lender)
-    accepted = allow if allow else _lender_self_names(lender)
-    norm = [(_norm_name(n), n) for n in accepted]
-    norm = [(n, orig) for n, orig in norm if n]
+    self_names = _lender_self_names(lender)
     cand = _norm_name(doc_receiver)
     text = _norm_name(doc_text)
-    tail = "" if allow else " (no allowlist configured)"
 
-    # 1) strongest evidence: the payee field itself matches an accepted name
-    for n, orig in norm:
-        if _field_matches(n, cand):
-            return True, f"receiver matches '{orig}'{tail}"
+    # 1) the payee is the lender itself
+    for orig in self_names:
+        if _soft_match(cand, orig):
+            return True, f"receiver matches lender name '{orig}'"
 
-    # 2) a readable payee that matches NOBODY accepted → the money went elsewhere
+    # 2) the payee is an approved receiver for this lender
+    for orig in allow:
+        if _soft_match(cand, orig):
+            return True, f"receiver matches approved receiver '{orig}'"
+
+    # 3) the receiver UPI id carries the lender / an approved receiver name
+    hit = _upi_receiver_hit(doc_text, self_names + allow)
+    if hit:
+        name, handle = hit
+        return True, f"receiver UPI id '{handle}' carries '{name}'"
+
+    # 4) a readable payee that matches NOBODY accepted → the money went elsewhere
     if cand:
         who = str(doc_receiver).strip()
         if allow:
             return False, f"receiver '{who}' is not among accepted names for {lender}"
-        return False, f"receiver '{who}' does not match {lender}{tail}"
+        return False, f"receiver '{who}' does not match {lender} (no allowlist configured)"
 
-    # 3) no payee field — accept only a distinct, whole-word name in the document text
-    for n, orig in norm:
-        if _word_in_text(n, text):
-            return True, f"payee not in a field; '{orig}' found on document{tail}"
+    # 5) no payee field — accept only a distinct, whole-word name in the document text
+    for orig in (allow + self_names):
+        n = _norm_name(orig)
+        if n and _word_in_text(n, text):
+            return True, f"payee not in a field; '{orig}' found on document"
     if allow:
         return False, f"receiver unreadable and no accepted name found on document for {lender}"
     return False, (f"no accepted-receiver list configured for {lender}, "

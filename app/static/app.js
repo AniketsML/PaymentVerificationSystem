@@ -1,14 +1,24 @@
 /* Payment Verification Console — single-page app (vanilla JS). */
 (() => {
+  // session guard: if the login expires, any API call returns 401 -> bounce to the login page
+  const _fetch = window.fetch.bind(window);
+  window.fetch = (...a) => _fetch(...a).then(r => {
+    if (r.status === 401) { window.location.href = "/login?next=" + encodeURIComponent(location.pathname); throw new Error("unauthorized"); }
+    return r;
+  });
+
   const CFG = window.__CFG__ || { model: {}, deepLead: "" };
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || "#888";
-  const palette = () => ({ verified: cssVar("--ok"), unverified: cssVar("--bad"),
-                           manual_review: cssVar("--warn"), duplicate: cssVar("--dup"),
-                           non_document: cssVar("--neutral"), error: cssVar("--warn") });
+  // chart MARKS use the dedicated --ch-* steps (validated for each surface);
+  // text/badges keep the semantic tokens — same hues, text-contrast steps.
+  const palette = () => ({ verified: cssVar("--ch-ok"), unverified: cssVar("--ch-bad"),
+                           manual_review: cssVar("--ch-warn"), duplicate: cssVar("--ch-dup"),
+                           non_document: cssVar("--ch-neutral"), unprocessed: cssVar("--ch-warn"),
+                           error: cssVar("--ch-warn") });
   const fmtTime = (t) => (t || "").replace("T", " ").slice(0, 19);
   const debounce = (fn, ms = 280) => { let h; return (...a) => { clearTimeout(h); h = setTimeout(() => fn(...a), ms); }; };
 
@@ -17,7 +27,8 @@
 
   // per-column filters for the leads table. null = no filter; a Set = allowed values.
   let allRows = [];
-  const COL_FILTERS = { lead_id: null, lender: null, payment_method: null, outcome_text: null };
+  let lastStats = null;          // latest /api/stats payload (issue band reads .unprocessed)
+  const COL_FILTERS = { lead_id: null, lender: null, payment_method: null, issue: null, outcome_text: null };
   const rowVal = (r, col) => String(r[col] ?? "") || "—";
 
   /* ── toast ─────────────────────────────── */
@@ -35,6 +46,7 @@
     dashboard: ["Overview", "Dashboard", "Live verification overview"],
     verify: ["Run", "Verify", "Enqueue a batch or test a single receipt"],
     observability: ["Operations", "Observability", "Latency, throughput, quality & drift"],
+    approvals: ["Human loop", "Approvals", "Receiver mismatches awaiting a decision"],
   };
   let liveTimer = null;
   function startLive(name) {
@@ -53,6 +65,7 @@
     $("#pageSub").textContent = TITLES[name][2];
     if (name === "dashboard") refreshAll();
     if (name === "observability") loadObservability();
+    if (name === "approvals") loadApprovals();
     startLive(name);
   }
 
@@ -86,6 +99,7 @@
       ["bad", "Unverified", counts.unverified || 0],
       ["dup", "Duplicate", counts.duplicate || 0],
       ["gray", "Non-document", counts.non_document || 0],
+      ["warn", "Unprocessed", counts.unprocessed || 0],
     ];
     $("#statCards").innerHTML = cards.map(([c, l, n]) => {
       const pct = total ? Math.round(n / total * 100) : 0;
@@ -98,7 +112,7 @@
   function renderDonut(counts) {
     const C = palette();
     $("#donutTotal").textContent = (counts.total || 0).toLocaleString();
-    const keys = ["verified", "unverified", "duplicate", "non_document"];
+    const keys = ["verified", "unverified", "duplicate", "non_document", "unprocessed"];
     const data = keys.map(k => counts[k] || 0);
     $("#donutLegend").innerHTML = keys.map((k, i) =>
       `<span class="li"><span class="sw" style="background:${C[k]}"></span>${k} · <b>${data[i]}</b></span>`).join("");
@@ -116,6 +130,7 @@
     const top = methods.slice(0, 8);
     const labels = top.map(m => m.method), data = top.map(m => m.n);
     if (!window.Chart) return;
+    if (!labels.length) { emptyCanvas("method", "methodBar", "No leads yet"); return; }
     if (charts.method) { charts.method.data.labels = labels; charts.method.data.datasets[0].data = data; charts.method.update(); return; }
     charts.method = new Chart($("#methodBar"), {
       type: "bar",
@@ -136,7 +151,9 @@
   async function loadStats() {
     try {
       const s = await (await fetch("/api/stats?scope=" + state.scope)).json();
+      lastStats = s;
       renderStats(s.counts); renderDonut(s.counts); renderMethods(s.methods || []);
+      renderIssueBand();
     } catch (e) { toast("Failed to load stats", "bad"); }
   }
 
@@ -149,6 +166,7 @@
     $("#scopeBanner").classList.toggle("hidden", scope !== "test");
     $$("#wsSwitch .ws-opt").forEach(b => b.classList.toggle("active", b.dataset.scope === scope));
     refreshAll();
+    loadApprovals();             // approvals feature is live-only — view + badge follow the scope
     if (!$("#view-observability").classList.contains("hidden")) loadObservability();
     if (scope === "test") toast("Entered Test Workspace — sandbox data only", "");
   }
@@ -170,7 +188,37 @@
     allRows = rows;
     for (const k in COL_FILTERS) COL_FILTERS[k] = null;   // fresh view -> reset column filters
     closeColFilter();
+    updateMethodColumn();
+    renderIssueBand();
     renderLeadRows();
+  }
+
+  // in the Unprocessed section the Method column becomes "Issue" — method only exists
+  // for images that actually reached OCR; here the WHY-it-didn't is the useful axis.
+  const isUnprocView = () => state.status === "unprocessed";
+  function updateMethodColumn() {
+    $("#thMethodLabel").textContent = isUnprocView() ? "Issue" : "Method";
+    $("#thMethod").dataset.col = isUnprocView() ? "issue" : "payment_method";
+  }
+
+  function renderIssueBand() {
+    const band = $("#issueBand");
+    if (!band) return;
+    const show = isUnprocView();
+    band.classList.toggle("hidden", !show);
+    if (!show) return;
+    const issues = (lastStats && lastStats.unprocessed && lastStats.unprocessed.issues) || [];
+    const active = COL_FILTERS.issue;
+    band.innerHTML = issues.length ? issues.map(x => `
+      <button class="issue-tile${active && active.size === 1 && active.has(x.issue) ? " active" : ""}" data-issue="${esc(x.issue)}">
+        <span class="it-n mono">${x.n}</span><span class="it-l">${esc(x.issue)}</span>
+      </button>`).join("")
+      : `<span class="muted" style="font-size:12.5px;padding:2px 0">No unprocessed images — every image reached OCR. 🎉</span>`;
+    $$(".issue-tile", band).forEach(b => b.onclick = () => {
+      const v = b.dataset.issue, cur = COL_FILTERS.issue;
+      COL_FILTERS.issue = (cur && cur.size === 1 && cur.has(v)) ? null : new Set([v]);
+      renderLeadRows(); renderIssueBand();
+    });
   }
 
   function passesColFilters(r) {
@@ -181,15 +229,26 @@
     const rows = allRows.filter(passesColFilters);
     const body = $("#leadsBody");
     const filtered = rows.length !== allRows.length;
+    const anyFilter = Object.values(COL_FILTERS).some(s => s !== null);
     $("#tableCount").textContent = `${rows.length} lead${rows.length === 1 ? "" : "s"}` +
       (filtered ? ` of ${allRows.length}` : "");
-    $("#tableEmpty").classList.toggle("hidden", rows.length > 0);
+    $("#clearFilters").classList.toggle("hidden", !anyFilter);
+    const empty = $("#tableEmpty");
+    empty.classList.toggle("hidden", rows.length > 0);
+    if (!rows.length) {
+      // an empty FILTER result is not "no data" — say so, and offer the way out
+      empty.innerHTML = allRows.length
+        ? `No leads match the current filters. <button class="linklike" id="resetColF">Reset filters</button>`
+        : "No leads yet. Run a verification to populate the console.";
+      const rb = $("#resetColF");
+      if (rb) rb.onclick = resetColFilters;
+    }
     body.innerHTML = rows.map(r => `
       <tr data-id="${esc(r.lead_id)}">
         <td class="lead-id mono">${esc(r.lead_id)}</td>
         <td>${esc(r.lender || "—")}</td>
         <td>${badge(r.verification_status)}</td>
-        <td>${esc(r.payment_method || "—")}</td>
+        <td>${isUnprocView() ? `<span class="issue-cell">${esc(r.issue || "—")}</span>` : esc(r.payment_method || "—")}</td>
         <td class="cell-outcome">${esc(r.outcome_text || "")}</td>
         <td class="cell-time mono">${fmtTime(r.updated_at)}</td>
       </tr>`).join("");
@@ -201,8 +260,21 @@
   let colPopup = null;
   function closeColFilter() {
     if (!colPopup) return;
+    if (colPopup._track) document.removeEventListener("scroll", colPopup._track, true);
     colPopup.remove(); colPopup = null;
     document.removeEventListener("mousedown", colDocDown, true);
+    // release the frozen table region — one settle on close instead of jitter per tick
+    $$(".tablewrap.locked").forEach(t => t.classList.remove("locked"));
+    $$("table.cols-locked").forEach(t => {
+      t.classList.remove("cols-locked");
+      $$("thead th", t).forEach(h => h.style.width = "");
+    });
+  }
+
+  function resetColFilters() {
+    for (const k in COL_FILTERS) COL_FILTERS[k] = null;
+    closeColFilter();
+    renderLeadRows();
   }
   function colDocDown(e) {
     if (colPopup && !colPopup.contains(e.target) && !e.target.closest("th[data-col]")) closeColFilter();
@@ -227,10 +299,33 @@
           <span class="cf-v" title="${esc(v)}">${esc(v)}</span><span class="cf-n">${counts.get(v)}</span></label>`).join("")}</div>`;
     document.body.appendChild(pop);
 
-    const rect = th.getBoundingClientRect();
-    pop.style.top = `${Math.round(rect.bottom + 4)}px`;
-    pop.style.left = `${Math.round(Math.min(rect.left, window.innerWidth - pop.offsetWidth - 12))}px`;
     colPopup = pop;
+
+    // anchored dropdown: glued to its header — follows it on any scroll, flips upward
+    // when there is no room below, closes only when the header leaves the viewport
+    const position = () => {
+      const rect = th.getBoundingClientRect();
+      if (rect.bottom < 0 || rect.top > window.innerHeight) { closeColFilter(); return; }
+      const below = window.innerHeight - rect.bottom - 12;
+      const top = (below < pop.offsetHeight && rect.top > pop.offsetHeight + 12)
+        ? rect.top - pop.offsetHeight - 4 : rect.bottom + 4;
+      pop.style.top = `${Math.round(Math.max(8, top))}px`;
+      pop.style.left = `${Math.round(Math.max(8, Math.min(rect.left, window.innerWidth - pop.offsetWidth - 12)))}px`;
+    };
+    position();
+    pop._track = position;
+    document.addEventListener("scroll", position, { capture: true, passive: true });
+
+    // freeze the table region while the popup is open — ticking checkboxes must not
+    // shift the layout (or the popup) under the cursor. Column widths are pinned too:
+    // auto-layout would otherwise reflow the columns as the filtered content changes.
+    const wrap = th.closest(".tablewrap");
+    if (wrap) {
+      const table = wrap.querySelector("table");
+      $$("thead th", table).forEach(h => h.style.width = h.getBoundingClientRect().width + "px");
+      table.classList.add("cols-locked");
+      wrap.classList.add("locked");
+    }
 
     const apply = () => {
       const boxes = $$(".cf-item input", pop);
@@ -239,8 +334,9 @@
       renderLeadRows();
     };
     $$(".cf-item input", pop).forEach(b => b.onchange = apply);
-    pop.querySelector('[data-act="all"]').onclick = () => { $$(".cf-item input", pop).forEach(b => b.checked = true); apply(); };
-    pop.querySelector('[data-act="none"]').onclick = () => { $$(".cf-item input", pop).forEach(b => b.checked = false); apply(); };
+    // Select all / Clear act on the VISIBLE (searched) values only — like Excel
+    pop.querySelector('[data-act="all"]').onclick = () => { $$(".cf-item:not(.hidden) input", pop).forEach(b => b.checked = true); apply(); };
+    pop.querySelector('[data-act="none"]').onclick = () => { $$(".cf-item:not(.hidden) input", pop).forEach(b => b.checked = false); apply(); };
     const search = pop.querySelector(".cf-search input");
     search.oninput = () => {
       const q = search.value.toLowerCase();
@@ -249,8 +345,6 @@
     search.focus();
     document.addEventListener("mousedown", colDocDown, true);
     window.addEventListener("resize", closeColFilter, { once: true });
-    const tw = document.querySelector(".tablewrap");
-    if (tw) tw.addEventListener("scroll", closeColFilter, { once: true });
   }
 
   function refreshAll() { loadStats(); loadLeads(); }
@@ -389,8 +483,22 @@
   const AX = (mono = true) => ({ color: cssVar("--ink-faint"),
     font: { family: mono ? "JetBrains Mono" : "Hanken Grotesk", size: mono ? 10 : 12 } });
 
+  // an empty dataset renders a friendly note instead of a blank canvas
+  function emptyCanvas(key, canvasId, msg = "No data yet") {
+    if (charts[key]) { charts[key].destroy(); charts[key] = null; }
+    const cv = $("#" + canvasId); if (!cv) return true;
+    const ctx = cv.getContext("2d");
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.font = "13px 'Hanken Grotesk', sans-serif";
+    ctx.fillStyle = cssVar("--ink-faint");
+    ctx.textAlign = "center";
+    ctx.fillText(msg, cv.width / 2, cv.height / 2);
+    return true;
+  }
+
   function renderLatChart(series) {
     if (!window.Chart) return;
+    if (!series.length) { emptyCanvas("lat", "latChart", "No model calls in this window"); return; }
     if (charts.lat) charts.lat.destroy();
     charts.lat = new Chart($("#latChart"), {
       type: "line",
@@ -414,6 +522,7 @@
 
   function renderTputChart(series) {
     if (!window.Chart) return;
+    if (!series.length) { emptyCanvas("tput", "tputChart", "No completed leads in this window"); return; }
     if (charts.tput) charts.tput.destroy();
     charts.tput = new Chart($("#tputChart"), {
       type: "bar",
@@ -430,6 +539,7 @@
 
   function renderHBar(key, canvasId, labels, data, color, onBarClick) {
     if (!window.Chart) return;
+    if (!labels.length) { emptyCanvas(key, canvasId); return; }
     if (charts[key]) charts[key].destroy();
     charts[key] = new Chart($("#" + canvasId), {
       type: "bar",
@@ -500,14 +610,17 @@
     $("#funnelEmpty").classList.toggle("hidden", rows.length > 0);
     $("#funnelBody").innerHTML = rows.map(r => {
       const rate = r.total ? Math.round(r.verified / r.total * 100) : 0;
+      // numbers wear ink — the column headers carry identity; a rainbow of
+      // colored digits is noise, not information
       return `<tr>
         <td>${esc(r.lender)}</td>
         <td class="mono">${r.total}</td>
-        <td class="mono" style="color:var(--ok)">${r.verified}</td>
-        <td class="mono" style="color:var(--bad)">${r.unverified}</td>
-        <td class="mono" style="color:var(--dup)">${r.duplicate}</td>
-        <td class="mono" style="color:var(--neutral)">${r.non_document}</td>
-        <td class="mono">${rate}%</td></tr>`;
+        <td class="mono">${r.verified}</td>
+        <td class="mono">${r.unverified}</td>
+        <td class="mono">${r.duplicate}</td>
+        <td class="mono">${r.non_document}</td>
+        <td class="mono">${r.unprocessed ?? 0}</td>
+        <td class="mono" style="font-weight:700">${rate}%</td></tr>`;
     }).join("");
   }
 
@@ -527,9 +640,355 @@
     $$("#coverageBox [data-lender]").forEach(el => el.onclick = () => openDetail("lender", { lender: el.dataset.lender }));
   }
 
+  /* ── receiver approvals (the human loop for receiver mismatches) ────────── */
+  async function loadApprovals() {
+    // Approvals permanently mutate REAL lender config, so the feature does not
+    // exist inside the Test Workspace — the queue is live-data-only by design.
+    if (state.scope === "test") {
+      _apprRows = []; _apprSel.clear();
+      updateApprBadge(0);
+      $("#apprKpis").innerHTML = "";
+      $("#apprBulk").classList.add("hidden");
+      $("#apprEmpty").classList.add("hidden");
+      $("#apprHistWrap").classList.add("hidden");
+      $("#view-approvals .appr-hint").classList.add("hidden");
+      $("#apprGroups").innerHTML = `
+        <section class="panel appr-live-only">
+          <div class="alo-eyebrow">Live data only</div>
+          <h3>Approvals are disabled in the Test Workspace</h3>
+          <p>Approving a receiver permanently teaches the real lender configuration and re-verifies
+             real leads — sandbox runs never feed this queue. Switch to Live to review pending receivers.</p>
+          <button class="btn solid" id="apprGoLive">Switch to Live</button>
+        </section>`;
+      $("#apprGoLive").onclick = () => setScope("real");
+      return;
+    }
+    $("#apprHistWrap").classList.remove("hidden");
+    $("#view-approvals .appr-hint").classList.remove("hidden");
+    let d;
+    try { d = await (await fetch("/api/approvals")).json(); }
+    catch (e) { toast("Failed to load approvals", "bad"); return; }
+    renderApprovals(d.pending || []);
+    renderApprovalHistory(d.decisions || []);
+    updateApprBadge((d.pending || []).length);
+  }
+
+  function updateApprBadge(n) {
+    const b = $("#apprBadge"); if (!b) return;
+    b.textContent = n;
+    b.classList.toggle("hidden", !n);
+  }
+
+  function renderApprovals(rows) {
+    _apprRows = rows;
+    $("#apprEmpty").classList.toggle("hidden", rows.length > 0);
+
+    // at-a-glance KPIs (same stat tiles as the dashboard)
+    const lenders = [...new Set(rows.map(r => r.lender))];
+    const leads = rows.reduce((a, r) => a + r.count, 0);
+    const ready = rows.reduce((a, r) => a + r.ready, 0);
+    $("#apprKpis").innerHTML = [
+      ["warn", rows.length, "Receivers pending"],
+      ["tot", lenders.length, "Lenders"],
+      ["gray", leads, "Leads waiting"],
+      ["ok", ready, "Verify on approval"],
+    ].map(([c, n, l]) => `<div class="stat ${c}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
+
+    // STABLE ordering: every lender/receiver keeps its first-seen position across
+    // re-renders, so deciding one row never shuffles the rest of the page under
+    // the reviewer's cursor. New arrivals append at the end.
+    rows.forEach(r => {
+      if (!_apprSeq.has("L:" + r.lender)) _apprSeq.set("L:" + r.lender, ++_apprSeqN);
+      const k = keyOf(r);
+      if (!_apprSeq.has(k)) _apprSeq.set(k, ++_apprSeqN);
+    });
+    const live = new Set(rows.map(keyOf));
+    for (const k of [..._apprSel]) if (!live.has(k)) _apprSel.delete(k);
+    for (const k of [..._apprOpen]) if (!live.has(k)) _apprOpen.delete(k);
+
+    // one card per lender — receivers counted where they belong
+    const byLender = {};
+    rows.forEach((r, i) => (byLender[r.lender] = byLender[r.lender] || []).push({ ...r, i }));
+    const order = Object.entries(byLender)
+      .sort((a, b) => _apprSeq.get("L:" + a[0]) - _apprSeq.get("L:" + b[0]));
+    order.forEach(([, g]) => g.sort((a, b) => _apprSeq.get(keyOf(a)) - _apprSeq.get(keyOf(b))));
+
+    $("#apprGroups").innerHTML = order.map(([lender, group]) => {
+      const gl = group.reduce((a, r) => a + r.count, 0);
+      const gr = group.reduce((a, r) => a + r.ready, 0);
+      const rowsHtml = group.map(r => {
+        const k = keyOf(r);
+        const open = _apprOpen.has(k), sel = _apprSel.has(k);
+        const leads = r.leads || r.lead_ids.map(id => ({ lead_id: id }));
+        const leadRows = leads.slice(0, 30).map(l => `
+          <tr class="al-lead" data-id="${esc(l.lead_id)}" title="Open full lead details">
+            <td class="mono al-lead-id">${esc(l.lead_id)}</td>
+            <td class="mono">${esc(l.amount || "—")}</td>
+            <td class="mono">${esc(l.date || "—")}</td>
+            <td>${esc(l.method || "—")}</td>
+            <td>${(l.other_failed || []).length
+              ? `<span class="fchip bad" title="these fields also failed — approval alone won't verify this lead">${esc(l.other_failed.join(", "))}</span>`
+              : `<span class="fchip ok" title="receiver is the only failed field — verifies on approval">receiver only</span>`}</td>
+            <td class="mono muted">${esc(l.updated_at || "")}</td>
+          </tr>`).join("");
+        return `
+        <div class="al-row${sel ? " sel" : ""}" data-i="${r.i}" title="Click to ${open ? "hide" : "show"} lead details">
+          <input type="checkbox" class="al-check" ${sel ? "checked" : ""} title="Select for a bulk decision">
+          <button class="al-expand${open ? " open" : ""}" title="${open ? "Hide" : "Show"} leads">▸</button>
+          <div class="al-name">${esc(r.receiver)}</div>
+          <span class="al-count mono">${r.count} lead${r.count === 1 ? "" : "s"}</span>
+          ${r.ready ? `<span class="fchip ok">${r.ready} ready</span>` : `<span class="fchip na" title="other fields also failed — approval teaches the config only">config only</span>`}
+          <div class="al-actions">
+            <button class="al-btn ok appr-approve" data-i="${r.i}" title="Approve — teaches the config and re-verifies">Approve</button>
+            <button class="al-btn bad appr-reject" data-i="${r.i}" title="Reject — leads stay unverified">Reject</button>
+          </div>
+          <div class="al-chips${open ? "" : " hidden"}">
+            <table class="al-leads">
+              <thead><tr><th>Lead</th><th>Doc amount</th><th>Doc date</th><th>Method</th><th>Also failing</th><th>Processed</th></tr></thead>
+              <tbody>${leadRows}</tbody>
+            </table>
+            ${r.count > 30 ? `<div class="muted" style="font-size:11px;padding:6px 2px">+${r.count - 30} more lead${r.count - 30 === 1 ? "" : "s"} — decided together</div>` : ""}
+          </div>
+        </div>`;
+      }).join("");
+      return `<section class="panel al-card">
+        <div class="al-head">
+          <input type="checkbox" class="al-selall" title="Select every receiver of ${esc(lender)}">
+          <h3>${esc(lender)}</h3>
+          <span class="al-meta">${group.length} receiver${group.length === 1 ? "" : "s"} · ${gl} lead${gl === 1 ? "" : "s"}</span>
+          ${gr ? `<span class="fchip ok">${gr} ready</span>` : ""}
+        </div>
+        ${rowsHtml}
+      </section>`;
+    }).join("");
+
+    // the whole row is the expand affordance — clicks on controls keep their meaning
+    $$("#apprGroups .al-row").forEach(el => {
+      el.dataset.k = keyOf(rows[+el.dataset.i]);
+      el.addEventListener("click", e => {
+        if (e.target.closest("button, input, label, .al-chips")) return;
+        toggleApprRow(el);
+      });
+    });
+    $$("#apprGroups .al-expand").forEach(b => b.onclick = () => toggleApprRow(b.closest(".al-row")));
+    $$("#apprGroups .al-lead").forEach(tr => tr.onclick = () => openLead(tr.dataset.id));
+    $$("#apprGroups .al-check").forEach(cb => cb.onchange = () => {
+      const row = cb.closest(".al-row");
+      cb.checked ? _apprSel.add(row.dataset.k) : _apprSel.delete(row.dataset.k);
+      row.classList.toggle("sel", cb.checked);
+      syncSelAll(); updateBulkBar();
+    });
+    $$("#apprGroups .al-selall").forEach(cb => cb.onchange = () => {
+      $$(".al-check", cb.closest(".al-card")).forEach(c => {
+        const row = c.closest(".al-row");
+        c.checked = cb.checked;
+        cb.checked ? _apprSel.add(row.dataset.k) : _apprSel.delete(row.dataset.k);
+        row.classList.toggle("sel", cb.checked);
+      });
+      syncSelAll(); updateBulkBar();
+    });
+    $$("#apprGroups .appr-approve").forEach(b => b.onclick = () => openApprConfirm([rows[+b.dataset.i]], "approved"));
+    $$("#apprGroups .appr-reject").forEach(b => b.onclick = () => openApprConfirm([rows[+b.dataset.i]], "rejected"));
+    syncSelAll(); updateBulkBar();
+  }
+
+  /* ── approvals: selection state, bulk bar & the decision modal ───────────── */
+  const keyOf = (r) => r.lender + " ␟ " + r.receiver;   // unique row key
+  const _apprSeq = new Map();    // first-seen order -> rows never shuffle mid-session
+  let _apprSeqN = 0;
+  const _apprOpen = new Set();   // expanded rows (survive re-renders)
+  const _apprSel = new Set();    // selected rows
+  let _apprRows = [];            // last payload, for selection lookups
+  let _apprPending = null;       // {items, decision} awaiting confirmation
+  let _apprRunning = false;      // decisions in flight — modal locked
+
+  function toggleApprRow(el) {
+    const chips = $(".al-chips", el);
+    const open = !chips.classList.toggle("hidden");
+    open ? _apprOpen.add(el.dataset.k) : _apprOpen.delete(el.dataset.k);
+    $(".al-expand", el).classList.toggle("open", open);
+    el.title = `Click to ${open ? "hide" : "show"} lead details`;
+  }
+
+  function syncSelAll() {
+    $$("#apprGroups .al-card").forEach(card => {
+      const boxes = $$(".al-check", card), on = boxes.filter(b => b.checked).length;
+      const all = $(".al-selall", card);
+      if (!all) return;
+      all.checked = on > 0 && on === boxes.length;
+      all.indeterminate = on > 0 && on < boxes.length;
+    });
+  }
+
+  function updateBulkBar() {
+    const sel = _apprRows.filter(r => _apprSel.has(keyOf(r)));
+    $("#apprBulk").classList.toggle("hidden", !sel.length);
+    if (!sel.length) return;
+    const leads = sel.reduce((a, r) => a + r.count, 0);
+    const ready = sel.reduce((a, r) => a + r.ready, 0);
+    $("#bbCount").textContent = `${sel.length} receiver${sel.length === 1 ? "" : "s"}`;
+    $("#bbMeta").innerHTML = `${leads} lead${leads === 1 ? "" : "s"}` +
+      (ready ? ` · <span style="color:var(--ok)">${ready} verify on approval</span>` : "");
+  }
+
+  function openApprConfirm(items, decision) {
+    if (state.scope === "test") return;         // feature does not exist in the sandbox
+    _apprPending = { items, decision };
+    const ok = decision === "approved";
+    const many = items.length > 1;
+    const leads = items.reduce((a, r) => a + r.count, 0);
+    const ready = items.reduce((a, r) => a + r.ready, 0);
+    const rest = leads - ready;
+    const lenders = [...new Set(items.map(r => r.lender))];
+
+    const eb = $("#amEyebrow");
+    eb.textContent = (ok ? "Approve receiver" : "Reject receiver") + (many ? "s" : "");
+    eb.className = "am-eyebrow " + (ok ? "ok" : "bad");
+    $("#amTitle").textContent = many ? `${items.length} receivers` : items[0].receiver;
+    $("#amFor").innerHTML = many
+      ? `across <b>${lenders.length}</b> lender${lenders.length === 1 ? "" : "s"}`
+      : `for <b>${esc(items[0].lender)}</b>`;
+
+    $("#amList").classList.toggle("hidden", !many);
+    $("#amList").innerHTML = !many ? "" : items.map(r => `
+      <div class="am-li">
+        <span class="am-li-name">${esc(r.receiver)}</span>
+        <span class="am-li-lender mono">${esc(r.lender)}</span>
+        <span class="am-li-n mono">${r.count} lead${r.count === 1 ? "" : "s"}</span>
+        ${r.ready ? `<span class="fchip ok">${r.ready} ready</span>` : `<span class="fchip na">config only</span>`}
+      </div>`).join("");
+
+    $("#amNums").innerHTML = (ok ? [
+      ["", leads, `lead${leads === 1 ? "" : "s"} re-verify`],
+      ["ok", ready, "become verified"],
+      ...(rest ? [["na", rest, "stay unverified"]] : []),
+    ] : [
+      ["", items.length, `pair${many ? "s leave" : " leaves"} the queue`],
+      ["bad", leads, `lead${leads === 1 ? "" : "s"} stay unverified`],
+    ]).map(([c, n, l]) => `<div class="am-num ${c}"><div class="n mono">${n}</div><div class="l">${l}</div></div>`).join("");
+
+    $("#amLines").innerHTML = (ok ? [
+      ["ok", many ? "each name is permanently added to its lender's accepted receivers"
+                  : `“${esc(items[0].receiver)}” is permanently added to <b>${esc(items[0].lender)}</b>'s accepted receivers`],
+      ["ok", "affected leads re-verify instantly — deterministic, no model call"],
+      ...(rest ? [["na", `${rest} lead${rest === 1 ? "" : "s"} still fail on other fields and stay unverified`]] : []),
+    ] : [
+      ["bad", `the pair${many ? "s" : ""} never re-enter${many ? "" : "s"} this queue`],
+      ["bad", "the leads stay unverified — nothing else changes"],
+    ]).map(([c, t]) => `<div class="am-line"><span class="am-dot ${c}"></span><span>${t}</span></div>`).join("");
+
+    $("#amNote").value = "";
+    const btn = $("#amConfirm");
+    btn.className = "al-btn am-go " + (ok ? "ok" : "bad");
+    btn.innerHTML = (ok ? "Approve" : "Reject") + (many ? ` ${items.length} receivers` : "");
+    btn.disabled = false; $("#amCancel").disabled = false;
+    $("#apprModal").classList.add("open"); $("#apprScrim").classList.add("open");
+    $("#amNote").focus();
+  }
+
+  function closeApprModal() {
+    if (_apprRunning) return;                   // decisions in flight — can't abort
+    _apprPending = null;
+    $("#apprModal").classList.remove("open"); $("#apprScrim").classList.remove("open");
+  }
+
+  async function executeDecisions() {
+    if (!_apprPending || _apprRunning) return;
+    const { items, decision } = _apprPending;
+    const note = $("#amNote").value.trim();
+    const btn = $("#amConfirm");
+    _apprRunning = true;
+    btn.disabled = true; $("#amCancel").disabled = true;
+    let pairs = 0, affected = 0, flipped = 0; const errs = [];
+    for (let i = 0; i < items.length; i++) {
+      btn.innerHTML = `<span class="spinner"></span>&nbsp;${decision === "approved" ? "Approving" : "Rejecting"} ${i + 1}/${items.length}…`;
+      try {
+        const r = await (await fetch("/api/approvals/decide", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lender: items[i].lender, receiver: items[i].receiver, decision, note }),
+        })).json();
+        if (r.error) errs.push(`${items[i].receiver} — ${r.error}`);
+        else { pairs++; affected += r.affected || 0; flipped += r.flipped || 0; _apprSel.delete(keyOf(items[i])); }
+      } catch (e) { errs.push(items[i].receiver); }
+    }
+    _apprRunning = false;
+    closeApprModal();
+    if (pairs) toast(decision === "approved"
+      ? `Approved ${pairs} receiver${pairs === 1 ? "" : "s"} — ${affected} lead${affected === 1 ? "" : "s"} re-verified, <b>${flipped} now verified</b>`
+      : `Rejected ${pairs} receiver${pairs === 1 ? "" : "s"} — removed from the queue`, "ok", 5200);
+    if (errs.length) toast(esc(errs.slice(0, 3).join(" · ")) + (errs.length > 3 ? ` +${errs.length - 3} more` : ""), "bad", 6500);
+    loadApprovals();
+    loadStats();                 // dashboard counts may have shifted
+  }
+
+  function renderApprovalHistory(rows) {
+    $("#apprHistTag").textContent = rows.length;
+    if (!rows.length) {
+      $("#apprHistory").innerHTML = `<p class="muted" style="padding:10px 0 4px">No decisions yet.</p>`;
+      return;
+    }
+    $("#apprHistory").innerHTML = rows.map(d => `
+      <div class="appr-hist-row">
+        <span class="ah-dot ${d.decision === "approved" ? "ok" : "bad"}" title="${d.decision}"></span>
+        <span class="ah-name">${esc(d.receiver_name)}</span>
+        <span class="ah-arrow">→</span>
+        <span class="ah-lender">${esc(d.lender)}</span>
+        ${d.decision === "approved" ? `<span class="ah-stats mono">${d.flipped}/${d.affected} verified</span>` : `<span class="ah-stats mono" style="color:var(--ink-faint)">rejected</span>`}
+        <span class="ah-meta">${esc(d.decided_by || "—")} · ${esc(d.decided_at)}${d.note ? ` · “${esc(d.note)}”` : ""}</span>
+      </div>`).join("");
+  }
+
   /* ── drill-down modal (a clicked metric -> the underlying leads) ────────── */
   function closeObsModal() {
     $("#obsModal").classList.remove("open"); $("#obsScrim").classList.remove("open");
+  }
+
+  /* ── model API config (plug-and-play endpoint) ─────────────────────────── */
+  async function openCfg() {
+    try {
+      const c = await (await fetch("/api/config/model")).json();
+      $("#cfgUrl").value = c.url || "";
+      $("#cfgModel").value = c.model || "";
+      $("#cfgStream").checked = !!c.stream;
+      $("#cfgKey").value = "";
+      $("#cfgKeyHint").textContent = c.has_key ? `current: ${c.key_masked}` : "none set";
+      $("#cfgTestResult").classList.add("hidden");
+      $("#cfgModal").classList.add("open"); $("#cfgScrim").classList.add("open");
+    } catch (e) { toast("Failed to load config", "bad"); }
+  }
+  function closeCfg() { $("#cfgModal").classList.remove("open"); $("#cfgScrim").classList.remove("open"); }
+
+  async function testCfg() {
+    const btn = $("#cfgTest"), old = btn.textContent; btn.disabled = true; btn.textContent = "Testing…";
+    const body = { url: $("#cfgUrl").value.trim(), key: $("#cfgKey").value, model: $("#cfgModel").value.trim() };
+    const box = $("#cfgTestResult"); box.classList.remove("hidden"); box.className = "cfg-test"; box.textContent = "…";
+    try {
+      const r = await (await fetch("/api/config/model/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).json();
+      if (r.ok) {
+        const mp = r.model_present === false ? ` · ⚠ model “${esc(body.model)}” not offered` : (r.model_present ? " · model found ✓" : "");
+        box.className = "cfg-test ok";
+        box.innerHTML = `✓ Reachable — HTTP ${r.status} · ${r.ms} ms${mp}` +
+          (r.models && r.models.length ? `<div class="cfg-models">models: ${r.models.map(esc).join(", ")}</div>` : "");
+      } else {
+        box.className = "cfg-test bad";
+        box.textContent = `✗ ${r.error || "unreachable"}${r.ms ? ` (${r.ms} ms)` : ""}`;
+      }
+    } catch (e) { box.className = "cfg-test bad"; box.textContent = "✗ test failed"; }
+    btn.disabled = false; btn.textContent = old;
+  }
+
+  async function saveCfg() {
+    const body = { url: $("#cfgUrl").value.trim(), key: $("#cfgKey").value, model: $("#cfgModel").value.trim(), stream: $("#cfgStream").checked };
+    if (!body.url) { toast("Endpoint URL is required", "bad"); return; }
+    const btn = $("#cfgSave"); btn.disabled = true;
+    try {
+      const c = await (await fetch("/api/config/model", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).json();
+      $("#mcModel").textContent = c.model || "model";
+      $("#mcUrl").textContent = (c.url || "") + (c.stream ? " · stream" : "");
+      toast("Endpoint saved — applies to the next lead", "ok");
+      closeCfg();
+    } catch (e) { toast("Save failed", "bad"); }
+    btn.disabled = false;
   }
   async function openDetail(kind, params = {}) {
     const qs = new URLSearchParams({ kind, scope: state.scope, ...params }).toString();
@@ -660,6 +1119,8 @@
       cls = "ok"; note = "All mandatory fields matched."; chips = chipsFrom(outcome);
     } else if (status === "non_document") {
       note = outcome.describes || "Not a valid payment document.";
+    } else if (status === "unprocessed") {
+      cls = "warn"; note = outcome.describes || "Image never reached OCR.";
     } else if (status === "duplicate") {
       cls = "dup"; note = outcome.reason || "Duplicate submission — already processed.";
     } else if (status === "manual_review") {
@@ -673,7 +1134,7 @@
   }
 
   /* ── human-review loop ─────────────────────────────────────────────────── */
-  const STATUS_OPTS = ["verified", "unverified", "non_document", "duplicate"];
+  const STATUS_OPTS = ["verified", "unverified", "non_document", "unprocessed", "duplicate"];
   const savedReviewer = () => { try { return localStorage.getItem("pv_reviewer") || ""; } catch (e) { return ""; } };
 
   function reviewHtml(status, review) {
@@ -709,7 +1170,12 @@
       </div></div>`;
   }
 
+  let _reviewing = false;                      // double-click guard
   async function submitReview(leadId, status, decision) {
+    if (_reviewing) return;
+    _reviewing = true;
+    const cBtn = $("#rvConfirm"), oBtn = $("#rvOverturn");
+    if (cBtn) cBtn.disabled = true; if (oBtn) oBtn.disabled = true;
     const reviewer = ($("#rvReviewer").value || "").trim();
     const note = ($("#rvNote").value || "").trim();
     try { if (reviewer) localStorage.setItem("pv_reviewer", reviewer); } catch (e) {}
@@ -722,6 +1188,10 @@
       toast(decision === "overturned" ? "Verdict overturned" : "Verdict confirmed", "ok");
       openLead(leadId);            // refresh the drawer to show the new review state
     } catch (e) { toast("Review failed", "bad"); }
+    finally {
+      _reviewing = false;
+      if (cBtn) cBtn.disabled = false; if (oBtn) oBtn.disabled = false;
+    }
   }
 
   function wireReview(leadId, status) {
@@ -742,7 +1212,7 @@
       <div class="ls-cell"><div class="ls-k">Method</div><div class="ls-v">${esc(fin.payment_method || "—")}</div></div>
       <div class="ls-cell"><div class="ls-k">Updated · UTC</div><div class="ls-v mono">${fmtTime(fin.updated_at) || "—"}</div></div>
     </div>`;
-    const imgHtml = j.image_url ? `<div class="d-section"><h4>Document</h4><a href="${esc(j.image_url)}" target="_blank"><img class="d-img" src="${esc(j.image_url)}"></a></div>` : "";
+    const imgHtml = j.image_url ? `<div class="d-section" id="dImgSection"><h4>Document</h4><a href="${esc(j.image_url)}" target="_blank"><img class="d-img" src="${esc(j.image_url)}"></a></div>` : "";
     const compare = `<div class="d-section"><h4>Verification <span class="n">expected ↔ document</span></h4>
       ${comparisonHtml(j.csv_row, ex, verifyOutcome(j.outcome))}
       ${allColsHtml(j.csv_row)}
@@ -755,6 +1225,13 @@
       ${status !== "unknown" ? reviewHtml(status, j.review) : ""}
       ${lifecycleHtml(j.journey)}`;
     if (status !== "unknown") wireReview(j.lead_id, status);
+    // a broken/private/expired document link degrades to a note, not a broken-image icon
+    const dimg = $("#dImgSection img");
+    if (dimg) dimg.onerror = () => {
+      $("#dImgSection").innerHTML = `<h4>Document</h4>
+        <p class="muted" style="font-size:12.5px">Image could not be loaded — the link is private, expired, or removed.
+        <a href="${esc(j.image_url)}" target="_blank">Open source link</a></p>`;
+    };
   }
 
   function lifecycleHtml(journey) {
@@ -792,7 +1269,8 @@
   /* ── batch: enqueue + poll (durable job queue) ─────────────────────────── */
   function miniCounts(v) {
     const cells = [["ok", "verified", v.verified || 0], ["bad", "unverified", v.unverified || 0],
-                   ["gray", "non_document", v.non_document || 0]];
+                   ["gray", "non_document", v.non_document || 0],
+                   ["warn", "unprocessed", v.unprocessed || 0]];
     $("#miniCounts").innerHTML = cells.map(([cl, l, n]) =>
       `<div class="mini ${cl}"><div class="mn">${n}</div><div class="ml">${l}</div></div>`).join("");
   }
@@ -846,7 +1324,7 @@
       list.innerHTML = (p.leads || []).map(x => {
         const st = x.verification_status || (x.job_status === "failed" ? "error" :
                    x.job_status === "done" ? "done" : "pending");
-        const cls = ["verified", "unverified", "non_document", "error"].includes(st) ? st : "pending";
+        const cls = ["verified", "unverified", "non_document", "unprocessed", "error"].includes(st) ? st : "pending";
         const label = x.job_status === "pending" ? "queued" : x.job_status === "in_progress" ? "running…" : (x.outcome_text || x.last_error || "");
         return `<div class="live-row" data-id="${esc(x.lead_id)}">
           <span class="badge b-${cls}">${esc(st)}</span>
@@ -933,13 +1411,32 @@
     $("#scrim").onclick = closeDrawer;
     $("#obsModalClose").onclick = closeObsModal;
     $("#obsScrim").onclick = closeObsModal;
-    document.addEventListener("keydown", e => { if (e.key === "Escape") { closeColFilter(); closeObsModal(); closeDrawer(); } });
+    $("#modelChip").onclick = openCfg;
+    $("#cfgClose").onclick = closeCfg;
+    $("#cfgScrim").onclick = closeCfg;
+    $("#cfgTest").onclick = testCfg;
+    $("#cfgSave").onclick = saveCfg;
+    // approvals: decision modal + bulk bar
+    $("#amClose").onclick = closeApprModal;
+    $("#amCancel").onclick = closeApprModal;
+    $("#apprScrim").onclick = closeApprModal;
+    $("#amConfirm").onclick = executeDecisions;
+    $("#amNote").addEventListener("keydown", e => { if (e.key === "Enter") executeDecisions(); });
+    $("#bbClear").onclick = () => {
+      _apprSel.clear();
+      $$("#apprGroups .al-check").forEach(c => { c.checked = false; c.closest(".al-row").classList.remove("sel"); });
+      syncSelAll(); updateBulkBar();
+    };
+    $("#bbApprove").onclick = () => { const s = _apprRows.filter(r => _apprSel.has(keyOf(r))); if (s.length) openApprConfirm(s, "approved"); };
+    $("#bbReject").onclick = () => { const s = _apprRows.filter(r => _apprSel.has(keyOf(r))); if (s.length) openApprConfirm(s, "rejected"); };
+    document.addEventListener("keydown", e => { if (e.key === "Escape") { closeColFilter(); closeObsModal(); closeCfg(); closeDrawer(); closeApprModal(); } });
 
     $$("#statusChips .chip").forEach(c => c.onclick = () => {
       $$("#statusChips .chip").forEach(x => x.classList.remove("active"));
       c.classList.add("active"); state.status = c.dataset.status; loadLeads();
     });
     $$("th[data-col]").forEach(th => th.onclick = () => openColFilter(th.dataset.col, th));
+    $("#clearFilters").onclick = resetColFilters;
     $("#globalSearch").addEventListener("input", debounce(e => {
       state.q = e.target.value.trim(); switchView("dashboard"); loadLeads();
     }));
@@ -955,6 +1452,7 @@
     $("#runImg").onclick = runImage;
 
     refreshAll();
+    loadApprovals();             // populates the nav badge (and the view, if opened)
     if (CFG.deepLead) openLead(CFG.deepLead);
   }
   document.addEventListener("DOMContentLoaded", init);

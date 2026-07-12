@@ -9,9 +9,19 @@
   --ink:#111110; --ink-soft:#57564f; --ink-faint:#8a887e;
   --line:rgba(17,17,16,.14); --line-strong:rgba(17,17,16,.28);
   --accent:#1b29ff; --accent-ink:#ffffff; --accent-soft:rgba(27,41,255,.08);
-  --ok:#0a7a41; --ok-bg:#e2f2e8; --bad:#c81e1e; --bad-bg:#fbe6e6;
-  --neutral:#6a685f; --neutral-bg:#eae8e1; --warn:#a85c00; --warn-bg:#f7ecd8;
-  --dup:#5b3fd6; --dup-bg:#ece7fb;
+  /* MONOCHROME + ONE ALARM — the professional-console grammar.
+     TWO hues in the whole status system: brand blue (verified/positive/primary)
+     and red (unverified — the single alarm on screen). Everything inert wears a
+     neutral step: charcoal = unprocessed (heavy, needs fixing, not an emergency),
+     mid gray = duplicate, light gray = non-document. Amber stays reserved for
+     true UI warnings (test workspace, toasts) — never a status. */
+  --ok:#1f2fd6; --ok-bg:#e9ebfd; --bad:#d02f2f; --bad-bg:#fdeaea;
+  --neutral:#6a685f; --neutral-bg:#eae8e1; --warn:#b26a00; --warn-bg:#f8efdb;
+  --dup:#5b5952; --dup-bg:#e9e7e0;
+  /* chart MARK steps for this surface (#ffffff). Deliberately monochrome —
+     neutrals below the chroma floor are the point; relief = 2px segment gaps +
+     counted legend + tooltips + the leads table. */
+  --ch-ok:#2230e0; --ch-bad:#e04545; --ch-dup:#9b988e; --ch-neutral:#c2bfb5; --ch-warn:#3f3d37;
   --shadow:0 1px 0 var(--line);
 }
 [data-theme="dark"] {
@@ -19,14 +29,20 @@
   --ink:#eceae1; --ink-soft:#a4a196; --ink-faint:#726f65;
   --line:rgba(255,255,255,.14); --line-strong:rgba(255,255,255,.26);
   --accent:#6b78ff; --accent-ink:#0a0b09; --accent-soft:rgba(107,120,255,.14);
-  --ok:#4ccB87; --ok-bg:rgba(76,203,135,.14); --bad:#ff6b6b; --bad-bg:rgba(255,107,107,.14);
+  --ok:#7e89ff; --ok-bg:rgba(126,137,255,.15); --bad:#ff6b6b; --bad-bg:rgba(255,107,107,.14);
   --neutral:#9a978c; --neutral-bg:rgba(255,255,255,.07); --warn:#e0a24a; --warn-bg:rgba(224,162,74,.15);
-  --dup:#a690ff; --dup-bg:rgba(166,144,255,.16);
+  --dup:#b7b4a8; --dup-bg:rgba(255,255,255,.10);
+  /* dark chart marks for this surface (#151613): same monochrome system —
+     charcoal flips to a bright neutral so "unprocessed" stays the heavy step */
+  --ch-ok:#6875f2; --ch-bad:#e46262; --ch-dup:#8a877c; --ch-neutral:#565449; --ch-warn:#c9c6ba;
   --shadow:0 1px 0 var(--line);
 }
 
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
+/* reserve the scrollbar gutter: filtering/expanding content can never cause the
+   horizontal "everything shifts" jump when a scrollbar appears or disappears */
+html{scrollbar-gutter:stable}
 body{
   background:var(--paper); color:var(--ink);
   font-family:"Hanken Grotesk",-apple-system,BlinkMacSystemFont,sans-serif;
@@ -44,7 +60,8 @@ a:hover{text-decoration:underline;text-underline-offset:3px}
 ::selection{background:var(--accent);color:var(--accent-ink)}
 
 /* ── shell ──────────────────────────────────────────────────── */
-.shell{display:grid;grid-template-columns:1fr;min-height:100vh}
+.shell{display:grid;grid-template-columns:1fr;min-height:100vh;max-width:100vw;overflow-x:clip}
+.shell>*{min-width:0}   /* keep the main column from overflowing the viewport */
 
 /* ── rail ───────────────────────────────────────────────────── */
 .rail{
@@ -83,7 +100,7 @@ a:hover{text-decoration:underline;text-underline-offset:3px}
 .mc-url{font-size:10px;color:var(--ink-faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px}
 
 /* ── stage ──────────────────────────────────────────────────── */
-.stage{padding:26px 22px 80px;max-width:1280px;width:100%;margin:0 auto}
+.stage{padding:26px 22px 80px;max-width:1280px;width:100%;margin:0 auto;min-width:0}
 .stage-top{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;flex-wrap:wrap;
   padding-bottom:20px;margin-bottom:26px;border-bottom:1px solid var(--line-strong)}
 .eyebrow{font-size:11px;letter-spacing:.24em;text-transform:uppercase;color:var(--accent);font-weight:700;margin-bottom:8px}
@@ -113,17 +130,24 @@ h1{font-size:clamp(30px,5vw,46px);line-height:.98;letter-spacing:-.035em}
 .statband{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:1px;
   background:var(--line-strong);border:1px solid var(--line-strong);margin-bottom:22px}
 .stat{position:relative;padding:20px 20px 18px;background:var(--surface)}
+/* numerals wear ink — identity lives in the colored tick, not the digits.
+   (Colored 42px numerals were the "old dashboard" look.) */
 .stat .n{font-family:"Space Grotesk";font-weight:600;font-size:clamp(28px,3.2vw,42px);line-height:.9;
-  letter-spacing:-.04em;color:var(--c,var(--ink))}
+  letter-spacing:-.04em;color:var(--ink)}
 .stat .l{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);font-weight:700;margin-top:12px;white-space:nowrap}
 .stat .pct{position:absolute;top:16px;right:15px;font-family:"JetBrains Mono";font-size:11.5px;color:var(--ink-faint)}
-.stat.tot{--c:var(--accent)} .stat.ok{--c:var(--ok)} .stat.bad{--c:var(--bad)}
-.stat.gray{--c:var(--neutral)} .stat.warn{--c:var(--warn)} .stat.dup{--c:var(--dup)}
-.stat.tot::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent)}
+.stat.tot{--c:var(--accent)} .stat.ok{--c:var(--ch-ok)} .stat.bad{--c:var(--ch-bad)}
+.stat.gray{--c:var(--ch-neutral)} .stat.warn{--c:var(--ch-warn)} .stat.dup{--c:var(--ch-dup)}
+.stat::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--c,var(--line-strong))}
 
 /* ── panels ─────────────────────────────────────────────────── */
 .panelrow{display:grid;grid-template-columns:1fr 1.35fr;gap:22px;margin-bottom:22px}
-.panel{background:var(--surface);border:1px solid var(--line-strong);padding:22px}
+.panel{background:var(--surface);border:1px solid var(--line-strong);padding:22px;min-width:0}
+/* grid/flex children default to min-width:auto — without this a wide child (chart, table,
+   long string) refuses to shrink and overflows into the neighbouring column */
+.panelrow>*,.verifyrow>*{min-width:0}
+.panel-head h3{min-width:0;overflow-wrap:anywhere}
+.panel canvas{max-width:100%}
 .panel-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;
   padding-bottom:14px;margin-bottom:16px;border-bottom:1px solid var(--line)}
 .panel-head h3{font-size:16px;letter-spacing:-.01em}
@@ -139,6 +163,11 @@ h1{font-size:clamp(30px,5vw,46px);line-height:.98;letter-spacing:-.035em}
 .fill-v{width:46px;text-align:right;font-size:12.5px;color:var(--ink-soft);flex:none}
 .obs-kv{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line)}
 .obs-kv-cell{background:var(--surface);padding:14px 15px}
+/* equal-height panel row: the KV tiles absorb the leftover height instead of
+   leaving a dead gap at the panel's bottom */
+.panelrow.even .panel{display:flex;flex-direction:column}
+#queueBox{flex:1;display:flex;flex-direction:column}
+#queueBox .obs-kv{flex:1;grid-auto-rows:1fr}
 .obs-kv-n{font-family:"Space Grotesk";font-weight:600;font-size:24px;letter-spacing:-.03em}
 .obs-kv-l{font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);font-weight:700;margin-top:4px}
 .cov-item{display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:1px solid var(--line);font-size:13.5px}
@@ -186,7 +215,19 @@ h1{font-size:clamp(30px,5vw,46px);line-height:.98;letter-spacing:-.035em}
 .chip.active{background:var(--ink);color:var(--surface)}
 .chip .dot{width:8px;height:8px;border-radius:50%}
 .dot.v{background:var(--ok)} .dot.u{background:var(--bad)} .dot.n{background:var(--neutral)}
-.dot.m{background:var(--warn)} .dot.d{background:var(--dup)}
+.dot.m{background:var(--warn)} .dot.d{background:var(--dup)} .dot.p{background:var(--ch-warn)}
+
+/* ── unprocessed-image section: issue classification band ────────────────── */
+.issueband{display:flex;flex-wrap:wrap;gap:8px;padding:12px 0 2px;border-top:1px solid var(--line);
+  margin-top:12px}
+.issue-tile{display:inline-flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;
+  border:1px solid var(--line-strong);background:var(--surface);
+  font:600 12px/1 "Space Grotesk";color:var(--ink-soft);
+  transition:border-color .12s,background .12s,color .12s}
+.issue-tile:hover{border-color:var(--accent);color:var(--ink)}
+.issue-tile.active{border-color:var(--accent);background:var(--accent-soft);color:var(--ink)}
+.issue-tile .it-n{font:700 12px/1 "JetBrains Mono";color:var(--ink)}
+.issue-cell{color:var(--ink-soft);font-weight:600;font-size:12.5px}
 .count{font-family:"JetBrains Mono";font-size:12.5px;color:var(--ink-faint)}
 
 /* per-column filter (clickable header + value dropdown) */
@@ -213,7 +254,16 @@ thead th.filtered .th-caret{color:var(--accent)}
 .cf-item input{flex:none;width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
 .cf-item .cf-v{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
 .cf-item .cf-n{font-family:"JetBrains Mono";font-size:11px;color:var(--ink-faint)}
-.tablewrap{max-height:min(60vh,640px);overflow:auto}
+.tablewrap{max-height:min(60vh,640px);overflow:auto;scrollbar-gutter:stable}
+/* frozen while a column-filter popup is open: filtering must not shift the layout */
+.tablewrap.locked{height:min(60vh,640px)}
+table.cols-locked{table-layout:fixed}
+.cf-clear{border:1px solid var(--line-strong);background:var(--surface);color:var(--ink-soft);
+  padding:6px 11px;cursor:pointer;font:600 12px/1 "Space Grotesk";
+  white-space:nowrap;transition:border-color .12s,color .12s,background .12s}
+.cf-clear:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.linklike{background:none;border:none;color:var(--accent);cursor:pointer;
+  font:600 13px/1.4 inherit;padding:0;text-decoration:underline}
 table{width:100%;border-collapse:collapse}
 thead th{position:sticky;top:0;background:var(--surface-2);text-align:left;font-family:"Space Grotesk";
   font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);font-weight:600;
@@ -234,6 +284,7 @@ tbody tr:last-child td{border-bottom:none}
 .b-verified{color:var(--ok);background:var(--ok-bg)}
 .b-unverified{color:var(--bad);background:var(--bad-bg)}
 .b-non_document{color:var(--neutral);background:var(--neutral-bg)}
+.b-unprocessed{color:var(--ink);background:var(--neutral-bg)}
 .b-manual_review{color:var(--warn);background:var(--warn-bg)}
 .b-duplicate{color:var(--dup);background:var(--dup-bg)}
 .b-error,.b-unknown{color:var(--warn);background:var(--warn-bg)}
@@ -444,7 +495,7 @@ details[open] summary::before{content:"– "}
 .rv-sel{width:auto;min-width:130px}
 .rv-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:2px}
 .rv-or{color:var(--ink-faint);font-size:12px}
-.rv-btn{padding:9px 14px;border-radius:8px;border:1px solid transparent;font:600 13px/1 inherit;
+.rv-btn{padding:9px 14px;border:1px solid transparent;font:600 13px/1 inherit;
   cursor:pointer;transition:filter .12s}
 .rv-btn:hover{filter:brightness(1.06)}
 .rv-btn.ok{background:var(--ok);color:#fff}
@@ -514,3 +565,243 @@ details[open] summary::before{content:"– "}
 /* persistent reminder that the whole app is in sandbox mode */
 body.scope-test .rail{box-shadow:inset -3px 0 0 var(--warn)}
 body.scope-test .ws-switch{border-color:var(--warn)}
+
+/* ── user chip / sign-out (rail footer) ──────────────────────────────────── */
+.user-chip{display:flex;align-items:center;gap:9px;padding:5px 6px 5px 7px;
+  border:1px solid var(--line);border-radius:10px;background:var(--surface-2);max-width:230px}
+.uc-av{width:26px;height:26px;border-radius:7px;flex:none;background:var(--accent);color:var(--accent-ink);
+  display:flex;align-items:center;justify-content:center;font:700 12px/1 "Space Grotesk"}
+.uc-meta{min-width:0;line-height:1.15}
+.uc-name{font-size:12px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:130px}
+.uc-role{font-size:10px;color:var(--ink-faint)}
+.uc-out{display:flex;align-items:center;justify-content:center;width:28px;height:28px;flex:none;
+  border-radius:7px;color:var(--ink-faint);transition:background .12s,color .12s}
+.uc-out:hover{background:var(--bad-bg);color:var(--bad)}
+
+/* ── receiver approvals ──────────────────────────────────────────────────── */
+.nav-badge{margin-left:2px;background:var(--accent);color:var(--accent-ink);border-radius:9px;
+  font:700 10.5px/1 "JetBrains Mono";padding:3px 7px;min-width:19px;text-align:center}
+.appr-name{font-weight:600;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.appr-chips{max-width:300px}
+.lead-chip{border:1px solid var(--line);background:var(--surface-2);color:var(--accent);
+  font-size:11px;padding:3px 7px;border-radius:6px;cursor:pointer;margin:1px 3px 1px 0}
+.lead-chip:hover{border-color:var(--accent);background:var(--accent-soft)}
+.appr-actions{text-align:right;white-space:nowrap}
+.appr-actions .rv-btn{padding:7px 11px;font-size:12px;margin-left:6px}
+.appr-hist-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+  padding:9px 2px;border-bottom:1px solid var(--line);font-size:12.5px}
+.appr-hist-row:last-child{border-bottom:none}
+.ah-name{font-weight:600}
+.ah-arrow{color:var(--ink-faint)}
+.ah-lender{font-family:"JetBrains Mono";font-size:11.5px;color:var(--ink-soft)}
+.ah-stats{font-size:11px;color:var(--ok)}
+.ah-meta{margin-left:auto;font-size:11px;color:var(--ink-faint)}
+
+/* ── approvals: lender cards + compact rows ─────────────────────────────── */
+.appr-hint{font-size:12.5px;margin:-8px 0 20px}
+.al-card{margin-bottom:16px;padding:0;overflow:hidden}
+.al-head{display:flex;align-items:center;gap:12px;padding:15px 18px;
+  border-bottom:1px solid var(--line);background:var(--surface-2)}
+.al-head h3{font-size:15px;letter-spacing:0}
+.al-meta{font-size:12px;color:var(--ink-faint);font-family:"JetBrains Mono"}
+.al-head .fchip{margin-left:auto}
+.al-row{display:grid;grid-template-columns:20px 24px minmax(140px,1.4fr) auto auto 1fr;
+  align-items:center;gap:11px;padding:11px 18px 11px 14px;border-bottom:1px solid var(--line);
+  cursor:pointer}
+.al-row:last-child{border-bottom:none}
+.al-row:hover{background:var(--surface-2)}
+.al-row.sel{background:var(--accent-soft)}
+.al-check,.al-selall{width:15px;height:15px;accent-color:var(--accent);cursor:pointer;flex:none;margin:0}
+.al-expand{border:0;background:none;color:var(--ink-faint);cursor:pointer;font-size:12px;
+  width:26px;height:26px;border-radius:6px;transition:transform .16s ease}
+.al-expand:hover{background:var(--neutral-bg);color:var(--ink)}
+.al-expand.open{transform:rotate(90deg);color:var(--accent)}
+.al-name{font-weight:600;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.al-count{font-size:11.5px;color:var(--ink-soft);white-space:nowrap}
+.fchip.na{color:var(--ink-faint);background:var(--neutral-bg)}
+.al-actions{display:flex;gap:8px;justify-content:flex-end}
+/* approve/reject follow the site's decision-button grammar (same as .rv-btn in the
+   review drawer): solid green primary, red-outline secondary — equal geometry. */
+.al-btn{border:1px solid transparent;padding:8px 15px;cursor:pointer;
+  font:600 12.5px/1 inherit;white-space:nowrap;
+  transition:filter .12s,background .12s,color .12s,border-color .12s}
+.al-btn.ok{background:var(--ok);color:#fff}
+.al-btn.ok:hover{filter:brightness(1.06)}
+.al-btn.bad{background:transparent;color:var(--bad);border-color:var(--bad)}
+.al-btn.bad:hover{background:var(--bad-bg)}
+.al-btn:disabled{opacity:.5;cursor:wait}
+.al-chips{grid-column:3/-1;padding-top:6px;overflow-x:auto;cursor:default}
+.al-leads{width:100%;border-collapse:collapse;font-size:12px}
+.al-leads th{text-align:left;font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--ink-faint);padding:5px 10px 5px 0;border-bottom:1px solid var(--line)}
+.al-leads td{padding:6px 10px 6px 0;border-bottom:1px solid var(--line);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;max-width:220px}
+.al-leads tr:last-child td{border-bottom:none}
+.al-lead{cursor:pointer}
+.al-lead:hover td{background:var(--accent-soft)}
+.al-lead-id{color:var(--accent);font-size:11.5px}
+
+/* collapsible decision history */
+.appr-hist{margin-top:22px;border:1px solid var(--line-strong);background:var(--surface)}
+.appr-hist summary{display:flex;align-items:center;gap:10px;padding:14px 18px;cursor:pointer;
+  font-family:"Space Grotesk";font-weight:600;font-size:14px;list-style:none}
+.appr-hist summary::-webkit-details-marker{display:none}
+.appr-hist summary::before{content:"▸";color:var(--ink-faint);font-size:12px;transition:transform .15s}
+.appr-hist[open] summary::before{transform:rotate(90deg)}
+.appr-hist > div{padding:2px 18px 14px}
+.ah-dot{width:8px;height:8px;border-radius:50%;flex:none}
+.ah-dot.ok{background:var(--ok)} .ah-dot.bad{background:var(--bad)}
+@media(max-width:760px){
+  .al-row{grid-template-columns:20px 22px 1fr auto;grid-auto-flow:dense}
+  .al-count,.al-row .fchip{grid-column:3}
+  .al-actions{grid-column:4;grid-row:1}
+  .al-chips{grid-column:1/-1}
+  .bulkbar{left:10px;right:10px;transform:none;flex-wrap:wrap;justify-content:center}
+}
+
+/* ── approvals: live-only notice (Test Workspace) ────────────────────────── */
+.appr-live-only{text-align:center;padding:56px 24px;max-width:560px;margin:24px auto 0}
+.alo-eyebrow{font-size:10px;letter-spacing:.24em;text-transform:uppercase;font-weight:700;
+  color:var(--warn);margin-bottom:10px}
+.appr-live-only h3{font-size:17px;margin-bottom:10px}
+.appr-live-only p{font-size:13px;color:var(--ink-soft);line-height:1.65;margin-bottom:20px}
+
+/* ── approvals: floating bulk-action bar ─────────────────────────────────── */
+.bulkbar{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:44;
+  display:flex;align-items:center;gap:14px;padding:10px 12px 10px 18px;
+  background:var(--surface);border:1px solid var(--line-strong);
+  box-shadow:0 14px 44px rgba(10,10,8,.18);animation:bbIn .18s ease}
+[data-theme="dark"] .bulkbar{box-shadow:0 14px 44px rgba(0,0,0,.55)}
+@keyframes bbIn{from{opacity:0;transform:translate(-50%,8px)}to{opacity:1;transform:translate(-50%,0)}}
+@media(prefers-reduced-motion:reduce){.bulkbar{animation:none}.al-expand{transition:none}}
+.bb-count{font-family:"Space Grotesk";font-weight:700;font-size:13.5px;white-space:nowrap}
+.bb-meta{font-family:"JetBrains Mono";font-size:11.5px;color:var(--ink-soft);white-space:nowrap}
+.bb-actions{display:flex;gap:8px;margin-left:6px}
+
+/* ── approvals: decision modal ───────────────────────────────────────────── */
+.appr-modal{width:min(520px,94vw)}
+.am-eyebrow{font-size:10px;letter-spacing:.24em;text-transform:uppercase;font-weight:700}
+.am-eyebrow.ok{color:var(--ok)} .am-eyebrow.bad{color:var(--bad)}
+.am-name{word-break:break-word}
+.am-for{font-family:"JetBrains Mono";font-size:12px;color:var(--ink-soft);margin-top:5px}
+.am-body{padding:20px 22px}
+.am-list{max-height:190px;overflow:auto;border:1px solid var(--line);margin-bottom:16px}
+.am-li{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--line);font-size:12.5px}
+.am-li:last-child{border-bottom:none}
+.am-li-name{font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.am-li-lender{font-size:11px;color:var(--ink-soft)}
+.am-li-n{font-size:11px;color:var(--ink-faint);white-space:nowrap}
+.am-nums{display:flex;gap:10px;margin-bottom:14px}
+.am-num{flex:1;border:1px solid var(--line);padding:11px 8px 10px;text-align:center;
+  position:relative;overflow:hidden;background:var(--surface-2)}
+.am-num::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent)}
+.am-num.ok::before{background:var(--ok)} .am-num.bad::before{background:var(--bad)} .am-num.na::before{background:var(--neutral)}
+.am-num .n{font-family:"JetBrains Mono";font-weight:700;font-size:19px}
+.am-num .l{font-size:10.5px;color:var(--ink-soft);margin-top:3px;line-height:1.35}
+.am-lines{margin-bottom:16px}
+.am-line{display:flex;gap:10px;align-items:baseline;padding:7px 2px;font-size:13px;line-height:1.5;border-top:1px solid var(--line)}
+.am-line:first-child{border-top:none}
+.am-dot{width:7px;height:7px;border-radius:50%;flex:none;transform:translateY(-1px)}
+.am-dot.ok{background:var(--ok)} .am-dot.bad{background:var(--bad)} .am-dot.na{background:var(--neutral)}
+.am-notewrap{display:block;font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-faint)}
+.am-notewrap .hint{text-transform:none;letter-spacing:0;font-weight:500;font-family:"JetBrains Mono"}
+.am-note{width:100%;margin-top:7px;padding:10px 12px;border:1px solid var(--line-strong);
+  background:var(--surface-2);color:var(--ink);font:500 13px/1.4 "Space Grotesk",sans-serif;outline:none}
+.am-note:focus{border-color:var(--accent)}
+.am-actions{display:flex;justify-content:flex-end;gap:10px;padding:15px 22px;border-top:1px solid var(--line)}
+.am-go{padding:11px 18px;font-size:13.5px}
+/* the modal confirm is the point of commitment — solid, unlike the soft row pair */
+.am-go.ok{background:var(--ok);color:#fff;border-color:var(--ok)}
+.am-go.ok:hover{filter:brightness(1.08);background:var(--ok);color:#fff}
+.am-go.bad{background:var(--bad);color:#fff;border-color:var(--bad)}
+.am-go.bad:hover{filter:brightness(1.08);background:var(--bad);color:#fff}
+.am-go:disabled,.am-actions .btn:disabled{opacity:.55;cursor:wait;filter:none}
+
+/* ── clickable model chip + API config modal ─────────────────────────────── */
+.model-chip{cursor:pointer;font-family:inherit;text-align:left;color:var(--ink);
+  background:var(--surface);min-height:40px;transition:border-color .12s,background .12s}
+.model-chip:hover{border-color:var(--accent);background:var(--accent-soft)}
+.mc-gear{color:var(--ink-faint);flex:none;margin-left:4px;transition:transform .3s,color .12s}
+.model-chip:hover .mc-gear{color:var(--accent);transform:rotate(45deg)}
+.cfg-modal{width:min(460px,94vw);max-height:none}
+.cfg-modal .modal-body{padding:22px;overflow-y:auto}
+.cfg-modal .lede{font-size:13px}
+.cfg-field{margin-bottom:16px}
+.cfg-field label{display:block;font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--ink-faint);margin-bottom:7px}
+.cfg-field .hint{text-transform:none;letter-spacing:0;font-weight:500;color:var(--ink-soft);font-family:"JetBrains Mono";font-size:11px}
+.cfg-row{display:flex;gap:16px;align-items:flex-end}
+.cfg-switch{display:flex;align-items:center;gap:10px;font-size:12.5px;font-weight:600;color:var(--ink-soft);padding-bottom:11px}
+.cfg-test{margin:4px 0 18px;padding:11px 13px;border-radius:9px;font-size:12.5px;font-family:"JetBrains Mono";
+  border:1px solid var(--line)}
+.cfg-test.ok{background:var(--ok-bg);color:var(--ok);border-color:var(--ok)}
+.cfg-test.bad{background:var(--bad-bg);color:var(--bad);border-color:var(--bad)}
+.cfg-models{margin-top:6px;font-size:11px;color:var(--ink-soft);word-break:break-word}
+.cfg-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:6px}
+
+/* ── containment: the rail (leftmost column) can NEVER overflow into the stage ──
+   The model-chip URL is nowrap text; without these, its min-content width (~300px)
+   exceeds the 248px rail and pushes into the dashboard. Long text now ellipsizes. */
+.rail{min-width:0;overflow:hidden}
+.rail>*,.rail-foot>*{min-width:0;max-width:100%}
+.model-chip{max-width:100%;width:100%}
+.model-chip>div{min-width:0;flex:1;overflow:hidden}
+.mc-model{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mc-url{max-width:100%}
+.user-chip{max-width:100%}
+
+/* ═══ UI ROBUSTNESS PASS ═══════════════════════════════════════════════════
+   Systematic guards so no content — long strings, wide charts, many columns,
+   tiny screens — can break the layout. Mobile-first hardening included. */
+
+/* media can never exceed its container */
+img,svg,canvas,video{max-width:100%}
+/* keyboard/touch focus is always visible */
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* smooth touch scrolling in every scroll container */
+.tablewrap,.modal-body,.drawer-body,.live-list,.cf-list{-webkit-overflow-scrolling:touch}
+
+/* stat tiles: columns may collapse below their min instead of overflowing */
+.statband{grid-template-columns:repeat(auto-fit,minmax(min(158px,100%),1fr))}
+.acc-kpis{grid-template-columns:repeat(auto-fit,minmax(min(150px,100%),1fr))}
+/* queue&errors has SIX cells — the column count must divide 6 evenly, or an
+   orphaned cell exposes the grid's gap background as a grey block. 3×2 always;
+   2×3 on very narrow screens. (auto-fit is exactly wrong here.) */
+.obs-kv{grid-template-columns:repeat(3,1fr)}
+@media(max-width:420px){.obs-kv{grid-template-columns:repeat(2,1fr)}}
+
+/* config modal can never exceed the viewport */
+.cfg-modal{max-height:92vh}
+
+/* toasts: never wider than the screen */
+.toast{max-width:min(420px,calc(100vw - 34px));overflow-wrap:anywhere}
+
+/* ── phones (≤640px) ─────────────────────────────────────────────────────── */
+@media(max-width:640px){
+  .stage{padding:18px 14px 70px}
+  .rail{padding:10px 12px;gap:10px}
+  .brandsub{display:none}
+  .nav-item{padding:8px 10px;font-size:13.5px}
+  .nav-item .idx{display:none}
+  .ws-switch{width:100%;order:5;margin:0}
+  .rail-foot{gap:8px}
+  .model-chip{max-width:170px}
+  .user-chip .uc-meta{display:none}          /* avatar + sign-out only */
+  .stat .l{white-space:normal}               /* long tile labels wrap, not overflow */
+  .stat{padding:14px 12px}
+  .stat .n{font-size:26px}
+  .drawer{width:100vw;border-left:none}
+  .drawer-body{padding:16px 14px 40px}
+  .toasts{left:12px;right:12px;bottom:12px}
+  .toast{max-width:none}
+  .modal{width:96vw}
+  .cfg-row{flex-direction:column;align-items:stretch;gap:8px}
+  .al-actions .al-btn{min-height:40px;padding:9px 14px}   /* touch targets */
+  .al-head{flex-wrap:wrap}
+  .appr-hint{font-size:12px}
+  .scope-banner{padding:10px 12px}
+  .scope-banner .btn{margin-left:0;width:100%}
+  .lead-chip{min-height:32px}
+  .panel{padding:16px 14px}
+  .single-result .cmp-row{font-size:12px}
+}

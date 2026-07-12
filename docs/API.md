@@ -54,7 +54,7 @@ Live batch progress (the UI polls this).
 ```
 
 ### `GET /api/leads?status=&q=&limit=`
-Filtered result rows. `status` ∈ `all|verified|unverified|duplicate|non_document`; `q`
+Filtered result rows. `status` ∈ `all|verified|unverified|duplicate|non_document|unprocessed`; `q`
 matches lead id / lender / method; `limit` ≤ 2000. Each row includes an `outcome_text`.
 The dashboard table also offers **client‑side per‑column filters** (click the **Lead**,
 **Lender**, **Method**, or **Outcome** header to pick values) applied on top of these

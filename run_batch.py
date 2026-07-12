@@ -7,7 +7,7 @@ Batch runner: a CSV in -> a labeled output CSV out, plus full per-lead logs.
 Output columns (exactly as specified):
     lead_id, lender, verification_status, outcome, payment_method
 where:
-    verification_status = verified | unverified | non_document
+    verification_status = verified | unverified | non_document | unprocessed
     outcome             = verified   -> the fields that were verified
                           unverified -> the reason it was not verified
                           non_document-> what the image consists of
@@ -32,6 +32,8 @@ def outcome_text(status, outcome):
         return "Verified fields: " + ", ".join(outcome.get("verified_fields", []))
     if status in ("unverified", "duplicate"):
         return outcome.get("reason", status)
+    if status == "unprocessed":
+        return outcome.get("describes", "image never reached OCR")
     return outcome.get("describes", "not a valid payment document")
 
 
@@ -76,7 +78,7 @@ def main():
 
     out_df = pd.DataFrame(rows_out)
     # verified at bottom, review/non-document at top (work-first ordering)
-    order = {"unverified": 0, "non_document": 1, "duplicate": 2, "verified": 3}
+    order = {"unverified": 0, "unprocessed": 1, "non_document": 2, "duplicate": 3, "verified": 4}
     out_df["_o"] = out_df["verification_status"].map(order).fillna(0)
     out_df = out_df.sort_values("_o").drop(columns="_o")
 
@@ -86,7 +88,7 @@ def main():
 
     vc = out_df["verification_status"].value_counts()
     print("\n=== DONE ===")
-    for k in ("verified", "unverified", "duplicate", "non_document"):
+    for k in ("verified", "unverified", "duplicate", "non_document", "unprocessed"):
         print(f"  {k:14s}: {int(vc.get(k,0))}")
     print(f"\nOutput : {out_path}")
     print(f"Logs   : {settings.DATABASE_URL}  (query any lead with view_logs.py <lead_id>)")

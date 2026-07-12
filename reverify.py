@@ -31,17 +31,9 @@ def _doc(ex: dict) -> ExtractedDocument:
     return ExtractedDocument(**{k: v for k, v in (ex or {}).items() if k in _FIELDS})
 
 
-def reverify_all(apply: bool = True) -> dict:
+def _reverify_rows(rows: list, apply: bool, reason_suffix: str = "") -> dict:
     logger = PgLeadLogger()
-    with pg.pool().connection() as c:
-        rows = c.execute("""
-            SELECT r.lead_id, r.lender, r.verification_status AS old,
-                   r.outcome, r.extracted, j.row_json
-            FROM lead_results r JOIN jobs j ON j.job_id = r.lead_id
-            WHERE r.verification_status IN ('verified','unverified')
-        """).fetchall()
-
-    scanned = changed = skipped = 0
+    scanned = changed = flipped = skipped = 0
     moves: dict[str, int] = {}
     for r in rows:
         scanned += 1
@@ -52,6 +44,8 @@ def reverify_all(apply: bool = True) -> dict:
         if new_status == r["old"]:
             continue
         changed += 1
+        if new_status == "verified":
+            flipped += 1
         moves[f"{r['old']}->{new_status}"] = moves.get(f"{r['old']}->{new_status}", 0) + 1
         if not apply:
             continue
@@ -64,10 +58,37 @@ def reverify_all(apply: bool = True) -> dict:
                       (new_status, r["lead_id"]))
         logger.log(r["lead_id"], "reverify",
                    "PASS" if new_status == "verified" else "FAIL",
-                   reason=f"{r['old']} -> {new_status} (deterministic re-verify, no model call)",
+                   reason=f"{r['old']} -> {new_status} (deterministic re-verify, no model call"
+                          f"{'; ' + reason_suffix if reason_suffix else ''})",
                    data={"old_status": r["old"], "new_status": new_status,
-                         "reason": new_outcome.get("reason", "")})
-    return {"scanned": scanned, "changed": changed, "skipped_dedup": skipped, "moves": moves}
+                         "reason": new_outcome.get("reason", "")},
+                   is_test=bool(r.get("is_test")))
+    return {"scanned": scanned, "changed": changed, "flipped": flipped,
+            "skipped_dedup": skipped, "moves": moves}
+
+
+_SELECT = """
+    SELECT r.lead_id, r.lender, r.verification_status AS old,
+           r.outcome, r.extracted, r.is_test, j.row_json
+    FROM lead_results r JOIN jobs j ON j.job_id = r.lead_id
+    WHERE r.verification_status IN ('verified','unverified')
+"""
+
+
+def reverify_all(apply: bool = True) -> dict:
+    with pg.pool().connection() as c:
+        rows = c.execute(_SELECT).fetchall()
+    return _reverify_rows(rows, apply)
+
+
+def reverify_leads(lead_ids: list, apply: bool = True, reason_suffix: str = "") -> dict:
+    """Targeted stage-4 re-verify of specific leads (e.g. after a receiver approval) —
+    same machinery as reverify_all, scoped to the given ids."""
+    if not lead_ids:
+        return {"scanned": 0, "changed": 0, "flipped": 0, "skipped_dedup": 0, "moves": {}}
+    with pg.pool().connection() as c:
+        rows = c.execute(_SELECT + " AND r.lead_id = ANY(%s)", (list(lead_ids),)).fetchall()
+    return _reverify_rows(rows, apply, reason_suffix)
 
 
 if __name__ == "__main__":

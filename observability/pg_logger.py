@@ -142,6 +142,13 @@ class PgLeadLogger:
         params += [int(limit), int(offset)]
         return self._rows(sql, tuple(params))
 
+    def unprocessed_outcomes(self, scope="real") -> list:
+        """Outcome JSON of every unprocessed-image lead — the server classifies these
+        into issue buckets (no image URL / private link / download failed / ...)."""
+        return [r["outcome"] for r in self._rows(
+            f"SELECT outcome FROM lead_results WHERE {self._scope_sql(scope)} "
+            f"AND verification_status = 'unprocessed'")]
+
     def status_counts(self, scope="real") -> dict:
         with pg.pool().connection() as c:
             rows = c.execute(
@@ -156,9 +163,12 @@ class PgLeadLogger:
             return c.execute("SELECT COUNT(*) AS n FROM lead_results WHERE is_test").fetchone()["n"]
 
     def method_counts(self, scope="real") -> list:
+        # unprocessed leads never reached OCR — they have no payment method and would
+        # only pollute a payment-methods distribution, so they are excluded here.
         rel = "lead_results_test" if scope == "test" else "lead_results_real"
         with pg.pool().connection() as c:
             rows = c.execute(
                 "SELECT COALESCE(NULLIF(payment_method,''),'Non-document') AS m, COUNT(*) AS n "
-                f"FROM {rel} GROUP BY m ORDER BY n DESC").fetchall()
+                f"FROM {rel} WHERE verification_status <> 'unprocessed' "
+                "GROUP BY m ORDER BY n DESC").fetchall()
         return [{"method": r["m"], "n": r["n"]} for r in rows]

@@ -99,6 +99,33 @@ CREATE TABLE IF NOT EXISTS lead_reviews (
 CREATE INDEX IF NOT EXISTS idx_reviews_lead ON lead_reviews(lead_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_ts   ON lead_reviews(ts DESC);
 
+-- editable-at-runtime settings (currently the Medha model endpoint, which moves between
+-- hosts/ports). Persisted here + shared by the web app and workers, so a change takes
+-- effect on the next lead with NO restart. Seeded from env on first read.
+CREATE TABLE IF NOT EXISTS runtime_config (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- human decisions on receiver names (the Receiver-Approval queue). Keyed by
+-- (lender, normalized receiver), NOT by lead — one decision covers every lead that
+-- carries that payee, and persists across data wipes: an approval already lives on in
+-- lender_receivers.json, a rejection suppresses the pair from ever re-entering the queue.
+CREATE TABLE IF NOT EXISTS receiver_approvals (
+    id            BIGSERIAL PRIMARY KEY,
+    lender        TEXT NOT NULL,
+    receiver_norm TEXT NOT NULL,          -- normalized identity for matching
+    receiver_name TEXT NOT NULL,          -- as printed on the document (what config gets)
+    decision      TEXT NOT NULL,          -- 'approved' | 'rejected'
+    decided_by    TEXT,
+    note          TEXT,
+    affected      INT NOT NULL DEFAULT 0, -- leads re-verified at decision time
+    flipped       INT NOT NULL DEFAULT 0, -- of those, how many became verified
+    decided_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (lender, receiver_norm)
+);
+
 CREATE TABLE IF NOT EXISTS jobs (
     job_id       TEXT PRIMARY KEY,          -- idempotency key (= lead_id)
     batch_id     TEXT NOT NULL,
@@ -134,6 +161,8 @@ CREATE TABLE IF NOT EXISTS ocr_cache (
 
 # additive migrations for existing databases (idempotent — safe on every boot)
 _MIGRATIONS = """
+-- drop the orphaned SQLite-era dedup ledger (replaced by processed_payments; dead data)
+DROP TABLE IF EXISTS seen_payments;
 ALTER TABLE jobs         ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE lead_results ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE lead_events  ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
@@ -156,6 +185,13 @@ UPDATE lead_reviews rv SET is_test = r.is_test
     FROM lead_results r WHERE r.lead_id = rv.lead_id AND rv.is_test <> r.is_test;
 CREATE OR REPLACE VIEW lead_reviews_real AS SELECT * FROM lead_reviews WHERE NOT is_test;
 CREATE OR REPLACE VIEW lead_reviews_test AS SELECT * FROM lead_reviews WHERE is_test;
+
+-- unprocessed-image bifurcation: images that never reached OCR (URL missing / private /
+-- download failure / QC discard) get their OWN status, so non_document only ever means
+-- "the model saw it and it is not a payment document". Idempotent backfill of old rows.
+UPDATE lead_results SET verification_status = 'unprocessed'
+ WHERE verification_status = 'non_document'
+   AND COALESCE(outcome->>'stage_failed','') IN ('load_image','image_qc');
 
 -- Real-data views: the ONE place test-exclusion lives. All real-scope reads (dashboard,
 -- observability) query these, so a new query physically cannot leak sandbox rows into
@@ -236,6 +272,18 @@ def purge_expired_test_data(days: float) -> dict:
         c.execute("DELETE FROM lead_reviews       WHERE is_test AND lead_id = ANY(%s)", (old,))
         n = c.execute("DELETE FROM jobs WHERE is_test AND lead_id = ANY(%s)", (old,)).rowcount
     return {"purged": n}
+
+
+def purge_expired_events(days: int) -> int:
+    """Retention for the heavy operational log. Deletes lead_events older than `days`;
+    verdicts in lead_results are untouched. This is the one table that grows unbounded
+    under continuous ingestion. 0 disables (keep forever)."""
+    if not days or days <= 0:
+        return 0
+    with pool().connection() as c:
+        return c.execute(
+            "DELETE FROM lead_events WHERE ts < now() - make_interval(days => %s)",
+            (days,)).rowcount
 
 
 def purge_expired_cache(days: int) -> int:

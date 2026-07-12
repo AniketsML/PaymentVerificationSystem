@@ -21,13 +21,15 @@ Run:  python -m app.server      (workers start automatically)
 import hmac
 import io
 import os
+import secrets
 import sys
 import tempfile
 import time
+from datetime import timedelta
 
 import pandas as pd
 from flask import (Flask, request, send_file, jsonify, render_template, abort, url_for,
-                   Response)
+                   redirect, session)
 from werkzeug.utils import secure_filename
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,13 +40,16 @@ from observability.pg_dedup import PaymentDedup
 from observability import metrics
 from ocr.medha_client import MedhaVisionOCR, PrecomputedOCR
 from pipeline.orchestrator import process_lead
-from pipeline import jobs
+from pipeline import approvals, jobs
 from run_batch import outcome_text
 import worker
 
 app = Flask(__name__)
 # cap upload size so a huge file can't OOM the process (default 64 MB, override via env)
 app.config["MAX_CONTENT_LENGTH"] = settings.MAX_UPLOAD_MB * 1024 * 1024
+app.secret_key = settings.SECRET_KEY or secrets.token_hex(32)  # signs the session cookie
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                  PERMANENT_SESSION_LIFETIME=timedelta(days=7))
 pg.init_schema()
 
 
@@ -61,6 +66,9 @@ try:
     _cache = pg.purge_expired_cache(settings.OCR_CACHE_TTL_DAYS)
     if _cache:
         sys.stderr.write(f"[server] purged {_cache} stale OCR-cache entr(ies)\n")
+    _ev = pg.purge_expired_events(settings.LEAD_EVENTS_TTL_DAYS)
+    if _ev:
+        sys.stderr.write(f"[server] purged {_ev} lead_event(s) past retention\n")
 except Exception as _e:  # never block boot on housekeeping
     sys.stderr.write(f"[server] test-data purge skipped: {_e}\n")
 logger = PgLeadLogger()
@@ -68,28 +76,89 @@ dedup = PaymentDedup()
 worker.start_pool()          # in-process worker pool drains the queue
 
 
-# ── optional HTTP Basic auth ──────────────────────────────────────────────────
+# ── session login (styled login page, not the browser Basic-auth popup) ───────
 _AUTH_ON = bool(settings.AUTH_USER and settings.AUTH_PASS)
 if not _AUTH_ON:
     sys.stderr.write("[server] WARNING: dashboard is UNAUTHENTICATED — anyone who can "
                      "reach this host sees all leads. Set PV_AUTH_USER/PV_AUTH_PASS to lock it.\n")
 
+_PUBLIC_PATHS = {"/health", "/login", "/logout"}
+
 
 @app.before_request
 def _require_auth():
-    if not _AUTH_ON or request.path == "/health":
+    if not _AUTH_ON:
         return
-    a = request.authorization
-    if a and hmac.compare_digest(a.username or "", settings.AUTH_USER) \
-         and hmac.compare_digest(a.password or "", settings.AUTH_PASS):
+    p = request.path
+    if p in _PUBLIC_PATHS or p.startswith("/static/"):
         return
-    return Response("Authentication required", 401,
-                    {"WWW-Authenticate": 'Basic realm="Payment Verification"'})
+    if session.get("authed"):
+        return
+    # not signed in: send a browser navigation to the login page, but answer API/XHR with 401
+    wants_page = request.method == "GET" and "text/html" in (request.headers.get("Accept") or "")
+    if wants_page:
+        return redirect(url_for("login", next=p))
+    return jsonify({"error": "authentication required", "login": url_for("login")}), 401
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not _AUTH_ON or session.get("authed"):
+        return redirect(url_for("index"))
+    error = ""
+    if request.method == "POST":
+        u = (request.form.get("username") or "").strip()
+        pw = request.form.get("password") or ""
+        ok = (hmac.compare_digest(u, settings.AUTH_USER)
+              and hmac.compare_digest(pw, settings.AUTH_PASS))
+        if ok:
+            session.clear()
+            session["authed"] = True
+            session["user"] = u
+            session.permanent = True
+            nxt = request.args.get("next", "")
+            return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else url_for("index"))
+        error = "Incorrect email or password."
+    return render_template("login.html", error=error)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.after_request
+def _cache_headers(resp):
+    """HTML is never cached, so the browser always re-fetches the page and sees the
+    current ?v= asset URLs. Versioned static files (with ?v=) may be cached freely."""
+    if resp.mimetype == "text/html":
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+    elif request.args.get("v"):          # a versioned static asset -> cache it hard
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
+
+
+@app.context_processor
+def _asset_helper():
+    """`asset('style.css')` -> /static/style.css?v=<mtime>, so the browser always re-fetches
+    the file after it changes (kills stale-CSS caching)."""
+    def asset(filename):
+        url = url_for("static", filename=filename)
+        try:
+            mt = int(os.path.getmtime(os.path.join(app.static_folder, filename)))
+            return f"{url}?v={mt}"
+        except OSError:
+            return url
+    return {"asset": asset}
 
 
 def _model_info() -> dict:
-    return {"model": settings.VISION_MODEL, "url": settings.VISION_API_URL,
-            "stream": settings.VISION_STREAM, "workers": settings.WORKER_COUNT}
+    from config import runtime
+    cfg = runtime.model_config()
+    return {"model": cfg["model"], "url": cfg["url"],
+            "stream": cfg["stream"], "workers": settings.WORKER_COUNT}
 
 
 class _NullLogger:
@@ -114,11 +183,41 @@ def _outcome_text(status, outcome):
     return outcome_text(status, _as_obj(outcome))
 
 
+# ── unprocessed-image bifurcation ─────────────────────────────────────────────
+def _is_unprocessed(status, outcome) -> bool:
+    """The image never reached OCR — its own first-class status since the migration."""
+    return status == "unprocessed"
+
+
+def _image_issue(outcome: dict) -> str:
+    """Deterministic issue bucket for WHY an image never reached OCR, derived from the
+    precise load-failure reason recorded by pipeline/image_source.py."""
+    if (outcome or {}).get("stage_failed") == "image_qc":
+        return "Quality discarded"
+    s = ((outcome or {}).get("describes") or "").lower()
+    if "no image source provided" in s:
+        return "No image URL"
+    if "file not found" in s:
+        return "File not found"
+    if "access denied" in s:
+        return "Private / access denied"
+    if "returned a web page" in s or "returned an error response" in s or "expired" in s:
+        return "Private / expired link"
+    if "could not download" in s:
+        return "Download timeout" if "timeout" in s else "Download failed"
+    if "empty image payload" in s:
+        return "Empty file"
+    if "unreadable/corrupt" in s or "could not read image source" in s:
+        return "Corrupt / unreadable"
+    return "Other loading issue"
+
+
 # ── SPA shell ─────────────────────────────────────────────────────────────────
 @app.route("/")
 @app.route("/lead/<lead_id>")
 def index(lead_id=None):
-    return render_template("index.html", model=_model_info(), deep_lead=lead_id or "")
+    return render_template("index.html", model=_model_info(), deep_lead=lead_id or "",
+                           user=(session.get("user", "") if _AUTH_ON else ""))
 
 
 # ── enqueue (upload) ──────────────────────────────────────────────────────────
@@ -196,8 +295,17 @@ def api_batch(batch_id):
 @app.route("/api/stats")
 def api_stats():
     scope = request.args.get("scope", "real")      # real | test
+    # unprocessed-image bifurcation: total + per-issue counts for the dashboard band
+    issues = {}
+    for o in logger.unprocessed_outcomes(scope=scope):
+        k = _image_issue(_as_obj(o))
+        issues[k] = issues.get(k, 0) + 1
+    unprocessed = {"total": sum(issues.values()),
+                   "issues": [{"issue": k, "n": n}
+                              for k, n in sorted(issues.items(), key=lambda x: -x[1])]}
     return jsonify({"counts": logger.status_counts(scope=scope),
                     "methods": logger.method_counts(scope=scope),
+                    "unprocessed": unprocessed,
                     "test_count": logger.test_count(),
                     "scope": scope,
                     "model": _model_info()})
@@ -219,6 +327,26 @@ def api_observability():
     return jsonify(metrics.snapshot(scope=scope))
 
 
+@app.route("/api/approvals")
+def api_approvals():
+    """The Receiver-Approval queue (grouped receiver mismatches) + recent decisions."""
+    return jsonify({"pending": approvals.pending_queue(),
+                    "decisions": approvals.recent_decisions()})
+
+
+@app.route("/api/approvals/decide", methods=["POST"])
+def api_approvals_decide():
+    """Human decision on a (lender, receiver) pair. approve -> config + re-verify all
+    affected leads; reject -> suppress the pair from the queue. Leads never leave
+    `unverified` except by legitimately re-verifying."""
+    body = request.get_json(force=True) or {}
+    res = approvals.decide(body.get("lender", ""), body.get("receiver", ""),
+                           body.get("decision", ""),
+                           decided_by=session.get("user", "") or (request.remote_addr or ""),
+                           note=(body.get("note") or "").strip())
+    return (jsonify(res), 409) if res.get("error") else jsonify(res)
+
+
 @app.route("/api/observability/detail")
 def api_observability_detail():
     """Drill-down rows behind a clicked metric (?kind=&field=&lender=&scope=)."""
@@ -227,6 +355,49 @@ def api_observability_detail():
                                   field=request.args.get("field"),
                                   lender=request.args.get("lender"),
                                   scope=scope))
+
+
+@app.route("/api/config/model", methods=["GET", "POST"])
+def api_config_model():
+    """Get (key redacted) or update the Medha endpoint config. Changes apply to the next
+    lead — no restart. An empty key on POST keeps the existing key."""
+    from config import runtime
+    if request.method == "POST":
+        b = request.get_json(force=True) or {}
+        runtime.set_model_config(url=b.get("url"), key=b.get("key"),
+                                 model=b.get("model"), stream=b.get("stream"))
+    return jsonify(runtime.masked())
+
+
+@app.route("/api/config/model/test", methods=["POST"])
+def api_config_model_test():
+    """Probe an endpoint (the posted candidate, or the saved one) for reachability + auth,
+    without saving. Hits the OpenAI-compatible /models list."""
+    import time as _t
+    import requests as _rq
+    from config import runtime
+    b = request.get_json(force=True) or {}
+    cfg = runtime.model_config()
+    url = (b.get("url") or cfg["url"] or "").rstrip("/")
+    key = b.get("key") or cfg["key"]
+    want_model = (b.get("model") or cfg["model"] or "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "no endpoint URL"}), 400
+    t0 = _t.time()
+    try:
+        r = _rq.get(f"{url}/models", headers={"Authorization": f"Bearer {key}"}, timeout=8)
+        ms = round((_t.time() - t0) * 1000)
+        ids = []
+        if r.headers.get("content-type", "").startswith("application/json"):
+            ids = [m.get("id") for m in (r.json().get("data") or []) if isinstance(m, dict)]
+        ok = r.status_code == 200
+        return jsonify({"ok": ok, "status": r.status_code, "ms": ms,
+                        "models": ids[:25],
+                        "model_present": (want_model in ids) if (ids and want_model) else None,
+                        "error": "" if ok else f"HTTP {r.status_code}"})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ok": False, "ms": round((_t.time() - t0) * 1000),
+                        "error": f"{type(e).__name__}: {e}"[:200]})
 
 
 @app.route("/health")
@@ -253,7 +424,9 @@ def api_leads():
     limit = min(int(request.args.get("limit", 300)), 2000)
     rows = logger.query_results(status=status, q=q, limit=limit, scope=scope)
     for r in rows:
-        r["outcome_text"] = _outcome_text(r.get("verification_status"), r.get("outcome"))
+        o = _as_obj(r.get("outcome"))
+        r["outcome_text"] = _outcome_text(r.get("verification_status"), o)
+        r["issue"] = _image_issue(o) if _is_unprocessed(r.get("verification_status"), o) else ""
     return jsonify(rows)
 
 
@@ -299,7 +472,7 @@ def api_review(lead_id):
         abort(404)
     system_status = j["final"].get("verification_status")
 
-    valid = {"verified", "unverified", "non_document", "duplicate"}
+    valid = {"verified", "unverified", "non_document", "unprocessed", "duplicate"}
     if decision == "overturned":
         if corrected not in valid:
             return jsonify({"error": f"corrected_status must be one of {sorted(valid)}"}), 400
@@ -319,7 +492,7 @@ def download(batch_id):
              "verification_status": r.get("verification_status") or r.get("job_status"),
              "outcome": _outcome_text(r.get("verification_status"), r.get("outcome")),
              "payment_method": r.get("payment_method") or ""} for r in leads]
-    order = {"unverified": 0, "non_document": 1, "duplicate": 2, "verified": 3}
+    order = {"unverified": 0, "unprocessed": 1, "non_document": 2, "duplicate": 3, "verified": 4}
     rows.sort(key=lambda x: order.get(x["verification_status"], -1))
     buf = io.BytesIO(pd.DataFrame(rows).to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"))
     return send_file(buf, mimetype="text/csv", as_attachment=True,

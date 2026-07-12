@@ -13,7 +13,8 @@ reconstructable by lead id.
 Final statuses:
     verified       - all mandatory fields matched (only on positive evidence)
     unverified     - a mandatory field failed / unreadable (reason logged)
-    non_document   - not a valid payment document, or image discarded at validation
+    non_document   - the model saw the image and said: not a valid payment document
+    unprocessed    - the image never reached OCR (URL missing / private / broken / QC discard)
     duplicate      - exact re-submission (lead_code + loan + amount + month) — no OCR spent
 """
 from __future__ import annotations
@@ -21,7 +22,7 @@ from __future__ import annotations
 import time
 
 from pipeline import image_qc, image_source, ocr_classify, extract, verify
-from pipeline.models import (VERIFIED, UNVERIFIED, NON_DOCUMENT,
+from pipeline.models import (VERIFIED, UNVERIFIED, NON_DOCUMENT, UNPROCESSED,
                              DUPLICATE, PASS, FAIL)
 
 
@@ -76,7 +77,7 @@ def process_lead(lead_id: str, lender: str, image_path: str, row: dict,
         if err:
             log(lead_id, "stage0_load_image", FAIL, err,
                 data={"image_source": image_path}, ms=_elapsed_ms(t0))
-            return _finish(lead_id, lender, NON_DOCUMENT,
+            return _finish(lead_id, lender, UNPROCESSED,
                            {"describes": f"image could not be loaded: {err}",
                             "stage_failed": "load_image"},
                            "", {}, logger, is_test)
@@ -90,7 +91,7 @@ def process_lead(lead_id: str, lender: str, image_path: str, row: dict,
             metrics=qc_metrics, ms=_elapsed_ms(t0))
         if not ok:
             # bad-quality images are DISCARDED (no preprocessing/salvage attempt)
-            return _finish(lead_id, lender, NON_DOCUMENT,
+            return _finish(lead_id, lender, UNPROCESSED,
                            {"describes": f"image discarded at validation: {reason}",
                             "stage_failed": "image_qc"},
                            "", {}, logger, is_test)
@@ -100,13 +101,13 @@ def process_lead(lead_id: str, lender: str, image_path: str, row: dict,
     is_doc, reason2, extraction, m2 = ocr_classify.run(image, row, ocr_client)
     log(lead_id, "stage2_ocr_classify", PASS if is_doc else FAIL, reason2,
         metrics=m2, ms=_elapsed_ms(t0),
-        data={"raw_model_response": (extraction.get("_raw") or "")[:8000],
+        data={"raw_model_response": (extraction.get("_raw") or "")[:4000],
               "model_meta": extraction.get("_meta", {}),
               "extracted": {k: extraction.get(k) for k in (
                   "is_payment_document", "document_type", "loan_account_number",
                   "amount", "date", "time", "reference_id", "receiver_name",
                   "payer_name")},
-              "full_text": (extraction.get("full_text") or "")[:4000]})
+              "full_text": (extraction.get("full_text") or "")[:3000]})
     if not is_doc:
         return _finish(lead_id, lender, NON_DOCUMENT,
                        {"describes": extraction.get("describes") or reason2,

@@ -84,6 +84,12 @@ IMAGE_FETCH_TIMEOUT = int(os.environ.get("IMAGE_FETCH_TIMEOUT", "30"))
 OCR_CACHE = os.environ.get("OCR_CACHE", "1") not in ("0", "false", "False", "")
 OCR_CACHE_TTL_DAYS = int(os.environ.get("OCR_CACHE_TTL_DAYS", "30"))   # cap cache growth (0 = keep forever)
 
+# Retention for the heavy per-stage event log (lead_events). Verdicts (lead_results) are
+# NEVER touched — they persist for Metabase/history. lead_events is the operational/debug
+# trail and is the only table that grows unbounded under continuous ingestion. 0 = keep
+# forever (default, safe for testing); set e.g. 90 in continuous production.
+LEAD_EVENTS_TTL_DAYS = int(os.environ.get("LEAD_EVENTS_TTL_DAYS", "0"))
+
 # Circuit breaker: when Medha starts dropping connections (10054) / timing out under
 # load, retry-storming makes it worse. After N consecutive failures the breaker "opens"
 # and callers wait a growing cooldown, applying backpressure instead of hammering it.
@@ -99,6 +105,8 @@ MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "64"))   # reject bigger upl
 # commit real values; pass via env. /health stays open for probes.
 AUTH_USER = os.environ.get("PV_AUTH_USER", "")
 AUTH_PASS = os.environ.get("PV_AUTH_PASS", "")
+# signs the login session cookie; set a stable value in .env so sessions survive restarts
+SECRET_KEY = os.environ.get("PV_SECRET_KEY", "")
 
 # Test Workspace data is disposable — it never becomes long-term storage. Test rows
 # older than this (days) are auto-purged on startup, and the "Clear workspace" button

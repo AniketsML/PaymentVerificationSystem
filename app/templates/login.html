@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in — Payment Verification</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script>
+    (function () {
+      var t = localStorage.getItem("pv-theme");
+      if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", t);
+    })();
+  </script>
+  <style>
+    :root[data-theme="light"]{
+      --paper:#efeee8; --surface:#ffffff; --surface-2:#f7f6f1;
+      --ink:#111110; --ink-soft:#57564f; --ink-faint:#8a887e;
+      --line:rgba(17,17,16,.12); --line-strong:rgba(17,17,16,.22);
+      --accent:#1b29ff; --accent-ink:#ffffff; --accent-soft:rgba(27,41,255,.07);
+      --bad:#c81e1e; --bad-bg:#fbe6e6; --ok:#0a7a41;
+      --grid:rgba(17,17,16,.035); --shadow:0 24px 60px -28px rgba(17,17,16,.28);
+    }
+    :root[data-theme="dark"]{
+      --paper:#0b0c0a; --surface:#151613; --surface-2:#1c1d19;
+      --ink:#eceae1; --ink-soft:#a4a196; --ink-faint:#726f65;
+      --line:rgba(255,255,255,.11); --line-strong:rgba(255,255,255,.2);
+      --accent:#6b78ff; --accent-ink:#0a0b09; --accent-soft:rgba(107,120,255,.12);
+      --bad:#ff6b6b; --bad-bg:rgba(255,107,107,.13); --ok:#4ccb87;
+      --grid:rgba(255,255,255,.03); --shadow:0 28px 70px -30px rgba(0,0,0,.7);
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{
+      min-height:100vh;font-family:"Hanken Grotesk",system-ui,sans-serif;color:var(--ink);
+      background:var(--paper);
+      background-image:linear-gradient(var(--grid) 1px,transparent 1px),
+                       linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+      background-size:34px 34px;
+      display:flex;align-items:center;justify-content:center;padding:24px;
+      -webkit-font-smoothing:antialiased;
+    }
+    .glow{position:fixed;inset:0;pointer-events:none;
+      background:radial-gradient(60% 50% at 50% 0%,var(--accent-soft),transparent 70%)}
+    .card{position:relative;width:100%;max-width:404px;background:var(--surface);
+      border:1px solid var(--line-strong);border-radius:18px;padding:38px 34px 30px;
+      box-shadow:var(--shadow)}
+    .brand{display:flex;align-items:center;gap:11px;margin-bottom:26px}
+    .mark{width:34px;height:34px;border-radius:9px;background:var(--accent);position:relative;flex:none}
+    .mark::before{content:"";position:absolute;inset:9px;border:2.5px solid var(--accent-ink);
+      border-radius:3px;border-right-color:transparent;border-bottom-color:transparent;
+      transform:rotate(-45deg)}
+    .brandword{font-family:"Space Grotesk";font-weight:700;font-size:17px;letter-spacing:-.02em;line-height:1}
+    .brandword span{color:var(--ink-faint)}
+    .brandsub{font-size:11.5px;color:var(--ink-faint);margin-top:3px;letter-spacing:.02em}
+    h1{font-family:"Space Grotesk";font-weight:600;font-size:23px;letter-spacing:-.02em;margin-bottom:6px}
+    .lede{font-size:13.5px;color:var(--ink-soft);margin-bottom:24px}
+    .field{margin-bottom:15px}
+    .field label{display:block;font-size:11px;font-weight:700;letter-spacing:.11em;
+      text-transform:uppercase;color:var(--ink-faint);margin-bottom:8px}
+    .field input{width:100%;background:var(--surface-2);border:1px solid var(--line-strong);
+      border-radius:10px;padding:13px 14px;color:var(--ink);font-size:14.5px;
+      font-family:"JetBrains Mono",monospace;outline:none;transition:border-color .15s,box-shadow .15s}
+    .field input::placeholder{color:var(--ink-faint);font-family:"Hanken Grotesk"}
+    .field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+    .pw-wrap{position:relative}
+    .pw-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);border:0;background:none;
+      color:var(--ink-faint);font:600 11px/1 "JetBrains Mono";letter-spacing:.06em;cursor:pointer;
+      padding:8px 10px;border-radius:7px}
+    .pw-toggle:hover{color:var(--ink);background:var(--surface)}
+    .btn{width:100%;margin-top:8px;background:var(--accent);color:var(--accent-ink);border:0;
+      border-radius:10px;padding:14px;font-family:"Space Grotesk";font-weight:600;font-size:14.5px;
+      cursor:pointer;transition:filter .12s,transform .04s;display:flex;align-items:center;
+      justify-content:center;gap:8px}
+    .btn:hover{filter:brightness(1.07)} .btn:active{transform:translateY(1px)}
+    .error{display:flex;align-items:center;gap:8px;background:var(--bad-bg);color:var(--bad);
+      border-radius:9px;padding:11px 13px;font-size:13px;margin-bottom:18px;font-weight:500}
+    .foot{margin-top:26px;padding-top:18px;border-top:1px solid var(--line);
+      display:flex;align-items:center;justify-content:space-between;font-size:11.5px;color:var(--ink-faint)}
+    .foot .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ok);
+      margin-right:6px;vertical-align:middle}
+    .themebtn{border:1px solid var(--line-strong);background:var(--surface-2);color:var(--ink-soft);
+      border-radius:7px;padding:5px 10px;font:600 11px/1 "JetBrains Mono";cursor:pointer}
+    .themebtn:hover{color:var(--ink)}
+  </style>
+</head>
+<body>
+  <div class="glow"></div>
+  <main class="card">
+    <div class="brand">
+      <div class="mark" aria-hidden="true"></div>
+      <div>
+        <div class="brandword">Verify<span>/OCR</span></div>
+        <div class="brandsub">Payment verification console</div>
+      </div>
+    </div>
+
+    <h1>Sign in</h1>
+    <p class="lede">Enter your credentials to access the console.</p>
+
+    {% if error %}
+    <div class="error" role="alert">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 7v6M12 16.5v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      {{ error }}
+    </div>
+    {% endif %}
+
+    <form method="post" autocomplete="on" novalidate>
+      <div class="field">
+        <label for="username">Email</label>
+        <input id="username" name="username" type="text" placeholder="you@company.com"
+               autocomplete="username" autofocus required>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <div class="pw-wrap">
+          <input id="password" name="password" type="password" placeholder="••••••••"
+                 autocomplete="current-password" required>
+          <button type="button" class="pw-toggle" id="pwToggle" tabindex="-1">SHOW</button>
+        </div>
+      </div>
+      <button class="btn" type="submit">
+        Sign in
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </form>
+
+    <div class="foot">
+      <span><span class="dot"></span>Secure session</span>
+      <button class="themebtn" id="themeBtn" type="button">Theme</button>
+    </div>
+  </main>
+
+  <script>
+    var pw = document.getElementById("password"), tg = document.getElementById("pwToggle");
+    tg.onclick = function () {
+      var show = pw.type === "password";
+      pw.type = show ? "text" : "password"; tg.textContent = show ? "HIDE" : "SHOW";
+    };
+    document.getElementById("themeBtn").onclick = function () {
+      var cur = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", cur);
+      localStorage.setItem("pv-theme", cur);
+    };
+  </script>
+</body>
+</html>

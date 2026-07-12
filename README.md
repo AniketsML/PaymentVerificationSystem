@@ -25,8 +25,8 @@ CSV / Excel upload
    D  DEDUP       CSV identity (lead_code+loan+amount+month) — BEFORE any OCR
                     exact re-submission ............ → duplicate  (no model call)
                     different loan a/c, same lead ... → unverified (flagged for review)
-   0  LOAD IMAGE   fetch URL/local, decode ......... fail → non_document
-   1  IMAGE QC     resolution/brightness/blur/contrast (NO enhancement) → non_document
+   0  LOAD IMAGE   fetch URL/local, decode ......... fail → unprocessed
+   1  IMAGE QC     resolution/brightness/blur/contrast (NO enhancement) → unprocessed
    2  MEDHA VLM    OCR + payment method; non_document ONLY on zero payment
                     evidence (model + text + fields all negative) — else → verify
    3  EXTRACT      structured fields (amount/date/receiver/LAN) + labels
@@ -35,7 +35,7 @@ CSV / Excel upload
                     a mandatory mismatch  → unverified
 ```
 
-**Outcomes:** `verified` · `unverified` · `duplicate` · `non_document`. A lead is
+**Outcomes:** `verified` · `unverified` · `duplicate` · `non_document` · `unprocessed` (image never reached OCR). A lead is
 only `verified` on positively matched evidence and only `non_document` when there is
 **no** payment evidence at all; everything in between (including dedup‑flagged and
 formerly `manual_review` leads) is `unverified` for a human to check.

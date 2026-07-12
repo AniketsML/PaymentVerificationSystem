@@ -5,7 +5,9 @@
   ],
   "AGRIM": [
     "Shreeloan",
-    "Agrim Fincap Private Limited"
+    "Agrim Fincap Private Limited",
+    "SHREE LOAN",
+    "Speedo Loan"
   ],
   "ARCIL": [
     "Asset Reconstruction Company India"
@@ -57,7 +59,8 @@
     "Rupay"
   ],
   "HDBFS": [
-    "HDB Financial Services Limited"
+    "HDB Financial Services Limited",
+    "HDBFS"
   ],
   "HDBFS_PL": [
     "HDB Financial Services Limited"
@@ -67,11 +70,18 @@
     "International Asset Reconstruction"
   ],
   "JANA_SF": [
-    "Paytm"
+    "Paytm",
+    "Jana Small Finance Bank",
+    "Jana Small Finance Bank Ltd",
+    "Jana Small Finance Bank Belgaum Branch",
+    "jana bank loan merchant"
   ],
   "JANA_SF_TW": [
     "Paytm",
-    "Jnna Small Finance Bank"
+    "Jnna Small Finance Bank",
+    "Jana Small Finance Bank",
+    "JANA SMALL FINAN",
+    "Jana Small Finance Bank Ltd."
   ],
   "KHATABOOK": [
     "SMFG India Credit Company Limited"
@@ -80,11 +90,14 @@
     "Si Creva Capital Services Pvt Ltd",
     "Pay With Ring",
     "Kissht",
-    "Si Creva"
+    "Si Creva",
+    "Northern Arc Capital Limited",
+    "NORTHERN ARC CAPITAL LIMI"
   ],
   "KREDITBEE_SOUTH": [
     "Kreditbee",
-    "Krazybee Services Pvt Ltd"
+    "Krazybee Services Pvt Ltd",
+    "KBYESB"
   ],
   "KREDITBEE_SPL": [
     "Kreditbee"
@@ -128,18 +141,25 @@
   ],
   "QUID_CASH": [
     "Strategic Finvest Pvt Ltd",
-    "Finvest Private Limited"
+    "Finvest Private Limited",
+    "QuID",
+    "Quidcash"
   ],
   "SALARYSE": [
     "Almondz Finanz",
-    "Almondz12 ICICI"
+    "Almondz12 ICICI",
+    "SalarySe App",
+    "Salary Se ICICI Bank Limited"
   ],
   "SLICE": [
     "North East Small Finance Bank Limited",
-    "Vivriti Capital Limited"
+    "Vivriti Capital Limited",
+    "SLICE SMALL FINANCE BANK LIMITED",
+    "SLICE"
   ],
   "SMART_COIN": [
-    "Vivriti Capital"
+    "Vivriti Capital",
+    "Smartcoin"
   ],
   "SMFG_AUTO_PAY": [
     "SMFG India Credit",
@@ -162,10 +182,14 @@
     "Credhas Technology"
   ],
   "SMFG_URBAN": [
-    "Paytm"
+    "Paytm",
+    "SMFG India Credit Company"
   ],
   "TATA_CAPITAL": [
     "Tata Capital Financial Services Limited",
     "Tata Capital Limited"
+  ],
+  "TVS_CREDIT_TW": [
+    "TVS Credit Services Limited"
   ]
 }

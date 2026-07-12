@@ -38,18 +38,20 @@ def _cleanup():
 
 
 def test_test_lead_is_born_flagged_no_race():
-    # image-less lead -> non_document, no model call. is_test is threaded into EVERY write,
-    # so there is no window where any row for this lead is visible as real.
+    # image-less lead -> unprocessed (never reached OCR), no model call. is_test is
+    # threaded into EVERY write, so no row for this lead is ever visible as real.
     lg = PgLeadLogger()
     lid = f"{PREFIX}-BORN"
     process_lead(lid, "VARTHANA", "", {"institute_name": "VARTHANA",
                  "payment_amount": "5000", "payment_date": "2025-10-10"},
                  MedhaVisionOCR(), lg, dedup=None, is_test=True)
     with pg.pool().connection() as c:
-        r = c.execute("SELECT is_test FROM lead_results WHERE lead_id=%s", (lid,)).fetchone()
+        r = c.execute("SELECT is_test, verification_status s FROM lead_results "
+                      "WHERE lead_id=%s", (lid,)).fetchone()
         ev = c.execute("SELECT COUNT(*) n, COUNT(*) FILTER (WHERE is_test) t "
                        "FROM lead_events WHERE lead_id=%s", (lid,)).fetchone()
     assert r["is_test"] is True
+    assert r["s"] == "unprocessed"                 # image never reached OCR -> own status
     assert ev["n"] > 0 and ev["n"] == ev["t"]      # ALL events flagged, none ever real
 
 

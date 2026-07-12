@@ -14,7 +14,8 @@ FAIL = "FAIL"
 # ── final verification statuses ───────────────────────────────────────────────
 VERIFIED = "verified"
 UNVERIFIED = "unverified"
-NON_DOCUMENT = "non_document"
+NON_DOCUMENT = "non_document"     # the model looked at it and said: not a payment document
+UNPROCESSED = "unprocessed"       # the image never reached OCR: URL missing / private / broken
 MANUAL_REVIEW = "manual_review"   # dedup: different loan a/c under a known lead_code
 DUPLICATE = "duplicate"           # dedup: exact re-submission (lead+loan+amount+month)
 

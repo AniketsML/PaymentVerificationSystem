@@ -171,7 +171,8 @@ def lender_funnel() -> list:
                COUNT(*) FILTER (WHERE verification_status='verified')     AS verified,
                COUNT(*) FILTER (WHERE verification_status='unverified')   AS unverified,
                COUNT(*) FILTER (WHERE verification_status='duplicate')    AS duplicate,
-               COUNT(*) FILTER (WHERE verification_status='non_document') AS non_document
+               COUNT(*) FILTER (WHERE verification_status='non_document') AS non_document,
+               COUNT(*) FILTER (WHERE verification_status='unprocessed')  AS unprocessed
         FROM lead_results_real
         WHERE COALESCE(lender,'') <> ''
         GROUP BY lender ORDER BY total DESC LIMIT 40
