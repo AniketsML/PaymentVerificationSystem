@@ -36,3 +36,9 @@ Thumbs.db
 
 # keep the template (but never the real .env)
 !.env.example
+
+# machine-local Claude Code config — not part of the app
+.claude/
+
+# sample datasets contain REAL customer data — must never enter version control
+samples/
