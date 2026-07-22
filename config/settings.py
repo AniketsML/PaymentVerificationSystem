@@ -141,7 +141,24 @@ AUTH_USER = os.environ.get("PV_AUTH_USER", "")
 AUTH_PASS = os.environ.get("PV_AUTH_PASS", "")
 # signs the login session cookie; set a stable value in .env so sessions survive restarts
 SECRET_KEY = os.environ.get("PV_SECRET_KEY", "")
+# ── API authentication ────────────────────────────────────────────────────────
+# Comma-separated bearer tokens for machine callers. Each entry is "name:token".
+#   PV_API_TOKENS="metabase:a1b2c3...,collections-svc:d4e5f6..."
+# Names appear in logs/audit so a leaked token is traceable and revocable.
+_raw_tokens = os.environ.get("PV_API_TOKENS", "").strip()
+API_TOKENS = {}
+for _entry in _raw_tokens.split(","):
+    _entry = _entry.strip()
+    if not _entry or ":" not in _entry:
+        continue
+    _name, _tok = _entry.split(":", 1)
+    _name, _tok = _name.strip(), _tok.strip()
+    if _name and _tok:
+        API_TOKENS[_tok] = _name
 
+# Escape hatch for local dev ONLY. Never set this in a deployed environment.
+ALLOW_INSECURE = os.environ.get("PV_ALLOW_INSECURE", "").lower() in ("1", "true", "yes")
+API_MAX_ROWS = int(os.environ.get("PV_API_MAX_ROWS", "2000"))
 # Test Workspace data is disposable — it never becomes long-term storage. Test rows
 # older than this (days) are auto-purged on startup, and the "Clear workspace" button
 # wipes it on demand. 0 disables the auto-purge.

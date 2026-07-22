@@ -28,7 +28,7 @@ import time
 from datetime import timedelta
 
 import pandas as pd
-from flask import (Flask, request, send_file, jsonify, render_template, abort, url_for,
+from flask import (Flask, g,request, send_file, jsonify, render_template, abort, url_for,
                    redirect, session)
 from werkzeug.utils import secure_filename
 
@@ -78,28 +78,71 @@ worker.start_pool()          # in-process worker pool drains the queue
 
 # ── session login (styled login page, not the browser Basic-auth popup) ───────
 _AUTH_ON = bool(settings.AUTH_USER and settings.AUTH_PASS)
-if not _AUTH_ON:
-    sys.stderr.write("[server] WARNING: dashboard is UNAUTHENTICATED — anyone who can "
-                     "reach this host sees all leads. Set PV_AUTH_USER/PV_AUTH_PASS to lock it.\n")
+_TOKENS_ON = bool(settings.API_TOKENS)
+
+# Fail CLOSED. A public deployment with no credentials configured must not start —
+# silently serving borrower PII to anyone who finds the port is not an acceptable
+# default. PV_ALLOW_INSECURE=1 overrides this for local development only.
+if not (_AUTH_ON or _TOKENS_ON):
+    if not settings.ALLOW_INSECURE:
+        sys.stderr.write(
+            "[server] FATAL: no authentication configured.\n"
+            "  Set PV_AUTH_USER + PV_AUTH_PASS (dashboard login) and/or\n"
+            "  PV_API_TOKENS='name:token,...' (machine callers).\n"
+            "  For local dev only: PV_ALLOW_INSECURE=1\n")
+        raise SystemExit(2)
+    sys.stderr.write("[server] WARNING: running UNAUTHENTICATED (PV_ALLOW_INSECURE). "
+                     "Anyone who can reach this host sees all leads.\n")
 
 _PUBLIC_PATHS = {"/health", "/login", "/logout"}
 
 
+def _bearer_caller():
+    """Return the caller name for a valid bearer token, else None.
+
+    Compares against every configured token in constant time and without early exit,
+    so response timing can't be used to recover a token byte by byte. Deliberately
+    not a dict lookup for the same reason.
+    """
+    hdr = request.headers.get("Authorization") or ""
+    if not hdr.startswith("Bearer "):
+        return None
+    presented = hdr[7:].strip()
+    if not presented:
+        return None
+    match = None
+    for token, name in settings.API_TOKENS.items():
+        if hmac.compare_digest(presented, token):
+            match = name
+    return match
+
+
 @app.before_request
 def _require_auth():
-    if not _AUTH_ON:
-        return
+    if not (_AUTH_ON or _TOKENS_ON):
+        return                                   # insecure dev mode, already warned
     p = request.path
     if p in _PUBLIC_PATHS or p.startswith("/static/"):
         return
+
+    # 1) machine caller with a bearer token
+    caller = _bearer_caller()
+    if caller:
+        g.api_caller = caller                    # available to handlers for attribution
+        return
+
+    # 2) browser session
     if session.get("authed"):
         return
-    # not signed in: send a browser navigation to the login page, but answer API/XHR with 401
-    wants_page = request.method == "GET" and "text/html" in (request.headers.get("Accept") or "")
-    if wants_page:
-        return redirect(url_for("login", next=p))
-    return jsonify({"error": "authentication required", "login": url_for("login")}), 401
 
+    # 3) rejected — navigate browsers to login, answer API/XHR with 401
+    wants_page = request.method == "GET" and "text/html" in (request.headers.get("Accept") or "")
+    if wants_page and _AUTH_ON:
+        return redirect(url_for("login", next=p))
+    resp = jsonify({"error": "authentication required",
+                    "detail": "send 'Authorization: Bearer <token>'"})
+    resp.headers["WWW-Authenticate"] = 'Bearer realm="payment-verification"'
+    return resp, 401
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -241,6 +284,69 @@ def api_enqueue():
                                image_root=image_root, is_test=is_test)
     worker.start_pool()          # ensure workers are running
     return jsonify(result)
+
+# ── JSON submit (async) — the machine-caller entry point ──────────────────────
+@app.route("/api/jobs", methods=["POST"])
+def api_jobs():
+    """Accept JSON rows and enqueue them onto the durable queue.
+
+    The counterpart to /api/enqueue (which requires a CSV upload) and to /api/verify
+    (which runs the vision model inside the request thread). Callers get an immediate
+    202 and poll /api/batch/<id> or /api/lead/<id>/status.
+
+    Idempotent: job_id = lead_id, so re-sending a lead is a free no-op reported as
+    `skipped`. Send a stable id via id_col — otherwise the id is a content hash of the
+    row and any field change produces a NEW lead.
+
+    Body:
+      {"rows": [ {...}, {...} ],        # or "record": {...} for a single lead
+       "id_col": "lead_id",             # column holding your stable id
+       "image_col": "payment_document",
+       "image_root": "",
+       "test": false}
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    rows = body.get("rows")
+    if rows is None and isinstance(body.get("record"), dict):
+        rows = [body["record"]]
+    if not isinstance(rows, list) or not rows:
+        return jsonify({"error": "provide 'rows' (non-empty list) or 'record' (object)"}), 400
+    if not all(isinstance(r, dict) for r in rows):
+        return jsonify({"error": "every entry in 'rows' must be an object"}), 400
+    if len(rows) > settings.API_MAX_ROWS:
+        return jsonify({"error": f"too many rows (max {settings.API_MAX_ROWS} per request)"}), 413
+
+    result = jobs.enqueue_rows(
+        rows,
+        image_col=body.get("image_col", "payment_document"),
+        id_col=body.get("id_col") or None,
+        image_root=body.get("image_root", ""),
+        is_test=bool(body.get("test")),
+    )
+    worker.start_pool()
+    result["submitted_by"] = getattr(g, "api_caller", "") or session.get("user", "")
+    return jsonify(result), 202
+
+
+@app.route("/api/lead/<lead_id>/status")
+def api_lead_status(lead_id):
+    """Cheap poll — queue state + verdict only, no journey/extraction blobs.
+
+    Use this instead of /api/lead/<id> when polling in a loop; that endpoint pulls the
+    full event journey and raw model output on every call.
+    """
+    with pg.pool().connection() as c:
+        row = c.execute(
+            "SELECT j.lead_id, j.status AS job_status, j.attempts, j.max_attempts, "
+            "j.last_error, j.is_test, j.updated_at, "
+            "COALESCE(r.verification_status, j.verification_status) AS verification_status "
+            "FROM jobs j LEFT JOIN lead_results r ON r.lead_id = j.lead_id "
+            "WHERE j.job_id = %s", (lead_id,)).fetchone()
+    if not row:
+        abort(404)
+    row["updated_at"] = row["updated_at"].isoformat() if row.get("updated_at") else None
+    row["terminal"] = row["job_status"] in ("done", "failed")
+    return jsonify(row)
 
 
 @app.route("/api/verify_image", methods=["POST"])
