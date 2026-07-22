@@ -8,3 +8,7 @@ waitress>=3.0
 openpyxl>=3.1
 psycopg[binary]>=3.1
 psycopg_pool>=3.2
+SQLAlchemy>=2.0
+# Source DB driver for ingestion: psycopg (above) covers PostgreSQL sources.
+# For a MySQL source, also install PyMySQL (pip install pymysql) and use a
+# mysql+pymysql://… SOURCE_DATABASE_URL.

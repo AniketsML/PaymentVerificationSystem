@@ -44,26 +44,44 @@ formerly `manual_review` leads) is `unverified` for a human to check.
 
 ---
 
-## Quickstart
+## Quickstart — one command
 
 ```bash
-# 1. dependencies
-pip install -r requirements.txt          # includes psycopg (Postgres driver)
+# Windows:            run.bat
+# Linux / macOS:      ./run.sh
+# any platform:       python run.py
+```
 
-# 2. Postgres (any instance; default target is local)
-#    createdb payment_verification   — or set DATABASE_URL to your own
+That's it. The launcher runs a **preflight** (Python version, dependencies, `.env`,
+Postgres reachability, schema, free port, model endpoint, auth), reports anything wrong
+as a plain sentence with the fix, then starts the **console + worker pool** (and the
+**ingester** too, if `SOURCE_MODE` is configured) and opens the browser.
+
+```bash
+python run.py --check          # preflight only — tell me what's wrong, start nothing
+python run.py --port 8010      # use another port (auto-falls-back if the default is busy)
+python run.py --no-browser     # don't open a browser
+```
+
+First run with no `.env` copies `.env.example` for you — fill in `DATABASE_URL`,
+`MEDHA_API_KEY`, and `PV_AUTH_USER`/`PV_AUTH_PASS`, then run again. `run.bat`/`run.sh`
+use [uv](https://docs.astral.sh/uv/) when present (no virtualenv setup needed).
+
+<details><summary>Manual / advanced start</summary>
+
+```bash
+pip install -r requirements.txt          # includes psycopg (Postgres driver) + SQLAlchemy
 export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/payment_verification
 
-# 3. run the console (starts an in-process worker pool automatically)
-python -m app.server                     # → http://localhost:8000
-
-# optional: scale processing with standalone workers
-python worker.py                         # run as many as you like
+python -m app.server                     # console + in-process workers → http://localhost:8000
+python worker.py                         # optional: extra standalone workers
+python ingester.py                       # optional: automated source-DB ingestion (see docs/INGESTION.md)
 
 # CLI batch (synchronous, no queue) + single-lead log dump
 python run_batch.py input.csv --image-col payment_document
 python view_logs.py LEAD-42
 ```
+</details>
 
 Upload a CSV/Excel in the **Verify** tab. Set the **Lead‑ID column** to a stable
 unique id (e.g. your `id`) so re‑uploads resume cleanly. Leave **Test mode** off

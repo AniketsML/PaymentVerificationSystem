@@ -97,6 +97,40 @@ OCR_BREAKER_THRESHOLD = int(os.environ.get("OCR_BREAKER_THRESHOLD", "5"))
 OCR_BREAKER_COOLDOWN  = float(os.environ.get("OCR_BREAKER_COOLDOWN", "8"))    # base seconds
 OCR_BREAKER_MAX_WAIT  = float(os.environ.get("OCR_BREAKER_MAX_WAIT", "60"))   # cap
 
+# ── Automated ingestion (pull leads from the source DB behind Metabase) ───────
+# All OFF by default: with no SOURCE_DATABASE_URL (or SOURCE_MODE unset) the ingester
+# does nothing, so this is inert until deliberately configured. Everything schema-specific
+# lives in SOURCE_MAPPING_PATH (a JSON contract), never in code — the source schema WILL
+# drift, so it is configuration, reviewed like lender config.
+SOURCE_MODE = os.environ.get("SOURCE_MODE", "").strip().lower()          # '', 'db', or 'metabase'
+SOURCE_DATABASE_URL = os.environ.get("SOURCE_DATABASE_URL", "")          # SQLAlchemy URL (db mode)
+SOURCE_NAME = os.environ.get("INGEST_SOURCE_NAME", "primary")            # logical name -> watermark row
+SOURCE_MAPPING_PATH = os.environ.get(
+    "SOURCE_MAPPING_PATH", os.path.join(CONFIG_DIR, "source_mapping.json"))
+INGEST_INTERVAL = int(os.environ.get("INGEST_INTERVAL", "120"))          # seconds between poll cycles
+INGEST_BATCH = int(os.environ.get("INGEST_BATCH", "500"))               # rows per fetch page
+INGEST_OVERLAP_MIN = int(os.environ.get("INGEST_OVERLAP_MIN", "10"))     # re-read window (clock skew / late commits)
+INGEST_MAX_CYCLE_PAGES = int(os.environ.get("INGEST_MAX_CYCLE_PAGES", "200"))  # safety cap per cycle
+
+# image prefetch: download the document at ingest time (while the signed URL is fresh) into
+# a content-addressed blob store. This is what structurally kills the expired-link class.
+IMAGE_PREFETCH = os.environ.get("IMAGE_PREFETCH", "1") not in ("0", "false", "False", "")
+IMAGE_STORE_PATH = os.environ.get("IMAGE_STORE_PATH", os.path.join(DATA_DIR, "blobs"))
+IMAGE_PREFETCH_ATTEMPTS = int(os.environ.get("IMAGE_PREFETCH_ATTEMPTS", "2"))   # quick inline retries
+IMAGE_PREFETCH_MAX_MB = int(os.environ.get("IMAGE_PREFETCH_MAX_MB", "25"))      # skip absurdly large bodies
+IMAGE_RETENTION_DAYS = int(os.environ.get("IMAGE_RETENTION_DAYS", "90"))        # blob retention (0 = forever)
+
+# backfill: same code path as live, rate-capped so history doesn't starve the live tail.
+BACKFILL_ROWS_PER_MIN = int(os.environ.get("BACKFILL_ROWS_PER_MIN", "600"))
+
+# Metabase source backend (SOURCE_MODE=metabase): a saved question parameterised on the
+# watermark. Strictly worse than a direct read-only DB user, but works when only Metabase
+# access is granted. Session token is fetched + refreshed automatically.
+METABASE_URL = os.environ.get("METABASE_URL", "")
+METABASE_USER = os.environ.get("METABASE_USER", "")
+METABASE_PASS = os.environ.get("METABASE_PASS", "")
+METABASE_CARD_ID = os.environ.get("METABASE_CARD_ID", "")
+
 # ── Web serving / access ──────────────────────────────────────────────────────
 WEB_THREADS = int(os.environ.get("WEB_THREADS", "8"))
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "64"))   # reject bigger uploads (OOM guard)

@@ -1,0 +1,934 @@
+<style>
+  :root{
+    --paper:#f4f3ee; --surface:#ffffff; --surface-2:#faf9f5; --sunken:#f0efe9;
+    --ink:#14140f; --ink-soft:#4b4a42; --ink-faint:#86847a;
+    --line:rgba(20,20,15,.12); --line-strong:rgba(20,20,15,.24);
+    --accent:#1b29ff; --accent-soft:rgba(27,41,255,.07); --on-accent:#ffffff;
+    --note:#1b29ff; --note-bg:rgba(27,41,255,.06);
+    --warn:#a85c00; --warn-bg:rgba(168,92,0,.09);
+    --crit:#c81e1e; --crit-bg:rgba(200,30,30,.07);
+    --ok:#0e7c42; --ok-bg:rgba(14,124,66,.09);
+    --code-bg:#f7f6f1; --code-ink:#1d1c16;
+    --radius:3px;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --paper:#0c0d0b; --surface:#151613; --surface-2:#1a1b17; --sunken:#101109;
+      --ink:#eceae1; --ink-soft:#a6a498; --ink-faint:#726f64;
+      --line:rgba(255,255,255,.12); --line-strong:rgba(255,255,255,.22);
+      --accent:#7f8bff; --accent-soft:rgba(127,139,255,.12); --on-accent:#0a0b09;
+      --note:#7f8bff; --note-bg:rgba(127,139,255,.10);
+      --warn:#e0a24a; --warn-bg:rgba(224,162,74,.12);
+      --crit:#ff6b6b; --crit-bg:rgba(255,107,107,.11);
+      --ok:#4ccb87; --ok-bg:rgba(76,203,135,.12);
+      --code-bg:#0f100c; --code-ink:#d8d6cc;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#0c0d0b; --surface:#151613; --surface-2:#1a1b17; --sunken:#101109;
+    --ink:#eceae1; --ink-soft:#a6a498; --ink-faint:#726f64;
+    --line:rgba(255,255,255,.12); --line-strong:rgba(255,255,255,.22);
+    --accent:#7f8bff; --accent-soft:rgba(127,139,255,.12); --on-accent:#0a0b09;
+    --note:#7f8bff; --note-bg:rgba(127,139,255,.10);
+    --warn:#e0a24a; --warn-bg:rgba(224,162,74,.12);
+    --crit:#ff6b6b; --crit-bg:rgba(255,107,107,.11);
+    --ok:#4ccb87; --ok-bg:rgba(76,203,135,.12);
+    --code-bg:#0f100c; --code-ink:#d8d6cc;
+  }
+  :root[data-theme="light"]{
+    --paper:#f4f3ee; --surface:#ffffff; --surface-2:#faf9f5; --sunken:#f0efe9;
+    --ink:#14140f; --ink-soft:#4b4a42; --ink-faint:#86847a;
+    --line:rgba(20,20,15,.12); --line-strong:rgba(20,20,15,.24);
+    --accent:#1b29ff; --accent-soft:rgba(27,41,255,.07); --on-accent:#ffffff;
+    --note:#1b29ff; --note-bg:rgba(27,41,255,.06);
+    --warn:#a85c00; --warn-bg:rgba(168,92,0,.09);
+    --crit:#c81e1e; --crit-bg:rgba(200,30,30,.07);
+    --ok:#0e7c42; --ok-bg:rgba(14,124,66,.09);
+    --code-bg:#f7f6f1; --code-ink:#1d1c16;
+  }
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);
+    font-size:15.5px;line-height:1.62;-webkit-font-smoothing:antialiased}
+  .doc{display:grid;grid-template-columns:270px minmax(0,1fr);max-width:1240px;margin:0 auto;
+    background:var(--surface);border-left:1px solid var(--line);border-right:1px solid var(--line);min-height:100vh}
+
+  /* ── sidebar ── */
+  .side{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+    border-right:1px solid var(--line);background:var(--surface-2);padding:0}
+  .side-head{padding:22px 22px 16px;border-bottom:1px solid var(--line)}
+  .mark{display:inline-flex;align-items:center;gap:9px;font-weight:700;font-size:15px;letter-spacing:-.02em}
+  .mark .glyph{width:22px;height:22px;background:var(--accent);flex:none;
+    clip-path:polygon(0 0,100% 0,100% 100%,50% 100%,50% 50%,0 50%)}
+  .mark .glyph span{display:none}
+  .side-sub{font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-faint);
+    font-weight:700;margin-top:10px}
+  .side nav{padding:14px 12px 40px}
+  .side nav a{display:block;padding:6px 10px;color:var(--ink-soft);text-decoration:none;font-size:13.5px;
+    border-radius:var(--radius);line-height:1.35;border-left:2px solid transparent}
+  .side nav a .n{font-family:var(--mono);font-size:11px;color:var(--ink-faint);margin-right:8px}
+  .side nav a:hover{background:var(--sunken);color:var(--ink)}
+  .side nav a.active{color:var(--accent);background:var(--accent-soft);border-left-color:var(--accent)}
+  .side nav a.active .n{color:var(--accent)}
+  .side nav .grp{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-faint);
+    font-weight:700;padding:16px 10px 6px}
+
+  /* ── main ── */
+  main{padding:0 clamp(24px,4vw,64px) 120px;min-width:0}
+  .topbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;
+    gap:16px;padding:14px 0;margin-bottom:8px;background:var(--surface);border-bottom:1px solid var(--line)}
+  .crumbs{font-size:12px;color:var(--ink-faint);font-family:var(--mono)}
+  .tbtn{font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;background:var(--surface-2);
+    color:var(--ink-soft);border:1px solid var(--line-strong);border-radius:var(--radius);padding:6px 12px}
+  .tbtn:hover{color:var(--ink);border-color:var(--accent)}
+
+  .hero{padding:48px 0 34px;border-bottom:1px solid var(--line-strong);margin-bottom:8px}
+  .eyebrow{font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--accent);font-weight:700}
+  h1{font-size:clamp(30px,4.4vw,46px);line-height:1.04;letter-spacing:-.03em;margin:.35em 0 .25em;text-wrap:balance}
+  .lede{font-size:17px;color:var(--ink-soft);max-width:62ch;margin:0}
+  .meta-strip{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}
+  .chip{font-family:var(--mono);font-size:11.5px;color:var(--ink-soft);background:var(--surface-2);
+    border:1px solid var(--line);border-radius:var(--radius);padding:5px 10px}
+  .chip b{color:var(--ink);font-weight:600}
+
+  section{padding:40px 0;border-bottom:1px solid var(--line);scroll-margin-top:70px}
+  section:last-of-type{border-bottom:none}
+  h2{font-size:25px;letter-spacing:-.02em;margin:0 0 6px;display:flex;align-items:baseline;gap:12px;text-wrap:balance}
+  h2 .num{font-family:var(--mono);font-size:14px;color:var(--accent);font-weight:600;flex:none}
+  h3{font-size:17.5px;letter-spacing:-.01em;margin:30px 0 8px}
+  h4{font-size:14px;letter-spacing:.01em;margin:22px 0 6px;color:var(--ink)}
+  p{margin:12px 0;max-width:70ch}
+  .section-lede{color:var(--ink-soft);font-size:15.5px;max-width:70ch;margin:6px 0 18px}
+  ul,ol{max-width:70ch;padding-left:22px}
+  li{margin:6px 0}
+  strong{font-weight:650}
+  a{color:var(--accent);text-decoration:none;border-bottom:1px solid transparent}
+  a:hover{border-bottom-color:var(--accent)}
+  code{font-family:var(--mono);font-size:.86em;background:var(--code-bg);color:var(--code-ink);
+    padding:1px 6px;border-radius:var(--radius);border:1px solid var(--line);white-space:nowrap}
+  pre{background:var(--code-bg);border:1px solid var(--line-strong);border-radius:var(--radius);
+    overflow-x:auto;margin:16px 0;font-size:13px}
+  pre code{background:none;border:none;padding:0;white-space:pre;display:block;padding:16px 18px;
+    line-height:1.6;color:var(--code-ink)}
+  .code-cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--ink-faint);background:var(--surface-2);border:1px solid var(--line-strong);border-bottom:none;
+    border-radius:var(--radius) var(--radius) 0 0;padding:7px 14px;margin:16px 0 -16px;display:inline-block}
+  .code-cap + pre{border-top-left-radius:0}
+
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px;
+    display:block;overflow-x:auto;white-space:nowrap}
+  @media(min-width:900px){table{white-space:normal}}
+  th{text-align:left;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint);
+    font-weight:700;padding:8px 14px 8px 0;border-bottom:1px solid var(--line-strong)}
+  td{padding:9px 14px 9px 0;border-bottom:1px solid var(--line);vertical-align:top;color:var(--ink-soft)}
+  td:first-child{color:var(--ink)}
+  td code{white-space:nowrap}
+  .tnum{font-variant-numeric:tabular-nums}
+
+  .callout{border:1px solid var(--line-strong);border-left-width:3px;border-radius:var(--radius);
+    padding:14px 18px;margin:18px 0;background:var(--surface-2);font-size:14.5px}
+  .callout .cap{font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;margin-bottom:4px}
+  .callout p{margin:4px 0;max-width:none}
+  .callout.note{border-left-color:var(--note);background:var(--note-bg)} .callout.note .cap{color:var(--note)}
+  .callout.warn{border-left-color:var(--warn);background:var(--warn-bg)} .callout.warn .cap{color:var(--warn)}
+  .callout.crit{border-left-color:var(--crit);background:var(--crit-bg)} .callout.crit .cap{color:var(--crit)}
+  .callout.ok{border-left-color:var(--ok);background:var(--ok-bg)} .callout.ok .cap{color:var(--ok)}
+
+  .badge{font-family:var(--mono);font-size:11px;font-weight:600;padding:2px 8px;border-radius:var(--radius);
+    border:1px solid transparent;white-space:nowrap}
+  .b-get{color:var(--ok);background:var(--ok-bg)} .b-post{color:var(--accent);background:var(--accent-soft)}
+
+  /* diagrams */
+  .diagram{border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--surface-2);
+    padding:22px;margin:20px 0;overflow-x:auto}
+  .flow{display:flex;align-items:stretch;gap:0;min-width:min-content}
+  .flow .stage{flex:1;min-width:120px;border:1px solid var(--line-strong);background:var(--surface);
+    padding:12px 12px;text-align:center;position:relative}
+  .flow .stage + .stage{border-left:none}
+  .flow .stage .s-n{font-family:var(--mono);font-size:10px;color:var(--accent);font-weight:700}
+  .flow .stage .s-t{font-weight:650;font-size:13px;margin:3px 0}
+  .flow .stage .s-d{font-size:11px;color:var(--ink-faint);line-height:1.35}
+  .tiers{display:grid;gap:10px;margin:16px 0}
+  .tier{display:grid;grid-template-columns:34px 1fr;gap:14px;align-items:start;border:1px solid var(--line);
+    border-left:3px solid var(--accent);border-radius:var(--radius);padding:12px 16px;background:var(--surface-2)}
+  .tier .t-n{font-family:var(--mono);font-weight:700;color:var(--accent);font-size:15px}
+  .tier .t-h{font-weight:650}
+  .tier .t-b{font-size:13.5px;color:var(--ink-soft)}
+
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin:18px 0}
+  .card{border:1px solid var(--line-strong);border-radius:var(--radius);padding:16px 18px;background:var(--surface-2)}
+  .card h4{margin:0 0 6px}
+  .card p{margin:4px 0;font-size:13.5px;max-width:none}
+
+  kbd{font-family:var(--mono);font-size:12px;background:var(--surface-2);border:1px solid var(--line-strong);
+    border-bottom-width:2px;border-radius:var(--radius);padding:1px 6px}
+  hr{border:none;border-top:1px solid var(--line);margin:28px 0}
+  .foot{padding:40px 0 10px;color:var(--ink-faint);font-size:12.5px}
+
+  @media(max-width:880px){
+    .doc{grid-template-columns:1fr}
+    .side{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line-strong)}
+    .side nav{columns:2;padding:12px}
+  }
+  @media(prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+
+<div class="doc">
+  <aside class="side">
+    <div class="side-head">
+      <span class="mark"><span class="glyph"><span></span></span> Verify<span style="color:var(--accent)">/OCR</span></span>
+      <div class="side-sub">Engineering Handoff</div>
+    </div>
+    <nav id="toc">
+      <span class="grp">Understand</span>
+      <a href="#overview"><span class="n">01</span>System overview</a>
+      <a href="#architecture"><span class="n">02</span>Architecture &amp; processes</a>
+      <a href="#stack"><span class="n">03</span>Technology stack</a>
+      <a href="#repo"><span class="n">04</span>Repository layout</a>
+      <a href="#pipeline"><span class="n">05</span>Processing pipeline</a>
+      <a href="#subsystems"><span class="n">06</span>Core subsystems</a>
+      <a href="#schema"><span class="n">07</span>Database schema</a>
+      <span class="grp">Operate</span>
+      <a href="#config"><span class="n">08</span>Configuration reference</a>
+      <a href="#api"><span class="n">09</span>HTTP / API surface</a>
+      <a href="#deploy"><span class="n">10</span>Deployment guide</a>
+      <a href="#metabase"><span class="n">11</span>Database &amp; Metabase</a>
+      <a href="#ops"><span class="n">12</span>Operations &amp; runbook</a>
+      <a href="#security"><span class="n">13</span>Security &amp; compliance</a>
+      <a href="#limits"><span class="n">14</span>Limitations &amp; roadmap</a>
+    </nav>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <span class="crumbs">docs / system-documentation</span>
+      <button class="tbtn" id="themeToggle" type="button">Toggle theme</button>
+    </div>
+
+    <header class="hero">
+      <div class="eyebrow">Payment Verification System · OCR</div>
+      <h1>System Documentation &amp; Deployment Guide</h1>
+      <p class="lede">Complete functional architecture, backend internals, and step-by-step
+        deployment &amp; integration reference for the automated payment-proof verification service.
+        Written for the engineering team taking the system to production.</p>
+      <div class="meta-strip">
+        <span class="chip">Baseline commit <b>5006011</b></span>
+        <span class="chip">Runtime <b>Python 3.11+</b></span>
+        <span class="chip">Datastore <b>PostgreSQL</b></span>
+        <span class="chip">Serving <b>Flask + waitress</b></span>
+        <span class="chip">Status <b>Production v1</b></span>
+      </div>
+    </header>
+
+    <!-- 01 ─────────────────────────────────────────────── -->
+    <section id="overview">
+      <h2><span class="num">01</span>System overview</h2>
+      <p class="section-lede">What the system does, who uses it, and the single idea the whole design rests on.</p>
+
+      <p><strong>The problem it solves.</strong> Borrowers submit proof-of-payment images —
+        UPI screenshots (PhonePe, Google Pay, Paytm), bank NEFT/IMPS receipts, cash receipts,
+        and loan No-Dues / closure certificates. Verifying each one by hand against the loan
+        record is slow and error-prone. This system reads each image with a vision model and then
+        <strong>deterministically</strong> checks it against what the loan record says should be
+        true — correct amount, date, receiver, and loan account — returning an auditable verdict.</p>
+
+      <p><strong>The five verdicts.</strong> Every lead ends in exactly one terminal state:</p>
+      <table>
+        <thead><tr><th>Status</th><th>Meaning</th><th>Who acts</th></tr></thead>
+        <tbody>
+          <tr><td><code>verified</code></td><td>All mandatory fields matched on positive evidence.</td><td>No one — done.</td></tr>
+          <tr><td><code>unverified</code></td><td>A mandatory field failed or was unreadable; reason recorded.</td><td>Human review queue.</td></tr>
+          <tr><td><code>duplicate</code></td><td>Exact re-submission of an already-processed payment. No model call spent.</td><td>No one — auto.</td></tr>
+          <tr><td><code>non_document</code></td><td>The model saw the image and it is not a payment proof.</td><td>No one — auto.</td></tr>
+          <tr><td><code>unprocessed</code></td><td>The image never reached the model (URL missing, private/expired link, download failure, quality-discarded).</td><td>Data-source owner (fix the link/URL).</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout note">
+        <div class="cap">The one idea to remember</div>
+        <p><strong>All durable state lives in PostgreSQL, every write into it is idempotent, and
+          the processes are disposable.</strong> Kill any process at any moment and restart it —
+          no lead is lost, nothing is double-counted, recovery equals restart. Every guarantee in
+          this document is a consequence of that principle.</p>
+      </div>
+    </section>
+
+    <!-- 02 ─────────────────────────────────────────────── -->
+    <section id="architecture">
+      <h2><span class="num">02</span>Architecture &amp; processes</h2>
+      <p class="section-lede">Four kinds of process that communicate only through one database.</p>
+
+      <p>The system is not a monolith and not microservices — it is a small set of stateless
+        processes coordinating exclusively through Postgres. They never call each other directly.</p>
+
+      <div class="diagram">
+        <div class="flow" style="flex-wrap:wrap;gap:10px">
+          <div class="stage"><div class="s-n">WEB</div><div class="s-t">Console + API</div><div class="s-d">Flask on waitress. Serves UI &amp; JSON. Optional in-process worker pool.</div></div>
+          <div class="stage"><div class="s-n">WORKER ×N</div><div class="s-t">Pipeline runner</div><div class="s-d">Claims jobs, runs the 6 stages, writes results. Scales horizontally.</div></div>
+          <div class="stage"><div class="s-n">POSTGRES</div><div class="s-t">Single source of truth</div><div class="s-d">Queue + results + events + config. The only stateful component.</div></div>
+          <div class="stage"><div class="s-n">MEDHA VLM</div><div class="s-t">Vision model</div><div class="s-d">Separate GPU host. OpenAI-compatible. Runtime-repointable.</div></div>
+        </div>
+      </div>
+
+      <h3>The process model</h3>
+      <table>
+        <thead><tr><th>Process</th><th>Entry point</th><th>Responsibility</th></tr></thead>
+        <tbody>
+          <tr><td><code>web</code></td><td><code>python -m app.server</code></td><td>Console UI + HTTP API on <code>0.0.0.0:8000</code> (waitress, <code>WEB_THREADS</code>). Runs startup housekeeping and — unless disabled — an in-process worker pool.</td></tr>
+          <tr><td><code>worker</code></td><td><code>python worker.py</code></td><td>Standalone pool of <code>WORKER_COUNT</code> threads draining the job queue. Run one or more for horizontal scale.</td></tr>
+          <tr><td><code>reverify</code></td><td><code>python reverify.py</code></td><td>Re-runs <em>only</em> the verdict stage on already-extracted leads — no model calls. Maintenance path after a rules/config change.</td></tr>
+          <tr><td><code>run_batch</code></td><td><code>python run_batch.py</code></td><td>CLI driver for offline / precomputed batches. Same pipeline, no web.</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout note">
+        <div class="cap">Deployment tip — splitting web and workers</div>
+        <p>The web process starts an in-process worker pool on boot. To run workers as a separate
+          service (recommended for production so the console can restart without dropping in-flight
+          leads), set <code>WORKER_COUNT=0</code> on the <code>web</code> container and
+          <code>WORKER_COUNT=4</code> (or more) on the dedicated <code>worker</code> container.
+          <strong>No code change is required</strong> — it is purely an environment split.</p>
+      </div>
+
+      <h3>Why this shape, and not more</h3>
+      <p>At this volume (tens of thousands of leads/day, see §12) one VM running Docker Compose +
+        Postgres has a large margin. The genuine bottleneck is GPU inference, which no orchestration
+        layer fixes. The design deliberately avoids Kafka/RabbitMQ (the Postgres queue is already
+        durable and transactional with the results), Kubernetes (one host), and Airflow (three
+        cron-like loops are not a DAG engine). Scaling is "add workers + model concurrency," never a
+        rewrite.</p>
+    </section>
+
+    <!-- 03 ─────────────────────────────────────────────── -->
+    <section id="stack">
+      <h2><span class="num">03</span>Technology stack</h2>
+      <p class="section-lede">Everything is standard, boring, and boring on purpose.</p>
+      <table>
+        <thead><tr><th>Layer</th><th>Choice</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Language</td><td>Python 3.11+</td><td>No compiled extensions beyond wheels.</td></tr>
+          <tr><td>Web framework</td><td>Flask</td><td>Served by <strong>waitress</strong> (production WSGI), not the dev server.</td></tr>
+          <tr><td>Database</td><td>PostgreSQL</td><td>Driver <code>psycopg[binary]</code> + <code>psycopg_pool</code> connection pool.</td></tr>
+          <tr><td>Data / imaging</td><td>pandas, numpy, Pillow</td><td>CSV/Excel parsing, image QC math, image decode.</td></tr>
+          <tr><td>HTTP / dates</td><td>requests, python-dateutil</td><td>Model calls + image fetch; day-first Indian date parsing.</td></tr>
+          <tr><td>Spreadsheets</td><td>openpyxl</td><td>Excel upload support.</td></tr>
+          <tr><td>Frontend</td><td>Vanilla JS + Chart.js</td><td>One <code>app.js</code>, one <code>style.css</code>. No build step, no framework.</td></tr>
+          <tr><td>Vision model</td><td>"Medha" VLM</td><td>External GPU host, OpenAI-compatible <code>/chat/completions</code>. Not part of this repo.</td></tr>
+        </tbody>
+      </table>
+      <p>The complete Python dependency set is in <code>requirements.txt</code>. There is no Node
+        build, no bundler, and no CSS framework — the UI ships as static files served by Flask.</p>
+    </section>
+
+    <!-- 04 ─────────────────────────────────────────────── -->
+    <section id="repo">
+      <h2><span class="num">04</span>Repository layout</h2>
+      <p class="section-lede">Where everything lives, so the team can navigate the code on day one.</p>
+      <div class="code-cap">directory map</div>
+      <pre><code>payment_verification_system/
+├─ app/
+│  ├─ server.py            # Flask app: all HTTP routes, auth, entry point (waitress)
+│  ├─ templates/           # index.html (SPA shell), login.html
+│  └─ static/              # app.js (the SPA), style.css
+├─ pipeline/
+│  ├─ orchestrator.py      # process_lead() — runs the 6 stages, the spine
+│  ├─ jobs.py              # durable queue: enqueue, claim (SKIP LOCKED), complete/fail
+│  ├─ image_source.py      # stage 0 — fetch + decode image, classify load failures
+│  ├─ image_qc.py          # stage 1 — deterministic quality gate (no pixel edits)
+│  ├─ ocr_classify.py      # stage 2 — model call + non-document decision
+│  ├─ extract.py           # stage 3 — structure + field labelling
+│  ├─ verify.py            # stage 4 — deterministic verdict + receiver tiers
+│  ├─ approvals.py         # receiver-approval queue (the human teaching loop)
+│  └─ models.py            # ExtractedDocument dataclass + status constants
+├─ ocr/
+│  └─ medha_client.py      # vision client: cache, circuit breaker, streaming, coercion
+├─ observability/
+│  ├─ pg_logger.py         # event log + result writes + review ledger + queries
+│  ├─ pg_dedup.py          # payment de-duplication (identity + atomic claim)
+│  └─ metrics.py           # Observability-tab aggregates (scope-aware, TTL-cached)
+├─ db/
+│  └─ pg.py                # connection pool, schema + migrations, reset helpers
+├─ config/
+│  ├─ settings.py          # all thresholds + env var loading
+│  ├─ runtime.py           # live-editable model endpoint (runtime_config table)
+│  ├─ lender_rules.json    # per-lender mandatory fields + tolerances
+│  └─ lender_receivers.json# per-lender accepted-receiver allowlists
+├─ worker.py               # standalone worker pool entry point
+├─ reverify.py             # stage-4-only re-verification (no model calls)
+├─ run_batch.py            # CLI batch driver
+├─ requirements.txt        # Python dependencies
+├─ .env.example            # environment template (copy to .env)
+└─ docs/                   # API.md, PRODUCTION_ARCHITECTURE.md, this file</code></pre>
+    </section>
+
+    <!-- 05 ─────────────────────────────────────────────── -->
+    <section id="pipeline">
+      <h2><span class="num">05</span>Processing pipeline</h2>
+      <p class="section-lede">The six stages every lead flows through, in <code>pipeline/orchestrator.py</code>.</p>
+
+      <div class="diagram">
+        <div class="flow">
+          <div class="stage"><div class="s-n">D</div><div class="s-t">Dedup</div><div class="s-d">CSV-identity check before any cost</div></div>
+          <div class="stage"><div class="s-n">0</div><div class="s-t">Load image</div><div class="s-d">Fetch + decode; classify failures</div></div>
+          <div class="stage"><div class="s-n">1</div><div class="s-t">Image QC</div><div class="s-d">Discard broken images</div></div>
+          <div class="stage"><div class="s-n">2</div><div class="s-t">OCR + classify</div><div class="s-d">The only model call</div></div>
+          <div class="stage"><div class="s-n">3</div><div class="s-t">Extract</div><div class="s-d">Structure + label fields</div></div>
+          <div class="stage"><div class="s-n">4</div><div class="s-t">Verify</div><div class="s-d">Deterministic verdict</div></div>
+        </div>
+      </div>
+
+      <p>Every stage is written to the <code>lead_events</code> log with its timing, so any lead's
+        full journey is reconstructable. The <code>is_test</code> flag is threaded into every write,
+        so a sandbox lead is never momentarily visible as real.</p>
+
+      <h3>Stage D — Deduplication <span style="color:var(--ink-faint);font-weight:400;font-size:14px">(before any expensive work)</span></h3>
+      <p>Builds a payment's identity from the CSV row — <code>lead_code + loan account + amount +
+        payment-month</code> — and looks it up in the ledger. An exact match short-circuits to
+        <code>duplicate</code> with <strong>no image download and no model call</strong>. Five
+        verdicts: <code>new</code>, <code>emi</code> (same loan, new installment → process),
+        <code>duplicate</code>, <code>manual_review</code> (same lead-code, different loan → folded
+        into <code>unverified</code> for a human), and <code>skip</code> (insufficient identity).</p>
+
+      <h3>Stage 0 — Load image</h3>
+      <p>Fetches bytes from an HTTP(S) URL, local path, or <code>data:</code> URI and decodes with
+        Pillow. Failures are precisely classified — a URL that returns 200 but is not an image is
+        diagnosed as <em>private / access-denied</em> or <em>expired link</em> rather than a generic
+        error. Any load failure ends the lead as <code>unprocessed</code> with the exact reason.</p>
+
+      <h3>Stage 1 — Image QC</h3>
+      <p>Pure-numpy quality metrics (brightness, blur via variance-of-Laplacian, contrast) with
+        <strong>no pixel modification</strong>. Discards only genuinely broken images: near-black,
+        unusably blurry, or blank/flat. Deliberately <em>no</em> minimum-resolution gate (small but
+        legitimate receipts were being wrongly dropped) and <em>no</em> brightness upper bound
+        (white-card UPI receipts are bright but valid). A fail → <code>unprocessed</code>.</p>
+
+      <h3>Stage 2 — OCR + classification <span style="color:var(--ink-faint);font-weight:400;font-size:14px">(the only model call)</span></h3>
+      <p>Runs the vision model, labels the payment method from the document type + keyword map, then
+        makes the non-document decision. <strong>Crucially, it does not trust the model's own
+        yes/no flag</strong> (fallible both ways; logged but ignored). Instead it decides from
+        concrete evidence — a payment keyword in the OCR text (<code>paid</code>, <code>UTR</code>,
+        <code>₹</code>, <code>no dues</code>…) or a hard field (amount, reference, loan account).
+        Evidence present → treat as a payment document; entirely absent → genuine
+        <code>non_document</code>. Tuned for zero false discards of real receipts.</p>
+
+      <h3>Stage 3 — Extract &amp; label</h3>
+      <p>Builds the structured record and cross-references each extracted value against the loan
+        record — e.g. a number equal to the system's loan account gets labelled
+        <code>loan_account_number, matches_system: true</code>. This labelling powers the reviewer
+        drawer.</p>
+
+      <h3>Stage 4 — Verify <span style="color:var(--ink-faint);font-weight:400;font-size:14px">(pure rules, no model)</span></h3>
+      <p>The deterministic verdict — detailed in §06. Checks each mandatory field for the lender
+        (date within tolerance, amount within ±₹1, receiver via the tiered match, and loan account
+        for SMFG lenders), plus guards against incoming-credit receipts.</p>
+    </section>
+
+    <!-- 06 ─────────────────────────────────────────────── -->
+    <section id="subsystems">
+      <h2><span class="num">06</span>Core subsystems</h2>
+      <p class="section-lede">The engineered pieces that make the pipeline robust and self-improving.</p>
+
+      <h3>The durable job queue <span style="color:var(--ink-faint);font-weight:400;font-size:14px">(pipeline/jobs.py)</span></h3>
+      <p>This is where crash-safety lives. Workers claim jobs with a single atomic query:</p>
+      <div class="code-cap">claim_one — lock-free, lease-based</div>
+      <pre><code>WITH picked AS (
+  SELECT job_id, status AS prev_status, attempts AS prev_attempts FROM jobs
+  WHERE status='pending' OR (status='in_progress' AND lease_until &lt; now())
+  ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+UPDATE jobs j SET status='in_progress', attempts=j.attempts+1,
+  lease_until = now() + make_interval(secs =&gt; 300), updated_at=now()
+FROM picked WHERE j.job_id = picked.job_id
+RETURNING j.*, picked.prev_status, picked.prev_attempts</code></pre>
+      <ul>
+        <li><strong>FOR UPDATE SKIP LOCKED</strong> — two workers never grab the same row; the
+          second skips and takes the next. Lock-free scaling to N workers.</li>
+        <li><strong>The lease</strong> — a claimed job expires after <code>JOB_LEASE_SECONDS</code>
+          (300s). A crashed worker's job is re-claimed by the same query and logs a
+          <code>lease_reclaim</code> event.</li>
+        <li><strong>Self-limiting failure</strong> — <code>fail()</code> re-queues until
+          <code>attempts &gt;= max_attempts</code> (3), then parks the job in <code>failed</code>
+          with its error text. Poison jobs never loop forever; they surface in Queue &amp; errors.</li>
+        <li><strong>Idempotent enqueue</strong> — <code>ON CONFLICT (job_id) DO NOTHING</code>, so
+          re-uploading or re-reading rows is free and harmless.</li>
+      </ul>
+
+      <h3>Receiver matching — the verification core <span style="color:var(--ink-faint);font-weight:400;font-size:14px">(pipeline/verify.py)</span></h3>
+      <p>"Did the money go to the right party?" is answered by a strict three-tier hierarchy;
+        the first tier that passes wins.</p>
+      <div class="tiers">
+        <div class="tier"><div class="t-n">1</div><div><div class="t-h">Lender's own name</div><div class="t-b">Derived from the lender code (tokens ≥ 4 chars). The payee <em>is</em> the lender.</div></div></div>
+        <div class="tier"><div class="t-n">2</div><div><div class="t-h">Approved allowlist</div><div class="t-b">The lender's list of accepted receiver names in <code>lender_receivers.json</code>, grown by the Approvals loop.</div></div></div>
+        <div class="tier"><div class="t-n">3</div><div><div class="t-h">Receiver UPI ID on the document</div><div class="t-b">If a UPI handle (e.g. <code>smfgindia@icici</code>) decomposes into the accepted name's own tokens, it passes — verifying a receipt payable to a shop name whose UPI proves it went to the lender.</div></div></div>
+      </div>
+      <p>Matching is <strong>token-anchored, not fuzzy-score</strong>: generic words (bank, finance,
+        services, limited…) are stripped, then a <em>distinctive</em> token (<code>hdb</code>,
+        <code>smfg</code>, <code>jana</code>) must match — exactly, or within one typo for tokens ≥ 4
+        chars. So "HDB Fin Services" matches "HDB Financial Services Limited," but "Ram Financial
+        Services" never does, and a payer <code>janardhan@oksbi</code> never matches "Jana." Two
+        further guards: an <strong>incoming-credit direction guard</strong> refuses to auto-verify a
+        receipt that reads like money arriving into the borrower's own account, and
+        reconciliation-dependent lenders never auto-verify.</p>
+
+      <h3>The vision-model client <span style="color:var(--ink-faint);font-weight:400;font-size:14px">(ocr/medha_client.py)</span></h3>
+      <div class="grid2">
+        <div class="card"><h4>Extraction cache</h4><p>Keyed on <code>sha256(image) : model : prompt_version</code>. Identical images are never sent twice; only successful reads are cached. A prompt change auto-invalidates old entries.</p></div>
+        <div class="card"><h4>Circuit breaker</h4><p>Shared across worker threads. After 5 consecutive model failures it opens and applies a growing, capped cooldown — backpressure instead of a retry-storm against a struggling GPU box.</p></div>
+        <div class="card"><h4>Runtime-repointable</h4><p>Endpoint URL/key/model are read live from <code>runtime_config</code> (5s TTL). Ops can move the model host from the console with no restart.</p></div>
+        <div class="card"><h4>Robust coercion</h4><p>Pulls the JSON object out of the response even if wrapped in prose; degrades to a safe non-document on unparseable output. Transport errors never crash the pipeline.</p></div>
+      </div>
+
+      <h3>Human loops — where workload keeps shrinking</h3>
+      <ul>
+        <li><strong>Approvals</strong> (<code>pipeline/approvals.py</code>) — receiver-only failures
+          grouped by <code>(lender, receiver)</code>. One approval atomically appends the name to
+          <code>lender_receivers.json</code>, hot-reloads config in every worker, and re-verifies
+          every affected lead. Keyed by receiver (not lead), so it survives data wipes. Live-data
+          only — disabled in the Test workspace.</li>
+        <li><strong>Review</strong> — a reviewer confirms or overturns any verdict; the append-only
+          <code>lead_reviews</code> ledger is the <em>only</em> ground truth for accuracy telemetry,
+          and is test-scoped so sandbox reviews never poison real precision.</li>
+        <li><strong>Reverify</strong> (<code>reverify.py</code>) — re-runs only stage 4 on
+          already-extracted leads with current rules, <strong>no model calls</strong>. Used after
+          any config change to bring existing data in line for free.</li>
+      </ul>
+
+      <h3>Observability <span style="color:var(--ink-faint);font-weight:400;font-size:14px">(observability/metrics.py)</span></h3>
+      <p>A single <code>snapshot(scope)</code> fans out ~15 aggregates over the pipeline's own
+        tables — latency (real model time), throughput, stage funnel, unverified reasons, extraction
+        fill-rates (drift signal), accuracy telemetry, queue depth, cache hit-rate — behind an 8-second
+        TTL cache. A thread-local scope switch rewrites <code>_real</code>→<code>_test</code> views so
+        every query is workspace-aware with no rewrites.</p>
+    </section>
+
+    <!-- 07 ─────────────────────────────────────────────── -->
+    <section id="schema">
+      <h2><span class="num">07</span>Database schema</h2>
+      <p class="section-lede">Eight tables + scope views. Created idempotently on boot — no migration tool to run.</p>
+
+      <div class="callout note">
+        <div class="cap">Schema management</div>
+        <p><code>db/pg.py :: init_schema()</code> runs the full <code>CREATE TABLE IF NOT EXISTS</code>
+          schema plus additive <code>ALTER … IF NOT EXISTS</code> migrations on every boot, guarded by
+          a Postgres advisory lock so concurrent starts create it exactly once. <strong>Deploying a
+          schema change is just a restart.</strong></p>
+      </div>
+
+      <table>
+        <thead><tr><th>Table</th><th>Role</th><th>Key columns</th></tr></thead>
+        <tbody>
+          <tr><td><code>jobs</code></td><td>Durable work queue</td><td><code>job_id</code> PK (= lead_id), <code>status</code>, <code>attempts</code>, <code>lease_until</code>, <code>row_json</code>, <code>is_test</code></td></tr>
+          <tr><td><code>lead_results</code></td><td>Final verdict per lead (dashboards read this)</td><td><code>lead_id</code> PK, <code>verification_status</code>, <code>outcome</code> JSONB, <code>extracted</code> JSONB</td></tr>
+          <tr><td><code>lead_events</code></td><td>Append-only per-stage audit log</td><td><code>lead_id</code>, <code>stage</code>, <code>status</code>, <code>ms</code>, <code>metrics</code>/<code>data</code> JSONB</td></tr>
+          <tr><td><code>processed_payments</code></td><td>De-duplication ledger</td><td>unique <code>(lead_code, loan_acct, amount, pay_ym, is_test)</code></td></tr>
+          <tr><td><code>lead_reviews</code></td><td>Human-review audit trail (accuracy ground truth)</td><td><code>system_status</code>, <code>decision</code>, <code>corrected_status</code>, <code>reviewer</code></td></tr>
+          <tr><td><code>receiver_approvals</code></td><td>Receiver-name decisions</td><td>unique <code>(lender, receiver_norm)</code>, <code>decision</code>, <code>affected</code>, <code>flipped</code></td></tr>
+          <tr><td><code>runtime_config</code></td><td>Live-editable model endpoint</td><td><code>key</code> PK, <code>value</code></td></tr>
+          <tr><td><code>ocr_cache</code></td><td>Extraction cache</td><td><code>cache_key</code> PK, <code>extraction</code> JSONB, <code>hits</code></td></tr>
+        </tbody>
+      </table>
+
+      <h3>Scope views — the test-isolation guarantee</h3>
+      <p>Every operational table has an <code>is_test</code> flag and a pair of views:
+        <code>lead_results_real</code> / <code>lead_results_test</code> (and the same for
+        <code>lead_events</code>, <code>jobs</code>, <code>lead_reviews</code>). Real-scope reads go
+        through the <code>_real</code> view, so <strong>sandbox data physically cannot leak into
+        production metrics</strong> — the guarantee is structural, enforced by the database, not by
+        remembering a <code>WHERE</code> clause.</p>
+
+      <div class="callout warn">
+        <div class="cap">JSONB is queryable — Metabase can read inside it</div>
+        <p><code>outcome</code> and <code>extracted</code> are real JSONB, so dashboards and SQL can
+          reach fields directly (<code>extracted-&gt;&gt;'amount'</code>). Prefer the published
+          <code>analytics</code> view (§11) over querying base tables so schema changes never break
+          dashboards.</p>
+      </div>
+    </section>
+
+    <!-- 08 ─────────────────────────────────────────────── -->
+    <section id="config">
+      <h2><span class="num">08</span>Configuration reference</h2>
+      <p class="section-lede">Every environment variable, with defaults. Secrets come from a gitignored <code>.env</code>; real environment variables always win.</p>
+
+      <table>
+        <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>DATABASE_URL</code></td><td class="tnum">postgresql://…localhost:5432/…</td><td><strong>Required in prod.</strong> This system's Postgres.</td></tr>
+          <tr><td><code>WORKER_COUNT</code></td><td class="tnum">4</td><td>Worker threads. Set <code>0</code> on the web service to disable its in-process pool.</td></tr>
+          <tr><td><code>JOB_MAX_ATTEMPTS</code></td><td class="tnum">3</td><td>Retries before a job is parked as <code>failed</code>.</td></tr>
+          <tr><td><code>JOB_LEASE_SECONDS</code></td><td class="tnum">300</td><td>Crashed-worker recovery window.</td></tr>
+          <tr><td><code>MEDHA_API_URL</code></td><td class="tnum">http://…:8002/v1</td><td>Vision endpoint (also live-editable in the console).</td></tr>
+          <tr><td><code>MEDHA_API_KEY</code></td><td>—</td><td><strong>Secret.</strong> Bearer token for the model.</td></tr>
+          <tr><td><code>MEDHA_MODEL</code></td><td>Medha</td><td>Model name sent in the request.</td></tr>
+          <tr><td><code>MEDHA_STREAM</code></td><td class="tnum">1</td><td>Stream the model response.</td></tr>
+          <tr><td><code>MEDHA_TIMEOUT</code></td><td class="tnum">120</td><td>Per-call timeout (seconds).</td></tr>
+          <tr><td><code>IMAGE_FETCH_TIMEOUT</code></td><td class="tnum">30</td><td>Image download timeout (seconds).</td></tr>
+          <tr><td><code>OCR_CACHE</code></td><td class="tnum">1</td><td>Enable the extraction cache.</td></tr>
+          <tr><td><code>OCR_CACHE_TTL_DAYS</code></td><td class="tnum">30</td><td>Cache retention (<code>0</code> = forever).</td></tr>
+          <tr><td><code>LEAD_EVENTS_TTL_DAYS</code></td><td class="tnum">0</td><td>Event-log retention. <strong>Set ~90 in continuous prod</strong> — this is the only unbounded table.</td></tr>
+          <tr><td><code>OCR_BREAKER_THRESHOLD</code></td><td class="tnum">5</td><td>Consecutive model failures before the breaker opens.</td></tr>
+          <tr><td><code>OCR_BREAKER_COOLDOWN</code> / <code>_MAX_WAIT</code></td><td class="tnum">8 / 60</td><td>Backoff base and cap (seconds).</td></tr>
+          <tr><td><code>WEB_THREADS</code></td><td class="tnum">8</td><td>waitress worker threads for HTTP.</td></tr>
+          <tr><td><code>MAX_UPLOAD_MB</code></td><td class="tnum">64</td><td>Upload size cap (OOM guard).</td></tr>
+          <tr><td><code>PV_AUTH_USER</code> / <code>PV_AUTH_PASS</code></td><td>—</td><td><strong>Secret.</strong> Console login. Auth is on only when both are set.</td></tr>
+          <tr><td><code>PV_SECRET_KEY</code></td><td>—</td><td><strong>Secret.</strong> Signs the session cookie — set a stable value so logins survive restarts.</td></tr>
+          <tr><td><code>TEST_TTL_DAYS</code></td><td class="tnum">1</td><td>Auto-purge of sandbox data on boot.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Lender configuration (JSON, hot-reloadable)</h3>
+      <ul>
+        <li><code>config/lender_rules.json</code> — per lender: mandatory fields, <code>needs_lan</code>,
+          <code>date_tolerance_days</code>, <code>amount_tolerance_rupees</code>. A <code>__default__</code>
+          entry covers unconfigured lenders.</li>
+        <li><code>config/lender_receivers.json</code> — per lender: the accepted-receiver allowlist.
+          The Approvals loop writes here automatically.</li>
+      </ul>
+      <p>Both are read once at startup and re-read live when the Approvals loop or a manual edit
+        changes them — no restart needed.</p>
+    </section>
+
+    <!-- 09 ─────────────────────────────────────────────── -->
+    <section id="api">
+      <h2><span class="num">09</span>HTTP / API surface</h2>
+      <p class="section-lede">Serving on port <code>8000</code>. All routes except <code>/health</code> and the login pages require a session when auth is enabled. Full request/response shapes are in <code>docs/API.md</code>.</p>
+      <table>
+        <thead><tr><th>Method</th><th>Route</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><span class="badge b-get">GET</span></td><td><code>/</code>, <code>/lead/&lt;id&gt;</code></td><td>Console SPA (deep-links to a lead).</td></tr>
+          <tr><td><span class="badge b-post">POST</span></td><td><code>/api/enqueue</code></td><td>Upload CSV/Excel → enqueue jobs → <code>{batch_id, enqueued, skipped}</code>.</td></tr>
+          <tr><td><span class="badge b-get">GET</span></td><td><code>/api/batch/&lt;batch_id&gt;</code></td><td>Live batch progress + per-lead rows.</td></tr>
+          <tr><td><span class="badge b-get">GET</span></td><td><code>/api/stats</code></td><td>Status counts, method breakdown, unprocessed issue split.</td></tr>
+          <tr><td><span class="badge b-get">GET</span></td><td><code>/api/leads</code></td><td>Filtered/paginated result rows (<code>?status=&amp;q=&amp;scope=</code>).</td></tr>
+          <tr><td><span class="badge b-get">GET</span></td><td><code>/api/lead/&lt;id&gt;</code></td><td>One lead: final verdict + full stage journey + image.</td></tr>
+          <tr><td><span class="badge b-post">POST</span></td><td><code>/api/lead/&lt;id&gt;/review</code></td><td>Record a reviewer confirm/overturn decision.</td></tr>
+          <tr><td><span class="badge b-get">GET</span></td><td><code>/api/approvals</code></td><td>Receiver-approval queue + recent decisions.</td></tr>
+          <tr><td><span class="badge b-post">POST</span></td><td><code>/api/approvals/decide</code></td><td>Approve/reject a <code>(lender, receiver)</code> pair.</td></tr>
+          <tr><td><span class="badge b-get">GET</span></td><td><code>/api/observability</code></td><td>All operational + quality metrics for one scope.</td></tr>
+          <tr><td><span class="badge b-get">GET</span></td><td><code>/api/config/model</code></td><td>Current model endpoint (key masked).</td></tr>
+          <tr><td><span class="badge b-post">POST</span></td><td><code>/api/config/model</code> / <code>/test</code></td><td>Update / probe the model endpoint (no restart).</td></tr>
+          <tr><td><span class="badge b-post">POST</span></td><td><code>/api/verify</code></td><td><strong>Integration hook</strong> — verify one record synchronously (JSON in/out).</td></tr>
+          <tr><td><span class="badge b-get">GET</span></td><td><code>/download/&lt;batch_id&gt;</code></td><td>Results CSV for a batch.</td></tr>
+          <tr><td><span class="badge b-get">GET</span></td><td><code>/health</code></td><td>Liveness/readiness: DB + queue. <code>200</code>/<code>503</code>. Open for probes.</td></tr>
+        </tbody>
+      </table>
+      <div class="callout note">
+        <div class="cap">Two integration entry points for the source system</div>
+        <p><strong>Batch:</strong> <code>POST /api/enqueue</code> with a CSV/Excel (durable, async,
+          resumable). <strong>Synchronous single record:</strong> <code>POST /api/verify</code> with a
+          JSON body — ideal for wiring into an existing service that already has the image and loan
+          fields. Automated pull-from-source-DB ingestion is the next phase (§11).</p>
+      </div>
+    </section>
+
+    <!-- 10 ─────────────────────────────────────────────── -->
+    <section id="deploy">
+      <h2><span class="num">10</span>Deployment guide</h2>
+      <p class="section-lede">A single Linux VM running Docker Compose, sited network-close to the Medha GPU host. Recommended path below; a systemd alternative follows.</p>
+
+      <h3>Step 1 — Provision</h3>
+      <ul>
+        <li>Linux VM, <strong>India region</strong> (data residency — see §13), 4 vCPU / 8 GB / 100 GB SSD is comfortable at current volume.</li>
+        <li>Private network path to the Medha GPU endpoint.</li>
+        <li>A DNS name + TLS (Caddy issues certificates automatically below).</li>
+        <li>Docker + Docker Compose installed.</li>
+      </ul>
+
+      <h3>Step 2 — Environment file</h3>
+      <div class="code-cap">.env — copy from .env.example, fill secrets</div>
+      <pre><code>DATABASE_URL=postgresql://pv_app:CHANGE_ME@postgres:5432/payment_verification
+MEDHA_API_URL=http://&lt;gpu-host&gt;:8002/v1
+MEDHA_API_KEY=&lt;model-key&gt;
+MEDHA_MODEL=Medha
+PV_AUTH_USER=ops
+PV_AUTH_PASS=&lt;16+ random chars&gt;
+PV_SECRET_KEY=&lt;python -c "import secrets;print(secrets.token_hex(32))"&gt;
+LEAD_EVENTS_TTL_DAYS=90
+WORKER_COUNT=4</code></pre>
+
+      <h3>Step 3 — Containerize</h3>
+      <p>The repo has no Dockerfile yet; add these two reference files. Both services run the same
+        image with different commands and <code>WORKER_COUNT</code>.</p>
+      <div class="code-cap">Dockerfile (reference)</div>
+      <pre><code>FROM python:3.11-slim
+WORKDIR /app
+RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends \
+      libjpeg62-turbo zlib1g &amp;&amp; rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 8000
+CMD ["python", "-m", "app.server"]</code></pre>
+
+      <div class="code-cap">docker-compose.yml (reference)</div>
+      <pre><code>services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: payment_verification
+      POSTGRES_USER: pv_app
+      POSTGRES_PASSWORD: ${PGPASSWORD}
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pv_app"]
+      interval: 10s
+
+  web:
+    build: .
+    env_file: .env
+    environment: { WORKER_COUNT: "0" }      # web runs NO in-process workers
+    depends_on: { postgres: { condition: service_healthy } }
+    expose: ["8000"]
+
+  worker:
+    build: .
+    command: python worker.py
+    env_file: .env
+    environment: { WORKER_COUNT: "4" }      # the dedicated worker fleet
+    depends_on: { postgres: { condition: service_healthy } }
+    deploy: { replicas: 1 }                 # scale this number for throughput
+    stop_grace_period: 120s                 # let an in-flight lead finish
+
+  caddy:
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    volumes: ["./Caddyfile:/etc/caddy/Caddyfile", "caddy_data:/data"]
+    depends_on: [web]
+
+volumes: { pgdata: {}, caddy_data: {} }</code></pre>
+
+      <div class="code-cap">Caddyfile (reference) — TLS + reverse proxy</div>
+      <pre><code>verify.yourdomain.com {
+    encode gzip
+    reverse_proxy web:8000
+}</code></pre>
+
+      <h3>Step 4 — Launch &amp; verify</h3>
+      <p>The schema auto-creates on first boot (advisory-locked, idempotent). Then smoke-test:</p>
+      <div class="code-cap">bring up and check</div>
+      <pre><code>docker compose up -d --build
+
+# health (expect {"ok":true,"db":true,...})
+curl -s https://verify.yourdomain.com/health
+
+# log in, then confirm stats respond
+curl -s -c cookies.txt https://verify.yourdomain.com/login &gt; /dev/null
+curl -s -c cookies.txt -b cookies.txt -X POST \
+     -d "username=$PV_AUTH_USER" -d "password=$PV_AUTH_PASS" \
+     https://verify.yourdomain.com/login &gt; /dev/null
+curl -s -b cookies.txt https://verify.yourdomain.com/api/stats</code></pre>
+
+      <div class="callout ok">
+        <div class="cap">Acceptance for Phase 1</div>
+        <p>Upload one real batch through the console; confirm leads flow to verdicts, then
+          <strong>redeploy the web container mid-run</strong> — the queue survives and no lead is lost.
+          That single test proves the crash-safety design end to end.</p>
+      </div>
+
+      <h3>Alternative — systemd (no Docker)</h3>
+      <p>Install Postgres and Python 3.11 on the host, create a venv from
+        <code>requirements.txt</code>, and run two units: one
+        <code>ExecStart=python -m app.server</code> (with <code>WORKER_COUNT=0</code>) and one
+        <code>ExecStart=python worker.py</code> (with <code>WORKER_COUNT=4</code>), both with
+        <code>EnvironmentFile=/opt/pv/.env</code> and <code>Restart=always</code>. Put nginx or Caddy
+        in front for TLS.</p>
+    </section>
+
+    <!-- 11 ─────────────────────────────────────────────── -->
+    <section id="metabase">
+      <h2><span class="num">11</span>Database &amp; Metabase integration</h2>
+      <p class="section-lede">Two directions: publishing results to Metabase (do this now), and automated pull-ingestion from the source DB (designed, next phase).</p>
+
+      <h3>Publishing — Metabase reads from this system <span style="color:var(--ink-faint);font-weight:400;font-size:14px">(recommended)</span></h3>
+      <p>Add this system's Postgres to Metabase as a second data source, restricted to a dedicated
+        <code>analytics</code> schema exposed through a <strong>versioned view</strong> and a
+        <strong>read-only role</strong>. Dashboards bind to the view, so pipeline internals can change
+        without breaking them.</p>
+      <div class="code-cap">create the analytics contract + reader role</div>
+      <pre><code>CREATE SCHEMA IF NOT EXISTS analytics;
+
+CREATE OR REPLACE VIEW analytics.verification_results_v1 AS
+SELECT lead_id, lender, verification_status,
+       outcome-&gt;&gt;'reason'                                   AS reason,
+       CASE WHEN verification_status='unprocessed'
+            THEN outcome-&gt;&gt;'describes' END                  AS unprocessed_issue,
+       payment_method,
+       extracted-&gt;&gt;'amount'                                 AS doc_amount,
+       extracted-&gt;&gt;'date'                                   AS doc_date,
+       extracted-&gt;&gt;'receiver_name'                          AS doc_receiver,
+       updated_at                                           AS verified_at
+FROM lead_results_real;          -- test rows structurally excluded
+
+CREATE ROLE metabase_reader LOGIN PASSWORD 'CHANGE_ME';
+GRANT USAGE ON SCHEMA analytics TO metabase_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA analytics TO metabase_reader;
+-- grant NOTHING else: no base tables, no other schemas.</code></pre>
+      <p>In Metabase: <em>Admin → Databases → Add</em>, point at this Postgres with the
+        <code>metabase_reader</code> credentials, and build dashboards on
+        <code>analytics.verification_results_v1</code>. A breaking change later ships as
+        <code>_v2</code> alongside <code>_v1</code>; dashboards migrate, then <code>_v1</code> retires.</p>
+
+      <div class="callout warn">
+        <div class="cap">If Metabase cannot add a second data source</div>
+        <p>Fallback is writing results back into <em>their</em> database (a <code>pv_results</code>
+          table you own there) via an outbox-style upsert loop. It needs write credentials on their
+          side and reconciliation — only do it if adding a data source is genuinely blocked.</p>
+      </div>
+
+      <h3>Ingestion — pulling leads from the source DB <span style="color:var(--ink-faint);font-weight:400;font-size:14px">(designed, phase 2)</span></h3>
+      <p><strong>Current intake:</strong> CSV/Excel upload (<code>POST /api/enqueue</code>) and the
+        synchronous <code>POST /api/verify</code> hook. That is enough to go live and integrate an
+        existing service today.</p>
+      <p><strong>Automated intake</strong> — an <code>ingester</code> that polls the production
+        database behind Metabase on a watermark cursor, maps rows to the pipeline contract,
+        prefetches images while their signed URLs are fresh, and enqueues into the same
+        <code>jobs</code> table — is <strong>fully designed but not yet built</strong>. The complete
+        design (watermark mechanics, image blob store, quarantine for schema drift, backfill, failure
+        matrix, six-phase rollout) is in
+        <code>docs/PRODUCTION_ARCHITECTURE.md</code>. Build it after Phase 1 is stable.</p>
+
+      <div class="callout crit">
+        <div class="cap">Answer these before building ingestion</div>
+        <p>Source DB engine &amp; whether a read-only replica user is available · daily lead volume ·
+          whether S3 credentials for the documents bucket can be granted (kills the expired-link
+          failure class) · which table/columns define a "new lead." These are §13 of the architecture
+          doc and each changes a real decision.</p>
+      </div>
+    </section>
+
+    <!-- 12 ─────────────────────────────────────────────── -->
+    <section id="ops">
+      <h2><span class="num">12</span>Operations &amp; runbook</h2>
+      <p class="section-lede">Day-two tasks, monitoring signals, and capacity.</p>
+
+      <h3>Monitoring signals</h3>
+      <table>
+        <thead><tr><th>Signal</th><th>Where</th><th>Healthy</th></tr></thead>
+        <tbody>
+          <tr><td>Liveness</td><td><code>GET /health</code></td><td><code>200</code>, <code>db:true</code></td></tr>
+          <tr><td>Queue depth / oldest pending</td><td>Observability → Queue &amp; errors</td><td>Draining; oldest &lt; 1h</td></tr>
+          <tr><td>Model error rate</td><td>Observability (breaker)</td><td>≈ 0; breaker closed</td></tr>
+          <tr><td>Failed jobs</td><td>Queue &amp; errors</td><td>0 (investigate any)</td></tr>
+          <tr><td>Unprocessed by issue</td><td>Dashboard → Unprocessed</td><td>Watch "no image URL" — it's an upstream data defect</td></tr>
+          <tr><td>Verified precision</td><td>Observability → Accuracy</td><td>From the review ledger; alert &lt; 97%</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Common tasks</h3>
+      <div class="code-cap">operational commands</div>
+      <pre><code># Re-verify all leads after a rules/config change (no model calls)
+python reverify.py                 # apply
+python reverify.py --dry-run       # report only
+
+# Repoint the model endpoint — do it in the console (Model API panel),
+# it takes effect on the next lead with no restart.
+
+# Nightly backup (run from cron / a sidecar)
+pg_dump "$DATABASE_URL" | gzip &gt; /backups/pv_$(date +%F).sql.gz
+
+# Scale throughput
+docker compose up -d --scale worker=3</code></pre>
+
+      <h3>Backups &amp; retention</h3>
+      <ul>
+        <li>Nightly <code>pg_dump</code> + WAL archiving (point-in-time recovery) to off-VM storage,
+          30-day retention, and a <strong>quarterly restore drill</strong> — an untested backup is a
+          wish, not a backup.</li>
+        <li>Set <code>LEAD_EVENTS_TTL_DAYS=90</code> in continuous production — <code>lead_events</code>
+          is the one table that grows unbounded; verdicts in <code>lead_results</code> are never purged.</li>
+        <li>Sandbox data auto-purges after <code>TEST_TTL_DAYS</code>.</li>
+      </ul>
+
+      <h3>Capacity</h3>
+      <p>The only real ceiling is GPU inference:
+        <code>concurrency × 86,400 / seconds_per_image × 1/(1−cache_hit)</code>. At ~6–8s/image and
+        4-way concurrency the ceiling is ~50k/day; run at ≤30% for headroom → comfortably 15k+/day.
+        Scale by adding workers + model concurrency behind a second GPU — no architectural change.</p>
+    </section>
+
+    <!-- 13 ─────────────────────────────────────────────── -->
+    <section id="security">
+      <h2><span class="num">13</span>Security &amp; compliance</h2>
+      <p class="section-lede">This system carries lending PII — treat it accordingly.</p>
+      <ul>
+        <li><strong>Transport</strong> — TLS everywhere via Caddy; the model endpoint should live on a
+          private network segment; source DB / Metabase connections over TLS.</li>
+        <li><strong>Least privilege</strong> — <code>metabase_reader</code> sees only the
+          <code>analytics</code> schema; a future <code>pv_reader</code> on the source DB is
+          SELECT-only; no shared superuser anywhere.</li>
+        <li><strong>Secrets</strong> — env file at <code>0600</code>, never in git (already enforced;
+          repo history was cleaned). Rotate the model key and console password at deploy.</li>
+        <li><strong>PII at rest</strong> — encrypted disk volume for Postgres (and the image blob
+          store once ingestion is built); event-log retention as above.</li>
+        <li><strong>Audit</strong> — <code>lead_reviews</code> and <code>receiver_approvals</code>
+          already record who/when/what.</li>
+        <li><strong>DPDP</strong> — Indian financial documents + phone numbers means DPDP obligations:
+          retention limits, in-region hosting, breach process. Choose an India-region VM.</li>
+      </ul>
+      <div class="callout crit">
+        <div class="cap">Harden before go-live</div>
+        <p>The console login is a single shared credential. Rotate <code>PV_AUTH_PASS</code> to 16+
+          random characters at deploy, and add per-user accounts as a fast follow so approvals and
+          reviews are attributable. Put a rate-limit / lockout on the login route (Caddy can do the
+          cheap version).</p>
+      </div>
+    </section>
+
+    <!-- 14 ─────────────────────────────────────────────── -->
+    <section id="limits">
+      <h2><span class="num">14</span>Limitations &amp; roadmap</h2>
+      <p class="section-lede">Known gaps, stated honestly, so the receiving team plans around them.</p>
+      <table>
+        <thead><tr><th>Item</th><th>State</th><th>Plan</th></tr></thead>
+        <tbody>
+          <tr><td>Automated source-DB ingestion</td><td>Designed, not built</td><td>Phase 2 — follow <code>docs/PRODUCTION_ARCHITECTURE.md</code> after Phase 1 is stable.</td></tr>
+          <tr><td>Console authentication</td><td>Single shared login</td><td>Per-user accounts + login rate-limit as a fast follow.</td></tr>
+          <tr><td>Web/worker split</td><td>Env-configurable (<code>WORKER_COUNT=0</code>)</td><td>Documented above; adopt in Compose from day one.</td></tr>
+          <tr><td>Dockerfile / Compose</td><td>Reference templates in §10</td><td>Team adds the two files and commits them.</td></tr>
+          <tr><td>Expired image links</td><td>Classified as <code>unprocessed</code></td><td>Ingestion-time image prefetch (+ S3 credentials) eliminates the class.</td></tr>
+          <tr><td>Backups</td><td>Manual <code>pg_dump</code></td><td>Automate nightly + WAL PITR + quarterly restore drill.</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout note">
+        <div class="cap">Companion documents</div>
+        <p><code>docs/PRODUCTION_ARCHITECTURE.md</code> — the full ingestion/deployment design and
+          6-phase rollout. · <code>docs/API.md</code> — endpoint request/response detail. ·
+          <code>README.md</code> — pipeline summary and local run.</p>
+      </div>
+
+      <div class="foot">
+        Payment Verification System — Engineering handoff documentation. Baseline commit
+        <code>5006011</code>. Prepared for the deployment &amp; integration team. All statements
+        verified against the codebase at time of writing; nothing in this document changes the code.
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+  (function(){
+    // theme toggle (respects OS default until the user chooses)
+    var root = document.documentElement, btn = document.getElementById('themeToggle');
+    btn.addEventListener('click', function(){
+      var cur = root.getAttribute('data-theme');
+      if(!cur){ cur = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; }
+      root.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+    });
+    // scrollspy: highlight the section in view
+    var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
+    var map = {};
+    links.forEach(function(a){ map[a.getAttribute('href').slice(1)] = a; });
+    var obs = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if(e.isIntersecting){
+          links.forEach(function(a){ a.classList.remove('active'); });
+          var a = map[e.target.id]; if(a){ a.classList.add('active'); }
+        }
+      });
+    }, { rootMargin: '-15% 0px -75% 0px' });
+    document.querySelectorAll('section[id]').forEach(function(s){ obs.observe(s); });
+  })();
+</script>

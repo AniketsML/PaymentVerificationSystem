@@ -203,6 +203,70 @@ CREATE OR REPLACE VIEW jobs_real         AS SELECT * FROM jobs         WHERE NOT
 CREATE OR REPLACE VIEW lead_results_test AS SELECT * FROM lead_results WHERE is_test;
 CREATE OR REPLACE VIEW lead_events_test  AS SELECT * FROM lead_events  WHERE is_test;
 CREATE OR REPLACE VIEW jobs_test         AS SELECT * FROM jobs         WHERE is_test;
+
+-- ══ AUTOMATED INGESTION (pull leads from the source DB behind Metabase) ══════════
+-- All additive + idempotent. The ingester enqueues into the SAME jobs table, so the
+-- whole existing pipeline/dedup/dashboard consume ingested leads with no change.
+
+-- image provenance + priority on the durable queue
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS image_ref TEXT;                       -- 'blob:<sha256>' or the original URL
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS priority  SMALLINT NOT NULL DEFAULT 5; -- lower = sooner; live tail beats backfill
+CREATE INDEX IF NOT EXISTS idx_jobs_claim_prio ON jobs(status, priority, created_at);
+
+-- one durable cursor per source. Advanced ONLY after a batch is safely enqueued, so a
+-- crash between fetch and enqueue re-reads (idempotent enqueue makes the replay free).
+CREATE TABLE IF NOT EXISTS ingest_watermarks (
+    source      TEXT PRIMARY KEY,
+    wm_ts       TIMESTAMPTZ NOT NULL,
+    wm_id       TEXT NOT NULL DEFAULT '',
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- one row per poll cycle — the ingestion audit + the "is it stalled?" signal.
+CREATE TABLE IF NOT EXISTS ingest_runs (
+    id                BIGSERIAL PRIMARY KEY,
+    source            TEXT NOT NULL,
+    mode              TEXT NOT NULL DEFAULT 'live',   -- live | backfill
+    started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at       TIMESTAMPTZ,
+    rows_seen         INT NOT NULL DEFAULT 0,
+    enqueued          INT NOT NULL DEFAULT 0,
+    duplicates        INT NOT NULL DEFAULT 0,          -- already in jobs (idempotent skip)
+    quarantined       INT NOT NULL DEFAULT 0,
+    images_prefetched INT NOT NULL DEFAULT 0,
+    prefetch_failed   INT NOT NULL DEFAULT 0,
+    ok                BOOLEAN NOT NULL DEFAULT TRUE,
+    error             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ingest_runs_started ON ingest_runs(started_at DESC);
+
+-- rows that failed the mapping/validation contract NEVER enter the pipeline — they land
+-- here with the raw source row + reason. 0 pending is normal; a spike = source schema drift.
+CREATE TABLE IF NOT EXISTS ingest_quarantine (
+    id          BIGSERIAL PRIMARY KEY,
+    source      TEXT NOT NULL,
+    source_key  TEXT,                               -- source row id if known (for dedup of quarantine)
+    source_row  JSONB NOT NULL,
+    reason      TEXT NOT NULL,
+    first_seen  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved    BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_quarantine_key
+    ON ingest_quarantine(source, source_key) WHERE source_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_quarantine_unresolved ON ingest_quarantine(resolved) WHERE NOT resolved;
+
+-- content-addressed blob-store INDEX (the bytes live on disk / object storage). Fetching
+-- the image at ingest time — while the signed URL is still fresh — is what kills the
+-- expired-link failure class. sha256 dedupes resubmissions and pairs with the OCR cache.
+CREATE TABLE IF NOT EXISTS image_blobs (
+    sha256       TEXT PRIMARY KEY,
+    bytes        BIGINT NOT NULL,
+    content_type TEXT,
+    source_url   TEXT,                              -- provenance only; never re-fetched from here
+    stored_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_blobs_lastused ON image_blobs(last_used);
 """
 
 
@@ -262,8 +326,8 @@ def purge_expired_test_data(days: float) -> dict:
         return {"purged": 0}
     with pool().connection() as c:
         old = [r["lead_id"] for r in c.execute(
-            "SELECT lead_id FROM jobs WHERE is_test AND created_at < now() - make_interval(days => %s)",
-            (days,)).fetchall()]
+            "SELECT lead_id FROM jobs WHERE is_test AND created_at < now() - %s * interval '1 day'",
+            (float(days),)).fetchall()]
         if not old:
             return {"purged": 0}
         c.execute("DELETE FROM lead_events       WHERE is_test AND lead_id = ANY(%s)", (old,))
@@ -282,8 +346,8 @@ def purge_expired_events(days: int) -> int:
         return 0
     with pool().connection() as c:
         return c.execute(
-            "DELETE FROM lead_events WHERE ts < now() - make_interval(days => %s)",
-            (days,)).rowcount
+            "DELETE FROM lead_events WHERE ts < now() - %s * interval '1 day'",
+            (float(days),)).rowcount
 
 
 def purge_expired_cache(days: int) -> int:
@@ -294,8 +358,8 @@ def purge_expired_cache(days: int) -> int:
         return 0
     with pool().connection() as c:
         return c.execute(
-            "DELETE FROM ocr_cache WHERE created_at < now() - make_interval(days => %s)",
-            (days,)).rowcount
+            "DELETE FROM ocr_cache WHERE created_at < now() - %s * interval '1 day'",
+            (float(days),)).rowcount
 
 
 def sweep_orphan_reviews() -> int:

@@ -138,6 +138,32 @@ def enqueue_rows(rows: list, image_col="payment_document", id_col=None,
             "is_test": is_test}
 
 
+def enqueue_ingested(items: list, batch_id: str) -> tuple[int, int]:
+    """Enqueue rows already mapped + validated + image-resolved by the ingester. Each item:
+    {lead_id, lender, image_ref, row, priority}. Returns (enqueued, duplicates). Idempotent —
+    a re-read of the same lead (overlap window / replay) is a free ON CONFLICT no-op.
+
+    image_url carries the loadable source (a `blob:<sha>` ref when prefetched, else the URL);
+    image_ref keeps the same value as provenance. Real data only (is_test always FALSE)."""
+    enq = dup = 0
+    with pg.pool().connection() as c:
+        for it in items:
+            ref = it.get("image_ref") or ""
+            r = c.execute(
+                "INSERT INTO jobs(job_id,batch_id,lead_id,lender,image_url,image_ref,priority,"
+                "row_json,precomputed,max_attempts,is_test) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,FALSE,%s,FALSE) "
+                "ON CONFLICT (job_id) DO NOTHING",
+                (it["lead_id"], batch_id, it["lead_id"], it.get("lender", ""), ref, ref,
+                 int(it.get("priority", 5)), Jsonb(_safe(it.get("row", {}))),
+                 settings.JOB_MAX_ATTEMPTS))
+            if r.rowcount:
+                enq += 1
+            else:
+                dup += 1
+    return enq, dup
+
+
 def claim_one(lease_seconds: int | None = None):
     lease = lease_seconds or settings.JOB_LEASE_SECONDS
     with pg.pool().connection() as c:
@@ -147,7 +173,7 @@ def claim_one(lease_seconds: int | None = None):
             "WITH picked AS ("
             "  SELECT job_id, status AS prev_status, attempts AS prev_attempts FROM jobs "
             "  WHERE status='pending' OR (status='in_progress' AND lease_until < now()) "
-            "  ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1) "
+            "  ORDER BY priority, created_at FOR UPDATE SKIP LOCKED LIMIT 1) "
             "UPDATE jobs j SET status='in_progress', attempts=j.attempts+1, "
             "  lease_until = now() + make_interval(secs => %s), updated_at=now() "
             "FROM picked WHERE j.job_id = picked.job_id "

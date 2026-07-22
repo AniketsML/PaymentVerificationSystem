@@ -30,6 +30,19 @@ def is_url(source: str) -> bool:
     return s.startswith("http://") or s.startswith("https://")
 
 
+def _blob_source_url(sha: str) -> str:
+    """Provenance URL recorded when a blob was stored — used to self-heal an evicted blob."""
+    if not sha:
+        return ""
+    try:
+        from db import pg
+        with pg.pool().connection() as c:
+            r = c.execute("SELECT source_url FROM image_blobs WHERE sha256=%s", (sha,)).fetchone()
+        return (r["source_url"] or "") if r else ""
+    except Exception:
+        return ""
+
+
 def _diagnose_non_image(raw: bytes, content_type: str) -> str:
     """A URL that fetched OK (200) but doesn't decode as an image is almost always a
     private/expired link whose body is an access-denied XML/HTML page — not a corrupt
@@ -61,7 +74,19 @@ def load(source: str, timeout: Optional[int] = None) -> tuple[Optional[Image.Ima
     src = source.strip()
     content_type = ""
     try:
-        if src.startswith("data:"):
+        if src.startswith("blob:"):
+            # prefetched at ingest time — load from the content-addressed blob store. If the
+            # blob was evicted (retention) but the lead is reprocessed, self-heal by fetching
+            # the recorded provenance URL live.
+            from ingest import blobstore
+            raw = blobstore.store().get(src)
+            if raw is None:
+                prov = _blob_source_url(blobstore.ref_to_sha(src))
+                if prov:
+                    return load(prov, timeout)
+                return None, b"", "prefetched image no longer in blob store"
+            origin = "blob"
+        elif src.startswith("data:"):
             raw = base64.b64decode(src.split(",", 1)[1])
             origin = "data-uri"
         elif is_url(src):

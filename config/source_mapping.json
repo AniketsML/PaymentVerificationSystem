@@ -1,0 +1,38 @@
+{
+  "_doc": "TEMPLATE — the ingestion contract between the source DB and this pipeline. Replace the column names on the RIGHT of `fields` with the real source columns, then set `table`, the cursor columns and `lead_id`. This file is configuration (reviewed like lender config), never code: when the source schema changes, only this file changes. Keys beginning with '_' are ignored by the loader.",
+
+  "table": "payment_leads",
+
+  "cursor": {
+    "_doc": "The (created_at, id) tuple the watermark advances on. created_at MUST be monotonic-ish; id is the total-order tiebreak. If rows are UPDATEd after creation, point created_at_column at an updated_at column instead.",
+    "created_at_column": "created_at",
+    "id_column": "id"
+  },
+
+  "lead_id": {
+    "_doc": "The stable per-lead identity. `column` is the source column; `prefix` is prepended to form the job_id. Must be unique and stable across re-reads.",
+    "column": "id",
+    "prefix": "LEAD-"
+  },
+
+  "fields": {
+    "_doc": "canonical_pipeline_field -> source_column. `image` is the document URL column; the pipeline also scans other columns as a fallback. Unlisted canonical fields are simply absent.",
+    "institute_name": "lender_name",
+    "lead_code": "lead_code",
+    "loan_account_number": "loan_account_number",
+    "payment_amount": "amount",
+    "payment_date": "payment_date",
+    "transaction_id": "utr",
+    "image": "payment_document_url"
+  },
+
+  "required": ["institute_name", "payment_amount", "payment_date"],
+
+  "validate": {
+    "_doc": "Beyond presence: `amount_numeric` requires payment_amount to parse as a number; `date_parseable` requires payment_date to parse as a date. Failures are quarantined, never fed to the pipeline.",
+    "amount_numeric": true,
+    "date_parseable": true
+  },
+
+  "extra_columns_passthrough": true
+}

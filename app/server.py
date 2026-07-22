@@ -532,7 +532,10 @@ def api_verify():
 
 
 if __name__ == "__main__":
-    host, port = "0.0.0.0", 8000
+    # host/port overridable via env (PORT) so the app can avoid a busy port or sit behind a
+    # reverse proxy on a chosen port without a code change.
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "8000"))
     try:
         from waitress import serve
         print(f"[server] waitress (production WSGI) on {host}:{port} · {settings.WEB_THREADS} threads"

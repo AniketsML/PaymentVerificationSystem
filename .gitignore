@@ -42,3 +42,6 @@ Thumbs.db
 
 # sample datasets contain REAL customer data — must never enter version control
 samples/
+
+# prefetched customer document images — PII, never commit
+data/blobs/
