@@ -43,14 +43,40 @@ from pipeline.orchestrator import process_lead
 from pipeline import approvals, jobs
 from run_batch import outcome_text
 import worker
+import workspaces
 
 app = Flask(__name__)
 # cap upload size so a huge file can't OOM the process (default 64 MB, override via env)
-app.config["MAX_CONTENT_LENGTH"] = settings.MAX_UPLOAD_MB * 1024 * 1024
-app.secret_key = settings.SECRET_KEY or secrets.token_hex(32)  # signs the session cookie
-app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
-                  PERMANENT_SESSION_LIFETIME=timedelta(days=7))
-pg.init_schema()
+def _get_or_create_secret_key() -> str:
+    if settings.SECRET_KEY:
+        return settings.SECRET_KEY
+    key_file = os.path.join(settings.DATA_DIR, ".secret_key")
+    if os.path.exists(key_file):
+        try:
+            with open(key_file, "r", encoding="utf-8") as f:
+                k = f.read().strip()
+                if k:
+                    return k
+        except Exception:
+            pass
+    new_key = secrets.token_hex(32)
+    try:
+        with open(key_file, "w", encoding="utf-8") as f:
+            f.write(new_key)
+    except Exception:
+        pass
+    return new_key
+
+app.secret_key = _get_or_create_secret_key()  # signs the session cookie with persistent key
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+)
+
+# Initialize all registered workspace schemas
+workspaces.init_all_schemas()
+workspaces.register_all_routes(app)
 
 
 @app.errorhandler(413)
@@ -69,11 +95,13 @@ try:
     _ev = pg.purge_expired_events(settings.LEAD_EVENTS_TTL_DAYS)
     if _ev:
         sys.stderr.write(f"[server] purged {_ev} lead_event(s) past retention\n")
+    for _ws in workspaces.get_all_workspaces():
+        _ws.purge_expired_data()
 except Exception as _e:  # never block boot on housekeeping
     sys.stderr.write(f"[server] test-data purge skipped: {_e}\n")
 logger = PgLeadLogger()
 dedup = PaymentDedup()
-worker.start_pool()          # in-process worker pool drains the queue
+worker.start_pool()          # in-process worker pool drains the queues across all workspaces
 
 
 # ── session login (styled login page, not the browser Basic-auth popup) ───────
@@ -117,6 +145,25 @@ def _bearer_caller():
     return match
 
 
+UPCOMING_WORKSPACES = {
+    "invoice": {
+        "name": "Invoice & Tax OCR",
+        "short": "Invoice",
+        "blurb": "Line item table extraction, GSTIN validation, HSN breakdown, and multi-currency ledger reconciliation.",
+    },
+    "kyc": {
+        "name": "Identity & KYC",
+        "short": "KYC",
+        "blurb": "Aadhaar, PAN, Passport, and Voter ID tamper-detection and optical character recognition.",
+    },
+    "contracts": {
+        "name": "Contract Analysis",
+        "short": "Contracts",
+        "blurb": "Master service agreements, lease covenants, indemnity clauses, and jurisdiction risk auditing.",
+    },
+}
+
+
 @app.before_request
 def _require_auth():
     if not (_AUTH_ON or _TOKENS_ON):
@@ -133,6 +180,11 @@ def _require_auth():
 
     # 2) browser session
     if session.get("authed"):
+        # Automatically align session workspace to the accessed area
+        if p.startswith("/ws/legal") or p.startswith("/api/legal/"):
+            session["workspace"] = "legal"
+        elif p.startswith("/ws/payment") or (p.startswith("/api/") and not p.startswith("/api/legal/")):
+            session["workspace"] = "payment"
         return
 
     # 3) rejected — navigate browsers to login, answer API/XHR with 401
@@ -147,20 +199,42 @@ def _require_auth():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if not _AUTH_ON or session.get("authed"):
-        return redirect(url_for("index"))
+        chosen_ws = session.get("workspace", "payment")
+        if chosen_ws == "payment":
+            return redirect(url_for("index"))
+        elif chosen_ws == "legal":
+            return redirect("/ws/legal")
+        elif chosen_ws in UPCOMING_WORKSPACES:
+            return redirect(f"/ws/{chosen_ws}")
+        ws_obj = workspaces.get_workspace(chosen_ws)
+        return redirect(ws_obj.default_route if ws_obj else url_for("index"))
     error = ""
     if request.method == "POST":
         u = (request.form.get("username") or "").strip()
         pw = request.form.get("password") or ""
+        chosen_ws = request.form.get("workspace") or "payment"
+        valid_ws = list(workspaces.get_workspace_ids()) + list(UPCOMING_WORKSPACES.keys())
+        if chosen_ws not in valid_ws:
+            chosen_ws = "payment"
         ok = (hmac.compare_digest(u, settings.AUTH_USER)
               and hmac.compare_digest(pw, settings.AUTH_PASS))
         if ok:
             session.clear()
             session["authed"] = True
             session["user"] = u
+            session["workspace"] = chosen_ws
             session.permanent = True
             nxt = request.args.get("next", "")
-            return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else url_for("index"))
+            if nxt and nxt.startswith("/") and not nxt.startswith("//"):
+                return redirect(nxt)
+            if chosen_ws == "payment":
+                return redirect(url_for("index"))
+            elif chosen_ws == "legal":
+                return redirect("/ws/legal")
+            elif chosen_ws in UPCOMING_WORKSPACES:
+                return redirect(f"/ws/{chosen_ws}")
+            ws_obj = workspaces.get_workspace(chosen_ws)
+            return redirect(ws_obj.default_route if ws_obj else url_for("index"))
         error = "Incorrect email or password."
     return render_template("login.html", error=error)
 
@@ -256,11 +330,58 @@ def _image_issue(outcome: dict) -> str:
 
 
 # ── SPA shell ─────────────────────────────────────────────────────────────────
+# ── SPA shell ─────────────────────────────────────────────────────────────────
 @app.route("/")
+def root_index():
+    cur_ws = session.get("workspace", "payment")
+    if cur_ws == "legal":
+        return redirect("/ws/legal")
+    elif cur_ws in UPCOMING_WORKSPACES:
+        return redirect(f"/ws/{cur_ws}")
+    return redirect("/ws/payment")
+
+
+@app.route("/ws/payment")
+@app.route("/ws/payment/lead/<lead_id>")
 @app.route("/lead/<lead_id>")
 def index(lead_id=None):
+    session["workspace"] = "payment"
     return render_template("index.html", model=_model_info(), deep_lead=lead_id or "",
-                           user=(session.get("user", "") if _AUTH_ON else ""))
+                           user=(session.get("user", "") if _AUTH_ON else ""),
+                           workspace_id="payment", workspace_name="Payment Verification")
+
+
+@app.route("/ws/<ws_id>")
+def ws_view(ws_id: str):
+    if ws_id == "payment":
+        return redirect("/ws/payment")
+    if ws_id == "legal":
+        return redirect("/ws/legal")
+    if ws_id in UPCOMING_WORKSPACES:
+        cur_ws = session.get("workspace", "payment")
+        if cur_ws != ws_id:
+            if cur_ws == "payment":
+                return redirect("/ws/payment")
+            elif cur_ws == "legal":
+                return redirect("/ws/legal")
+            elif cur_ws in UPCOMING_WORKSPACES:
+                return redirect(f"/ws/{cur_ws}")
+        info = UPCOMING_WORKSPACES[ws_id]
+        return render_template(
+            "coming_soon.html",
+            ws_id=ws_id,
+            ws_name=info["name"],
+            ws_short=info["short"],
+            ws_blurb=info["blurb"],
+            user=(session.get("user", "") if _AUTH_ON else ""),
+        )
+    return redirect(url_for("index"))
+
+
+@app.route("/api/workspaces")
+def api_workspaces():
+    """List all registered workspaces and their metadata."""
+    return jsonify([ws.to_dict() for ws in workspaces.get_all_workspaces()])
 
 
 # ── enqueue (upload) ──────────────────────────────────────────────────────────
@@ -375,6 +496,17 @@ def api_verify_image():
         res = process_lead(lead_id, row["institute_name"], tmp, row,
                            MedhaVisionOCR(), _NullLogger(), skip_image_qc=False,
                            dedup=None, is_test=True)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        res = {
+            "lead_id": lead_id,
+            "verification_status": "unprocessed",
+            "outcome": {"reason": f"Verification error: {str(e)}", "failed_fields": ["image"]},
+            "extracted": {},
+            "payment_method": "Other",
+            "stages": []
+        }
     finally:
         try:
             os.remove(tmp)

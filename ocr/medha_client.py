@@ -112,7 +112,7 @@ Return ONLY a JSON object, no prose, with exactly these keys:
  "payer_name": "<who paid, or null>",
  "full_text": "<verbatim transcription of ALL text on the image>"
 }
-A loan "No Dues Certificate" / "No Objection Certificate (NOC)" / loan-closure letter IS valid payment proof: set is_payment_document=true and pick the matching document_type. It may not show an amount - that is fine; still extract loan_account_number, date and the issuer/receiver name.
+A loan "No Dues Certificate" / "No Objection Certificate (NOC)" / loan-closure letter IS valid payment proof: set is_payment_document=true and pick the matching document_type. extract amount,loan_account_number, date and the issuer/receiver name.
 Never guess a value; use null if it is not clearly visible."""
 
 

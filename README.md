@@ -93,8 +93,9 @@ to call the live Medha model.
 
 | Doc | What's in it |
 |---|---|
+| [docs/WORKSPACES.md](docs/WORKSPACES.md) | Multi-workspace architecture (Payment vs Legal Notice Extraction), data isolation, login selection, and adding new workspaces. |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, execution model (queue/workers/idempotency), every pipeline stage, verification & decision logic, classification sources, duplicate guard. |
-| [docs/DATABASE.md](docs/DATABASE.md) | The four tables, every column, and ready‑to‑run SQL for debugging. |
+| [docs/DATABASE.md](docs/DATABASE.md) | The database schema, tables, and ready‑to‑run SQL for debugging. |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | `settings.py`, `lender_rules.json`, `lender_receivers.json`, and all env vars. |
 | [docs/API.md](docs/API.md) | Every HTTP endpoint (UI + JSON API). |
 | [docs/DEBUGGING.md](docs/DEBUGGING.md) | "A lead came out wrong — how do I trace it?" playbook, status/reason reference, common issues. |

@@ -21,6 +21,33 @@
                            error: cssVar("--ch-warn") });
   const fmtTime = (t) => (t || "").replace("T", " ").slice(0, 19);
   const debounce = (fn, ms = 280) => { let h; return (...a) => { clearTimeout(h); h = setTimeout(() => fn(...a), ms); }; };
+  
+  function uploadWithProgress(url, fd, btn, baseText) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url);
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) {
+          const pct = Math.round((e.loaded / e.total) * 100);
+          btn.style.setProperty("--progress", pct + "%");
+          btn.classList.add("btn-progress");
+          if (pct < 100) {
+            btn.innerHTML = `<span class="spinner"></span> Uploading ${pct}%`;
+          } else {
+            btn.innerHTML = `<span class="spinner"></span> ${baseText}`;
+          }
+        }
+      };
+      xhr.onload = () => {
+        btn.classList.remove("btn-progress");
+        if (xhr.status === 401) { window.location.href = "/login?next=" + encodeURIComponent(location.pathname); reject(new Error("unauthorized")); return; }
+        try { resolve({ json: () => Promise.resolve(JSON.parse(xhr.responseText)) }); }
+        catch (err) { reject(err); }
+      };
+      xhr.onerror = () => { btn.classList.remove("btn-progress"); reject(new Error("Network Error")); };
+      xhr.send(fd);
+    });
+  }
 
   let state = { status: "all", q: "", scope: "real" };
   let charts = {};
@@ -1287,9 +1314,9 @@
     if ($("#imageRoot").value) fd.append("image_root", $("#imageRoot").value);
     if (isTest) fd.append("test", "on");
 
-    const btn = $("#runCsv"); btn.disabled = true; btn.innerHTML = `<span class="spinner"></span> Enqueuing…`;
+    const btn = $("#runCsv"); btn.disabled = true; btn.innerHTML = `<span class="spinner"></span> Starting…`;
     let r;
-    try { r = await (await fetch("/api/enqueue", { method: "POST", body: fd })).json(); }
+    try { r = await (await uploadWithProgress("/api/enqueue", fd, btn, "Enqueuing…")).json(); }
     catch (e) { toast("Upload failed", "bad"); btn.disabled = false; btn.textContent = "Run batch"; return; }
     if (r.error) { toast(esc(r.error), "bad"); btn.disabled = false; btn.textContent = "Run batch"; return; }
 
@@ -1355,9 +1382,9 @@
     fd.append("payment_amount", $("#siAmount").value);
     fd.append("payment_date", $("#siDate").value);
     fd.append("loan_account_number", $("#siLan").value);
-    const btn = $("#runImg"); btn.disabled = true; btn.innerHTML = `<span class="spinner"></span> Reading with model…`;
+    const btn = $("#runImg"); btn.disabled = true; btn.innerHTML = `<span class="spinner"></span> Starting…`;
     try {
-      const r = await (await fetch("/api/verify_image", { method: "POST", body: fd })).json();
+      const r = await (await uploadWithProgress("/api/verify_image", fd, btn, "Reading with model…")).json();
       if (r.error) throw new Error(r.error);
       renderSingleResult(r);
       toast(`Result: ${badge(r.verification_status)}`, r.verification_status === "verified" ? "ok" : "");

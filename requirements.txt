@@ -12,3 +12,10 @@ SQLAlchemy>=2.0
 # Source DB driver for ingestion: psycopg (above) covers PostgreSQL sources.
 # For a MySQL source, also install PyMySQL (pip install pymysql) and use a
 # mysql+pymysql://… SOURCE_DATABASE_URL.
+# Legal workspace PDF generation (optional — fallback available without it):
+reportlab>=4.0
+# SARFAESI Legal Workspace: triple-route OCR + document extraction
+PyMuPDF>=1.23
+rapidocr-onnxruntime>=1.3
+google-genai>=1.0
+httpx>=0.27

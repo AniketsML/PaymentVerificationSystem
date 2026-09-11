@@ -178,3 +178,34 @@ PAYMENT_METHOD_KEYWORDS = [
     ("Cheque", ["cheque", "chq no"]),
     ("e-NACH", ["e-nach", "enach", "e nach", "auto debit", "mandate"]),
 ]
+
+# ── SARFAESI Legal Workspace ──────────────────────────────────────────────────
+# Gemini multimodal fallback (circuit-breaker failover from primary VLM)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_TIMEOUT = int(os.environ.get("GEMINI_TIMEOUT", "30"))
+
+# RapidOCR (local ONNX-based OCR for layout probing and text extraction)
+RAPIDOCR_DPI_LAYOUT = int(os.environ.get("RAPIDOCR_DPI_LAYOUT", "90"))
+RAPIDOCR_DPI_TEXT = int(os.environ.get("RAPIDOCR_DPI_TEXT", "250"))
+
+# VLM circuit breaker for legal workspace (separate from payment OCR breaker)
+VLM_BREAKER_THRESHOLD = int(os.environ.get("VLM_BREAKER_THRESHOLD", "3"))
+VLM_BREAKER_COOLDOWN = float(os.environ.get("VLM_BREAKER_COOLDOWN", "60"))
+VLM_BREAKER_MAX_WAIT = float(os.environ.get("VLM_BREAKER_MAX_WAIT", "120"))
+
+# Account LAN (Loan Account Number) discovery regex patterns for Indian banking
+ACCOUNT_LAN_PATTERN = os.environ.get(
+    "ACCOUNT_LAN_PATTERN",
+    r"(?:\b|_)(LAN[A-Z0-9]{4,20}|LOAN[A-Z0-9]{4,20}|H[FLMCP][A-Z0-9]{6,22}|UG[A-Z0-9]{8,22}|HL\d{8,22}|CRF[A-Z0-9]+|[A-Z]{2,5}\d{8,18})(?:\b|_)"
+)
+
+# Baidu OCR (for handwritten text resolution, endorsement stamps, & high-accuracy transcription)
+# Supports Baidu Cloud Handwriting OCR API as well as Baidu PaddleOCR / RapidOCR ONNX
+BAIDU_OCR_API_KEY = os.environ.get("BAIDU_OCR_API_KEY", "")
+BAIDU_OCR_SECRET_KEY = os.environ.get("BAIDU_OCR_SECRET_KEY", "")
+BAIDU_OCR_ENDPOINT = os.environ.get(
+    "BAIDU_OCR_ENDPOINT",
+    "https://aip.baidubce.com/rest/2.0/ocr/v1/handwriting"  # Baidu Handwriting OCR
+)
+BAIDU_OCR_TIMEOUT = int(os.environ.get("BAIDU_OCR_TIMEOUT", "20"))

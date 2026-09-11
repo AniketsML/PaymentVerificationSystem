@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SARFAESI Recovery — Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ asset('style.css') }}">
+  <script>
+    (function () {
+      var t = localStorage.getItem("pv-theme");
+      if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", t);
+    })();
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script>
+    window.__CFG__ = {
+      model: {{ model|tojson }},
+      deepLead: {{ deep_lead|tojson }},
+      wsId: "legal",
+      wsName: "SARFAESI Recovery Console"
+    };
+  </script>
+</head>
+<body>
+  <div class="shell">
+    <!-- ── rail ─────────────────────────────────────────────── -->
+    <aside class="rail">
+      <div class="rail-brand">
+        <div class="mark" aria-hidden="true"></div>
+        <div>
+          <div class="brandword">SARFAESI<span>/Legal</span></div>
+          <div class="brandsub">Recovery Console</div>
+        </div>
+      </div>
+      <a href="/ws/payment" class="ws-jump-btn" title="Switch to Payment Verification">Payment Console ↗</a>
+
+      <div class="ws-switch" id="wsSwitch" role="tablist" aria-label="Workspace">
+        <button class="ws-opt active" data-scope="real"><span class="ws-dot live"></span>Live</button>
+        <button class="ws-opt" data-scope="test"><span class="ws-dot test"></span>Test</button>
+      </div>
+
+      <nav class="rail-nav">
+        <button class="nav-item active" data-view="dashboard"><span class="idx">01</span><span>Extractor</span></button>
+        <button class="nav-item" data-view="observability"><span class="idx">02</span><span>Observability</span></button>
+      </nav>
+
+      <div class="rail-foot">
+        {% if user %}
+        <div class="user-chip" title="{{ user }}">
+          <div class="uc-av">{{ user[0]|upper }}</div>
+          <div class="uc-meta"><div class="uc-name">{{ user }}</div><div class="uc-role">Legal Officer</div></div>
+          <a class="uc-out" href="/logout" title="Sign out" aria-label="Sign out">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M14 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-2M17 15l3-3-3-3M9 12h11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </a>
+        </div>
+        {% endif %}
+        <button id="themeToggle" class="theme-btn" title="Toggle theme"><span class="tt-dot"></span><span id="themeLabel">Dark</span></button>
+        <button class="model-chip" id="modelChip" title="Configure model endpoint">
+          <span class="live-dot"></span>
+          <div><div class="mc-model" id="mcModel">model</div><div class="mc-url" id="mcUrl"></div></div>
+          <svg class="mc-gear" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06-.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" stroke-width="2"/></svg>
+        </button>
+      </div>
+    </aside>
+
+    <!-- ── stage ────────────────────────────────────────────── -->
+    <main class="stage">
+      <div class="scope-banner hidden" id="scopeBanner">
+        <span class="sb-badge">🧪 TEST WORKSPACE</span>
+        <span class="sb-text">Everything here runs on <b>sandbox data</b>. It's temporary and auto-cleared; nothing touches your live records.</span>
+        <button class="btn line small" id="clearWsBtn">Clear workspace</button>
+      </div>
+
+      <header class="stage-top">
+        <div class="stage-head">
+          <div class="eyebrow" id="pageEyebrow">Overview</div>
+          <h1 id="pageTitle">Extractor</h1>
+          <p class="stage-sub" id="pageSub">Flexible Document OCR & LLM Data Extraction Engine</p>
+        </div>
+        <div class="stage-tools">
+          <label class="field-search">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><line x1="16.5" y1="16.5" x2="21" y2="21" stroke="currentColor" stroke-width="2"/></svg>
+            <input id="globalSearch" placeholder="Search lead, LAN, borrower" autocomplete="off">
+          </label>
+            <button class="btn line" id="exportCsvBtn">Download CSV</button>
+            <button class="btn line" id="refreshBtn" title="Refresh" aria-label="Refresh">↻</button>
+          </div>
+      </header>
+
+      <!-- ═══ EXTRACTOR DASHBOARD ═══ -->
+      <section class="view" id="view-dashboard">
+        
+        <!-- Extractor Upload Block -->
+        <div class="upload-block" style="margin-bottom: 24px; padding: 24px; background: var(--surface); border: 1px dashed var(--line-strong); border-radius: 8px;">
+          <h3 style="margin-top:0; font-size: 15px; margin-bottom: 16px;">New Batch Extraction</h3>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+            <div class="dropzone" id="zipDrop" style="height: auto; padding: 30px 20px;">
+              <div class="dz-mark" style="font-family: inherit;">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.6; margin-bottom: 4px;">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+              </div>
+              <div class="dz-main" id="zipName">Drag & Drop Batch Folder</div>
+              <div class="dz-sub" id="zipSub">Drop a root folder containing multiple LAN folders, or a single ZIP file.</div>
+              <div style="margin-top: 16px; display: flex; gap: 8px; justify-content: center;">
+                <button class="btn line small" id="btnPickFolder">Select Folder</button>
+                <button class="btn line small" id="btnPickZip">Select ZIP</button>
+              </div>
+            </div>
+            <div>
+              <label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 8px; color: var(--ink);">LLM Extraction Requirement Prompt</label>
+              <textarea id="extractionPrompt" rows="6" style="width: 100%; border: 1px solid var(--line); border-radius: 4px; padding: 12px; font-family: inherit; font-size: 13px; background: var(--surface-2); resize: vertical;" placeholder="Enter extraction requirements. e.g., 'Extract borrower name, property details, and all financial figures. Return as JSON.'"></textarea>
+              <button class="btn solid big" id="runZip" style="width: 100%; margin-top: 16px;" disabled>Start Extraction</button>
+            </div>
+          </div>
+          <input type="file" id="folderInput" webkitdirectory directory multiple hidden>
+          <input type="file" id="zipFile" accept=".zip" hidden>
+        </div>
+
+        <!-- Full-width run progress panel -->
+        <section class="panel run-panel hidden" id="runPanel" style="margin-bottom: 24px;">
+          <div class="panel-head" style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <h3>Batch progress</h3><span class="tag" id="runScopeTag">LIVE</span>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn line small" id="btnBatchPause">Pause</button>
+              <button class="btn line small hidden" id="btnBatchResume">Resume</button>
+              <button class="btn bad small" id="btnBatchCancel">Cancel</button>
+            </div>
+          </div>
+          <div class="progress"><div class="bar" id="progBar"></div></div>
+          <div class="run-meta"><span id="progText">0 / 0</span><span id="progElapsed"></span></div>
+          <div class="mini-counts" id="miniCounts"></div>
+          <div class="live-list" id="liveList"></div>
+          <div class="done-banner hidden" id="doneBanner">
+            <span>✓ Dossier batch complete</span>
+            <div style="display:flex;gap:8px">
+              <a class="btn line small" id="dlBtn" href="#">Download CSV</a>
+              <a class="btn solid small" id="excelDlBtn" href="#">Download Excel (.xlsx)</a>
+            </div>
+          </div>
+        </section>
+
+        <div class="statband" id="statCards"></div>
+
+        <div class="panelrow">
+          <section class="panel">
+            <div class="panel-head"><h3>Status distribution</h3><span class="tag">LEADS</span></div>
+            <div class="donut-wrap">
+              <canvas id="donut"></canvas>
+              <div class="donut-center"><div class="dc-num" id="donutTotal">0</div><div class="dc-lbl">Leads</div></div>
+            </div>
+            <div class="legend" id="donutLegend"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Document types</h3><span class="tag">TOP DOSSIER TYPES</span></div>
+            <canvas id="docTypeBar" height="240"></canvas>
+          </section>
+        </div>
+
+        <section class="panel tablepanel">
+          <div class="tabrow">
+            <div class="chips" id="statusChips">
+              <button class="chip active" data-status="all">All</button>
+              <button class="chip" data-status="completed"><i class="dot v"></i>Completed</button>
+              <button class="chip" data-status="missing_documents"><i class="dot u"></i>Missing Docs</button>
+              <button class="chip" data-status="partial"><i class="dot u"></i>Partial</button>
+              <button class="chip" data-status="processing"><i class="dot d"></i>Processing</button>
+              <button class="chip" data-status="failed"><i class="dot n"></i>Failed</button>
+            </div>
+            <button class="cf-clear hidden" id="clearFilters" title="Remove all column filters">✕ Clear filters</button>
+            <span class="count" id="tableCount">—</span>
+          </div>
+
+          <div class="tablewrap">
+            <table>
+              <thead><tr>
+                <th class="th-filter" data-col="lead_id">Lead ID<span class="th-caret" aria-hidden="true">▾</span></th>
+                <th class="th-filter" data-col="account_no_lan">Account LAN<span class="th-caret" aria-hidden="true">▾</span></th>
+                <th class="th-filter" data-col="applicant_name">Applicant<span class="th-caret" aria-hidden="true">▾</span></th>
+                <th style="text-align:right">Total Docs</th>
+                <th style="text-align:right">Processed</th>
+                <th class="th-filter" data-col="property_verification_status">Property Status<span class="th-caret" aria-hidden="true">▾</span></th>
+                <th>Status</th>
+                <th>Updated</th>
+              </tr></thead>
+              <tbody id="leadsBody"></tbody>
+            </table>
+            <div class="empty hidden" id="tableEmpty">
+              <span>No leads yet in this scope.</span>
+              <button class="btn solid small" id="tableDemoBtn" style="margin-left:10px">⚡ Load Demo Dossier</button>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <!-- ═══ OBSERVABILITY ═══ -->
+      <section class="view hidden" id="view-observability">
+        <div class="statband" id="obsKpis"></div>
+
+        <div class="panelrow even">
+          <section class="panel">
+            <div class="panel-head"><h3>OCR Route Distribution</h3><span class="tag">ENGINE ROUTING</span></div>
+            <canvas id="obsOcrChart" height="210"></canvas>
+            <div class="legend" id="obsOcrLegend" style="margin-top:10px"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Phase Timings</h3><span class="tag">AVG LATENCY (MS)</span></div>
+            <canvas id="obsPhaseChart" height="210"></canvas>
+          </section>
+        </div>
+
+        <div class="panelrow even">
+          <section class="panel">
+            <div class="panel-head"><h3>Property Verification Status</h3><span class="tag">3-TIER HIERARCHY</span></div>
+            <canvas id="obsPropChart" height="210"></canvas>
+            <div class="legend" id="obsPropLegend" style="margin-top:10px"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Circuit Breaker &amp; Failover Health</h3><span class="tag">VLM RESILIENCE</span></div>
+            <div id="obsBreakerBox"></div>
+          </section>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ── lead drawer ─────────────────────────────────────────── -->
+  <div class="scrim" id="scrim"></div>
+  <aside class="drawer legal-drawer" id="drawer" aria-label="Lead detail">
+    <div class="drawer-head">
+      <div>
+        <div class="dh-eyebrow">SARFAESI Lead</div>
+        <div class="dh-id mono" id="dLeadId">—</div>
+        <span class="badge" id="dStatus">—</span>
+      </div>
+      <div class="dh-actions">
+        <a class="btn line small" id="dRawLink" target="_blank">Raw JSON</a>
+        <button class="btn line small" id="drawerClose" aria-label="Close">✕</button>
+      </div>
+    </div>
+    <div class="drawer-body" id="drawerBody"></div>
+  </aside>
+
+  <!-- ── model API config modal ──────────────────────────────── -->
+  <div class="modal-scrim" id="cfgScrim"></div>
+  <aside class="modal cfg-modal" id="cfgModal" aria-label="Model API configuration">
+    <div class="modal-head">
+      <div><div class="dh-eyebrow">Endpoint</div><div class="modal-title">Model API</div></div>
+      <button class="btn line small" id="cfgClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="lede" style="margin-bottom:18px">Configure the VLM endpoint for the legal document extraction pipeline.</p>
+      <div class="cfg-field"><label>Endpoint URL</label>
+        <input id="cfgUrl" class="rv-input" placeholder="http://host:8002/v1" autocomplete="off"></div>
+      <div class="cfg-field"><label>API key <span class="hint" id="cfgKeyHint"></span></label>
+        <input id="cfgKey" class="rv-input" type="password" placeholder="leave blank to keep current" autocomplete="off"></div>
+      <div class="cfg-row">
+        <div class="cfg-field" style="flex:1"><label>Model</label>
+          <input id="cfgModel" class="rv-input" placeholder="Medha" autocomplete="off"></div>
+      </div>
+      <div class="cfg-test hidden" id="cfgTestResult"></div>
+      <div class="cfg-actions">
+        <button class="btn line" id="cfgTest">Test connection</button>
+        <button class="btn solid" id="cfgSave">Save</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── page preview lightbox modal ───────────────────────────── -->
+  <div class="modal-scrim" id="pageModalScrim"></div>
+  <aside class="modal" id="pageModal" style="width:min(1200px,96vw);max-height:92vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
+    <div class="modal-head" style="padding:14px 20px;border-bottom:1px solid var(--line);background:var(--surface-2)">
+      <div>
+        <div class="dh-eyebrow" id="pageModalEyebrow">DOCUMENT PAGE PREVIEW</div>
+        <div class="modal-title" id="pageModalTitle" style="font-size:15px;font-family:'JetBrains Mono',monospace">—</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <a class="btn line small" id="pageModalOpenNew" target="_blank">Open in new tab ↗</a>
+        <button class="btn line small" id="pageModalClose" aria-label="Close">✕</button>
+      </div>
+    </div>
+    <div style="display:flex; flex:1; overflow:hidden; background:var(--surface);">
+      <div style="flex: 2; padding:16px; overflow:auto; display:flex; align-items:flex-start; justify-content:center; background:#f4f4f4; border-right:1px solid var(--line);">
+        <img id="pageModalImg" style="max-width:100%;max-height:100%;object-fit:contain;box-shadow:0 4px 20px rgba(0,0,0,0.15);border:1px solid var(--line-strong)" alt="Document Page">
+      </div>
+      <div style="flex: 1.2; padding:20px; overflow:auto; background:var(--surface-2);" id="pageModalData">
+        <!-- Extracted data will be injected here by JS -->
+      </div>
+    </div>
+  </aside>
+
+  <div class="toasts" id="toasts"></div>
+  <script src="{{ asset('legal.js') }}"></script>
+</body>
+</html>
