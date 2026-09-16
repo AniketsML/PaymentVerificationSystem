@@ -189,21 +189,34 @@ def preflight(port: int) -> tuple[bool, int]:
     return not _problems, port
 
 
+def _local_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
 def banner(port: int, ingest_on: bool) -> None:
     from config import settings
     from config import runtime
     mc = runtime.model_config()
-    url = f"http://localhost:{port}"
     line = RULE * 58
+    lip = _local_ip()
     print("\n" + blue(line))
     print("  " + bold("Payment Verification Console") + dim("  ·  running"))
     print(blue(line))
-    print(f"  {bold('Open')}       {green(url)}")
+    print(f"  {bold('Local')}        {green(f'http://localhost:{port}')}")
+    if lip != "127.0.0.1":
+        print(f"  {bold('Network')}      {green(f'http://{lip}:{port}')}")
     if settings.AUTH_USER:
-        print(f"  {bold('Login')}      {settings.AUTH_USER}")
-    print(f"  {bold('Workers')}    {settings.WORKER_COUNT} threads")
-    print(f"  {bold('Model')}      {mc.get('model')} @ {dim(mc.get('url') or 'not set')}")
-    print(f"  {bold('Ingestion')}  " + (green(f"ON · source '{settings.SOURCE_NAME}' "
+        print(f"  {bold('Login')}        {settings.AUTH_USER}")
+    print(f"  {bold('Workers')}      {settings.WORKER_COUNT} threads")
+    print(f"  {bold('Model')}        {mc.get('model')} @ {dim(mc.get('url') or 'not set')}")
+    print(f"  {bold('Ingestion')}    " + (green(f"ON · source '{settings.SOURCE_NAME}' "
                                               f"every {settings.INGEST_INTERVAL}s")
                                         if ingest_on else dim("off (SOURCE_MODE not set)")))
     print(blue(line))
@@ -264,8 +277,9 @@ def main() -> int:
             host=args.host,
             port=port,
             threads=settings.WEB_THREADS,
-            channel_timeout=300,
-            max_request_body_size=1073741824,
+            channel_timeout=600,
+            max_request_body_size=2147483648,
+            inbuf_overflow=10485760,
             _quiet=True,
         )
     except KeyboardInterrupt:
