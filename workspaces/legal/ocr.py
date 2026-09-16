@@ -329,6 +329,7 @@ class LegalVLMClient:
         total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
 
         parsed = _parse_json(raw)
+        parsed["_raw_response"] = raw
         parsed["_meta"] = {
             "ms": ms,
             "model": cfg.get("model", "medha-vlm"),
@@ -364,6 +365,7 @@ class LegalVLMClient:
         total_tokens = getattr(usage_meta, "total_token_count", 0) if usage_meta else (prompt_tokens + completion_tokens)
 
         parsed = _parse_json(raw)
+        parsed["_raw_response"] = raw
         parsed["_meta"] = {
             "ms": ms,
             "model": settings.GEMINI_MODEL,

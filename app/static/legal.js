@@ -849,11 +849,19 @@ function formatFieldValue(k, v) {
           <h4 style="margin:0 0 8px 0; font-size:13px; color:var(--ink-faint); text-transform:uppercase; letter-spacing:0.05em;">Text Evidence</h4>
           <div class="evidence-snippet" style="background:var(--surface); padding:12px; border-radius:6px; font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--ink-strong); border:1px solid var(--line); white-space:pre-wrap;">${esc(p.snippet)}</div>
         </div>` : ""}
-        ${p.raw_ocr_text ? `
         <div style="margin-top:20px;">
-          <h4 style="margin:0 0 8px 0; font-size:13px; color:var(--ink-faint); text-transform:uppercase; letter-spacing:0.05em;">Raw OCR Text Extraction</h4>
-          <div style="background:var(--surface); padding:12px; border-radius:6px; font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--ink-soft); border:1px solid var(--line); white-space:pre-wrap; max-height:400px; overflow-y:auto;">${esc(p.raw_ocr_text)}</div>
-        </div>` : ""}
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <h4 style="margin:0; font-size:13px; color:var(--ink-faint); text-transform:uppercase; letter-spacing:0.05em;">Raw Extraction from Page ${p.page_number || ''}</h4>
+            <button class="btn line small" style="padding:2px 8px; font-size:11px;" onclick="navigator.clipboard.writeText(this.closest('div').nextElementSibling.textContent); toast('Raw extraction copied', 'ok');">📋 Copy JSON</button>
+          </div>
+          <pre style="margin:0; background:var(--surface); padding:12px; border-radius:6px; font-family:'JetBrains Mono',monospace; font-size:11.5px; color:var(--ink); border:1px solid var(--line); white-space:pre-wrap; word-break:break-word; max-height:350px; overflow-y:auto; line-height:1.45;">${esc(
+            (typeof p.raw_response === 'string' && p.raw_response.trim())
+              ? p.raw_response.trim()
+              : (typeof p.raw_ocr_text === 'string' && p.raw_ocr_text.trim()
+                  ? p.raw_ocr_text.trim()
+                  : JSON.stringify(p.fields || {}, null, 2))
+          )}</pre>
+        </div>
       `;
     }
 
@@ -1075,6 +1083,22 @@ function formatFieldValue(k, v) {
                             </tr>`).join("")}
                         </tbody>
                       </table>
+
+                      <!-- Raw Extraction Section Under Columns -->
+                      <div class="page-raw-extraction-box" style="margin-top: 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); overflow: hidden;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; background: var(--surface-2); border-bottom: 1px solid var(--line);">
+                          <div class="page-sec-title" style="margin: 0; font-size: 10px; letter-spacing: 0.06em;">RAW EXTRACTION (PAGE ${p.page_number})</div>
+                          <button class="btn line small" style="padding: 2px 8px; font-size: 10px; height: 22px; cursor: pointer;" onclick="navigator.clipboard.writeText(this.closest('.page-raw-extraction-box').querySelector('pre').textContent); toast('Raw extraction copied', 'ok');" title="Copy raw extraction JSON">📋 Copy JSON</button>
+                        </div>
+                        <pre style="margin: 0; padding: 10px 12px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--ink); white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow-y: auto; line-height: 1.45; background: var(--surface);">${esc(
+                          (typeof p.raw_response === 'string' && p.raw_response.trim()) 
+                            ? p.raw_response.trim() 
+                            : (typeof p.raw_ocr_text === 'string' && p.raw_ocr_text.trim()
+                                ? p.raw_ocr_text.trim()
+                                : JSON.stringify(p.fields || {}, null, 2))
+                        )}</pre>
+                      </div>
+
                       ${p.snippet ? `
                         <div style="margin-top:8px;">
                           <div class="page-sec-title" style="margin-top:6px">TEXT EVIDENCE ON PAGE</div>

@@ -588,6 +588,7 @@ def process_lead(
 
                 meta = extracted.pop("_meta", {})
                 route = extracted.pop("_ocr_route", "vlm")
+                raw_resp = extracted.pop("_raw_response", "")
                 if route not in ocr_routes_used:
                     ocr_routes_used.append(route)
 
@@ -648,7 +649,8 @@ def process_lead(
                                 "ocr_route": route,
                                 "telemetry": meta,
                                 "mismatches": [],
-                                "raw_ocr_text": "",
+                                "raw_response": raw_resp,
+                                "raw_ocr_text": raw_resp,
                                 "ocr_confidence": 1.0
                             })
                 else:
@@ -671,7 +673,8 @@ def process_lead(
                             "ocr_route": route,
                             "telemetry": meta,
                             "mismatches": [],
-                            "raw_ocr_text": "",
+                            "raw_response": raw_resp,
+                            "raw_ocr_text": raw_resp,
                             "ocr_confidence": 1.0
                         })
 
