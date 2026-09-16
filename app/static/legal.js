@@ -37,7 +37,7 @@
     let h; return (...a) => { clearTimeout(h); h = setTimeout(() => fn(...a), ms); };
   };
 
-  let state = { status: "all", q: "", scope: null };
+  let state = { status: "all", q: "", scope: null, batchId: null };
   let charts = {};
   let allRows = [];
   const COL_FILTERS = { lead_id: null, account_no_lan: null, applicant_name: null, property_verification_status: null };
@@ -94,7 +94,7 @@
   /* ── view switching ────────────────────── */
   const TITLES = {
     dashboard: ["Overview", "Dashboard", "SARFAESI Section 13(2) Loan Document Dossier Processing"],
-    upload: ["Ingest", "Dossier Ingest", "Upload ZIP archives, direct PDF dossier files, or load instant demo"],
+    runs: ["History", "Runs History", "Review previous dossier uploads and extraction prompts"],
     observability: ["Operations", "Observability", "OCR engine routing, phase timings & circuit breaker resilience"],
   };
 
@@ -105,7 +105,19 @@
     $("#pageEyebrow").textContent = t[0];
     $("#pageTitle").textContent = t[1];
     $("#pageSub").textContent = t[2];
+    
+    // Clear batchId filter if not on dashboard
+    if (name !== "dashboard") {
+      state.batchId = null;
+      updateBatchFilterUI();
+    }
+    if (name !== "runs" && typeof runsPollTimer !== "undefined" && runsPollTimer) {
+      clearInterval(runsPollTimer);
+      runsPollTimer = null;
+    }
+    
     if (name === "dashboard") refreshAll();
+    if (name === "runs") loadRuns();
     if (name === "observability") loadObservability();
   }
 
@@ -240,10 +252,40 @@
     });
   }
 
+  /* ── batch filtering UI ───────────────── */
+  function updateBatchFilterUI() {
+    let filterBanner = $("#batchFilterBanner");
+    if (state.batchId) {
+      if (!filterBanner) {
+        filterBanner = document.createElement("div");
+        filterBanner.id = "batchFilterBanner";
+        filterBanner.className = "scope-banner";
+        filterBanner.style.background = "var(--surface-2)";
+        filterBanner.style.border = "1px solid var(--line)";
+        filterBanner.style.color = "var(--ink)";
+        filterBanner.style.marginBottom = "24px";
+        $("#view-dashboard").insertBefore(filterBanner, $("#view-dashboard").firstChild);
+      }
+      filterBanner.innerHTML = `
+        <span class="sb-text">Dashboard is filtered to a specific Run <b>(${state.batchId.substring(0,8)})</b></span>
+        <button class="btn line small" id="clearBatchFilterBtn">Clear filter</button>
+      `;
+      $("#clearBatchFilterBtn").onclick = () => {
+        state.batchId = null;
+        updateBatchFilterUI();
+        refreshAll();
+      };
+      filterBanner.classList.remove("hidden");
+    } else {
+      if (filterBanner) filterBanner.classList.add("hidden");
+    }
+  }
+
   /* ── leads table ───────────────────────── */
   async function loadStats() {
     try {
-      const resp = await fetch("/api/legal/stats?scope=" + state.scope);
+      const bq = state.batchId ? `&batch_id=${state.batchId}` : "";
+      const resp = await fetch("/api/legal/stats?scope=" + state.scope + bq);
       if (!resp.ok) return;
       const s = await resp.json();
       renderStats(s.counts || {});
@@ -266,37 +308,299 @@
     document.body.classList.toggle("scope-test", scope === "test");
     $("#scopeBanner").classList.toggle("hidden", scope !== "test");
     $$("#wsSwitch .ws-opt").forEach(b => b.classList.toggle("active", b.dataset.scope === scope));
+    
+    // Always clear run filter when switching scopes
+    state.batchId = null;
+    updateBatchFilterUI();
+    
     refreshAll();
     if (!$("#view-observability").classList.contains("hidden")) loadObservability();
+    if (!$("#view-runs").classList.contains("hidden")) loadRuns();
     if (scope === "test" && !isInitialLoad) toast("Switched to Test Workspace — temporary sandbox data", "");
   }
 
   async function clearWorkspace() {
-    if (!confirm("Clear the Test Workspace? This permanently deletes temporary legal leads. Live records are unaffected.")) return;
     try {
       const r = await (await fetch("/api/legal/clear_test", { method: "POST" })).json();
       toast(`Test workspace cleared — ${r.cleared || 0} lead(s) removed`, "ok");
+      
+      state.batchId = null;
+      updateBatchFilterUI();
+      
       refreshAll();
       if (!$("#view-observability").classList.contains("hidden")) loadObservability();
+      if (!$("#view-runs").classList.contains("hidden")) loadRuns();
     } catch (e) { toast("Clear failed", "bad"); }
   }
 
+  let dynamicColumns = [];
+
+  function formatColName(c) {
+    const customMap = {
+      borrower_name: "Borrower Name",
+      borrower_address: "Borrower Address",
+      co_borrower_1_name: "Co-Borrower 1 Name",
+      co_borrower_1_address: "Co-Borrower 1 Address",
+      co_borrower_2_name: "Co-Borrower 2 Name",
+      co_borrower_2_address: "Co-Borrower 2 Address",
+      co_borrower_3_name: "Co-Borrower 3 Name",
+      co_borrower_3_address: "Co-Borrower 3 Address",
+      applicant_name: "Borrower / Applicant",
+      applicant_address: "Applicant Address",
+      account_no_lan: "Account LAN",
+      sanction_amount: "Sanction Amount",
+      tos: "Total Outstanding (TOS)",
+    };
+    if (customMap[c]) return customMap[c];
+    return c.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  }
+
   async function loadLeads() {
-    const url = `/api/legal/leads?status=${encodeURIComponent(state.status)}&q=${encodeURIComponent(state.q)}&scope=${state.scope}&limit=400`;
-    let rows = [];
+    const bq = state.batchId ? `&batch_id=${state.batchId}` : "";
+    const url = `/api/legal/leads?status=${encodeURIComponent(state.status)}&q=${encodeURIComponent(state.q)}&scope=${state.scope}&limit=400${bq}`;
     try {
       const resp = await fetch(url);
       if (resp.ok) {
         const data = await resp.json();
-        rows = Array.isArray(data) ? data : [];
+        allRows = Array.isArray(data) ? data : [];
       } else {
         toast(`Failed to load leads (HTTP ${resp.status})`, "bad");
+        allRows = [];
       }
     } catch (e) {
       toast("Failed to load leads", "bad");
+      allRows = [];
     }
-    allRows = Array.isArray(rows) ? rows : [];
+    
+    // Determine dynamic columns
+    const excludeKeys = new Set([
+      "lead_id", "batch_id", "folder_name", "folder_path", "dossier_type",
+      "total_documents", "processed_documents", "failed_documents", "status",
+      "processing_status", "is_test", "extraction_prompt", "created_at",
+      "updated_at", "account_lan", "lead_name", "telemetry", "_raw_ocr_text",
+      "_page_extractions", "page_extractions", "_cited_pages", "_telemetry", "_phase_timings"
+    ]);
+    const keys = new Set();
+    allRows.forEach(r => {
+       Object.keys(r).forEach(k => {
+           if (!excludeKeys.has(k) && !k.startsWith("_")) keys.add(k);
+       });
+    });
+
+    const priorityCols = [
+      "borrower_name", "borrower_address",
+      "co_borrower_1_name", "co_borrower_1_address",
+      "co_borrower_2_name", "co_borrower_2_address",
+      "co_borrower_3_name", "co_borrower_3_address",
+      "applicant_name", "applicant_address",
+      "sanction_amount", "tos"
+    ];
+
+    dynamicColumns = Array.from(keys).sort((a, b) => {
+      const idxA = priorityCols.indexOf(a);
+      const idxB = priorityCols.indexOf(b);
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
+      return a.localeCompare(b);
+    });
+    
+    // Rebuild thead
+    const theadRow = $("#dynamicTheadRow");
+    if (theadRow) {
+       theadRow.innerHTML = `
+          <th class="th-filter" data-col="lead_id">Lead ID<span class="th-caret" aria-hidden="true">▾</span></th>
+          <th class="th-filter" data-col="processing_status">Status<span class="th-caret" aria-hidden="true">▾</span></th>
+          ${dynamicColumns.map(c => {
+            const isAddr = c.toLowerCase().includes("address");
+            const style = isAddr ? 'style="min-width: 280px; max-width: 420px;"' : '';
+            return `<th class="th-filter" data-col="${c}" ${style}>${formatColName(c)}<span class="th-caret" aria-hidden="true">▾</span></th>`;
+          }).join("")}
+       `;
+    }
+    
     renderLeadRows();
+  }
+
+  let runsData = [];
+  let currentRunIndex = 0;
+  let runsPollTimer = null;
+
+  async function loadRuns() {
+    try {
+      const resp = await fetch("/api/legal/runs?scope=" + state.scope);
+      if (!resp.ok) return;
+      runsData = await resp.json();
+      
+      const viewer = $("#runViewer");
+      const empty = $("#runsEmpty");
+      
+      if (!runsData || runsData.length === 0) {
+        viewer.classList.add("hidden");
+        empty.classList.remove("hidden");
+        if (runsPollTimer) { clearInterval(runsPollTimer); runsPollTimer = null; }
+        return;
+      }
+      
+      empty.classList.add("hidden");
+      viewer.classList.remove("hidden");
+      
+      // Default to the most recent run or maintain index
+      if (currentRunIndex >= runsData.length) currentRunIndex = 0;
+      renderCurrentRun();
+      
+      // Bind pagination
+      $("#runPrevBtn").onclick = () => {
+        if (currentRunIndex < runsData.length - 1) {
+           animateRunTransition(1);
+        }
+      };
+      
+      $("#runNextBtn").onclick = () => {
+        if (currentRunIndex > 0) {
+           animateRunTransition(-1);
+        }
+      };
+      
+      $("#runViewDashBtn").onclick = () => {
+         state.batchId = runsData[currentRunIndex].run_id;
+         updateBatchFilterUI();
+         switchView("dashboard");
+      };
+
+      // Auto-refresh runs view if any batch is currently processing
+      const hasActive = runsData.some(r => r.status === "processing" || r.status === "pending");
+      if (hasActive && !$("#view-runs").classList.contains("hidden")) {
+        if (!runsPollTimer) {
+          runsPollTimer = setInterval(() => {
+            if ($("#view-runs").classList.contains("hidden")) {
+              clearInterval(runsPollTimer);
+              runsPollTimer = null;
+            } else {
+              loadRuns();
+            }
+          }, 3000);
+        }
+      } else if (runsPollTimer) {
+        clearInterval(runsPollTimer);
+        runsPollTimer = null;
+      }
+      
+    } catch (e) {
+      toast("Failed to load runs history", "bad");
+    }
+  }
+
+  function animateRunTransition(direction) {
+    const viewer = $("#runViewer");
+    viewer.style.opacity = "0";
+    viewer.style.transform = `translateX(${direction * 30}px)`;
+    
+    setTimeout(() => {
+       currentRunIndex += direction;
+       renderCurrentRun();
+       viewer.style.transform = `translateX(${-direction * 30}px)`;
+       
+       // Force reflow
+       void viewer.offsetWidth;
+       
+       viewer.style.opacity = "1";
+       viewer.style.transform = "translateX(0)";
+    }, 200);
+  }
+
+  async function renderCurrentRun() {
+    if (!runsData || currentRunIndex >= runsData.length) return;
+    
+    const run = runsData[currentRunIndex];
+    $("#runViewName").textContent = run.run_name || "Unnamed Batch";
+    $("#runViewDate").textContent = run.started_at ? new Date(run.started_at).toLocaleString() : "Unknown date";
+    $("#runViewCount").textContent = `${run.leads} dossier${run.leads === 1 ? '' : 's'}`;
+    $("#runViewStatusBadge").innerHTML = badge(run.status) + (run.is_test ? ' <span style="background:var(--surface-2);color:var(--ink-faint);border:1px solid var(--line);font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;margin-left:6px;">TEST</span>' : '');
+    $("#runViewPrompt").textContent = run.prompt || "No explicit extraction prompt provided.";
+    
+    $("#runViewPageMeta").textContent = `Run ${currentRunIndex + 1} of ${runsData.length}`;
+    
+    $("#runPrevBtn").disabled = currentRunIndex === runsData.length - 1;
+    $("#runNextBtn").disabled = currentRunIndex === 0;
+    
+    // Fetch leads for this specific run to display extracted info (without scope restriction)
+    try {
+       const url = `/api/legal/leads?batch_id=${encodeURIComponent(run.run_id)}&limit=100`;
+       const resp = await fetch(url);
+       if (resp.ok) {
+           const leads = await resp.json();
+           const leadsGrid = $("#runViewLeads");
+           
+           if (!leads || leads.length === 0) {
+               leadsGrid.innerHTML = `<div style="color: var(--ink-faint); font-style: italic;">No dossiers found for this run.</div>`;
+               return;
+           }
+           
+           leadsGrid.innerHTML = leads.map(l => {
+              const status = esc(l.processing_status || "—");
+              
+              const excludeKeys = new Set([
+                "lead_id", "batch_id", "folder_name", "folder_path", "dossier_type",
+                "total_documents", "processed_documents", "failed_documents", "status",
+                "processing_status", "is_test", "extraction_prompt", "created_at",
+                "updated_at", "account_lan", "lead_name", "telemetry", "_raw_ocr_text",
+                "_page_extractions", "page_extractions", "_cited_pages", "_telemetry", "_phase_timings"
+              ]);
+              
+              const priorityCols = [
+                "borrower_name", "borrower_address",
+                "co_borrower_1_name", "co_borrower_1_address",
+                "co_borrower_2_name", "co_borrower_2_address",
+                "co_borrower_3_name", "co_borrower_3_address",
+                "applicant_name", "applicant_address",
+                "sanction_amount", "tos"
+              ];
+
+              const cardKeys = Object.keys(l).filter(k => !excludeKeys.has(k) && !k.startsWith("_") && l[k] != null && l[k] !== "");
+              cardKeys.sort((a, b) => {
+                const idxA = priorityCols.indexOf(a);
+                const idxB = priorityCols.indexOf(b);
+                if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+                if (idxA !== -1) return -1;
+                if (idxB !== -1) return 1;
+                return a.localeCompare(b);
+              });
+
+              let dynamicFieldsHtml = "";
+              cardKeys.forEach(k => {
+                 const val = l[k];
+                 const isAddr = k.toLowerCase().includes("address");
+                 const colSpan = isAddr ? 'style="grid-column: span 2;"' : '';
+                 dynamicFieldsHtml += `
+                  <div ${colSpan}>
+                    <div style="font-size: 11px; color: var(--ink-faint); margin-bottom: 4px; text-transform: uppercase; font-weight:600;">${esc(formatColName(k))}</div>
+                    <div style="font-size: 13px; color: var(--ink); ${isAddr ? 'white-space: normal; line-height: 1.45;' : ''}">${formatFieldValue(k, val)}</div>
+                  </div>
+                 `;
+              });
+              
+              return `
+                <div class="panel" style="padding: 20px; transition: box-shadow 0.2s; cursor:pointer;" onclick="openLead('${esc(l.lead_id)}')">
+                  <div style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 12px;">
+                     <div>
+                       <div style="font-size: 11px; color: var(--ink-faint); margin-bottom: 4px;">DOSSIER ID</div>
+                       <div style="font-weight: 600; font-size: 15px; color: var(--ink);">${esc(l.lead_id)}</div>
+                     </div>
+                     <div style="text-align: right;">
+                       ${badge(status)}
+                     </div>
+                  </div>
+                  <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px;">
+                     ${dynamicFieldsHtml || "<div style='color: var(--ink-faint); font-style: italic; font-size: 13px;'>No data extracted</div>"}
+                  </div>
+                </div>
+              `;
+            }).join("");
+       }
+    } catch (e) {
+        $("#runViewLeads").innerHTML = `<div style="color: var(--red);">Error loading extracted data.</div>`;
+    }
   }
 
   function passesColFilters(r) {
@@ -316,17 +620,24 @@
     const empty = $("#tableEmpty");
     empty.classList.toggle("hidden", rows.length > 0);
 
-    body.innerHTML = rows.map(r => `
-      <tr data-id="${esc(r.lead_id)}" class="clickable">
+    body.innerHTML = rows.map(r => {
+      let tds = `
         <td class="lead-id mono">${esc(r.lead_id)}</td>
-        <td class="mono">${esc(r.account_no_lan || "—")}</td>
-        <td>${esc(r.applicant_name || "—")}</td>
-        <td class="mono" style="text-align:right">${fmtINR(r.sanction_amount)}</td>
-        <td class="mono" style="text-align:right;font-weight:600">${fmtINR(r.tos)}</td>
-        <td>${propBadge(r.property_verification_status)}</td>
         <td>${badge(r.processing_status)}</td>
-        <td class="cell-time mono">${fmtTime(r.updated_at)}</td>
-      </tr>`).join("");
+      `;
+      dynamicColumns.forEach(col => {
+         let val = r[col];
+         if (val === undefined || val === null) val = "—";
+         else if (typeof val === 'number') val = val.toString();
+         const isAddr = col.toLowerCase().includes("address");
+         const cellStyle = isAddr
+           ? 'style="min-width: 280px; max-width: 420px; white-space: normal; word-break: break-word; line-height: 1.45; font-size: 12.5px;"'
+           : '';
+         tds += `<td ${cellStyle}>${esc(val)}</td>`;
+      });
+      
+      return `<tr data-id="${esc(r.lead_id)}" class="clickable">${tds}</tr>`;
+    }).join("");
 
     $$("#leadsBody tr").forEach(tr => tr.onclick = () => openLead(tr.dataset.id));
     $$("th[data-col]").forEach(th => th.classList.toggle("filtered", COL_FILTERS[th.dataset.col] !== null));
@@ -395,6 +706,14 @@
   /* ── field & page provenance helpers ───────── */
   function formatFieldLabel(k) {
     const map = {
+      borrower_name: "Borrower Name",
+      borrower_address: "Borrower Address",
+      co_borrower_1_name: "Co-Borrower 1 Name",
+      co_borrower_1_address: "Co-Borrower 1 Address",
+      co_borrower_2_name: "Co-Borrower 2 Name",
+      co_borrower_2_address: "Co-Borrower 2 Address",
+      co_borrower_3_name: "Co-Borrower 3 Name",
+      co_borrower_3_address: "Co-Borrower 3 Address",
       account_no_lan: "Account LAN",
       sanction_amount: "Sanction Amount",
       sanction_amount_in_words: "Sanction in Words",
@@ -431,7 +750,12 @@
       third_party_mortgagor_flag: "Third-Party Mortgagor Flag",
       property_verification_status: "Title Verification Status",
     };
-    return map[k] || k.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+    if (map[k]) return map[k];
+    const m = k.match(/^co_borrower_(\d+)_(name|address)$/i);
+    if (m) {
+      return `Co-Borrower ${m[1]} ${m[2] === 'name' ? 'Name' : 'Address'}`;
+    }
+    return k.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
   }
 
   function isFinancialField(k) {
@@ -441,10 +765,39 @@
             "excess_amount", "tos"].includes(k);
   }
 
-  function formatFieldValue(k, v) {
+  function _renderObject(v) {
+    if (Array.isArray(v)) {
+      if (v.length === 0) return "—";
+      // If array of objects (like borrower_details)
+      if (typeof v[0] === "object" && v[0] !== null) {
+         let html = '<div style="display:flex; flex-direction:column; gap:8px; margin-top:4px;">';
+         v.forEach((item, idx) => {
+            html += '<div style="background:var(--bg); border:1px solid var(--line-light); padding:8px 12px; border-radius:4px;">';
+            html += '<div style="font-size:10px; color:var(--text-light); margin-bottom:4px; text-transform:uppercase; letter-spacing:0.5px;">Item ' + (idx+1) + '</div>';
+            Object.entries(item).forEach(([ik, iv]) => {
+                html += '<div style="margin-bottom:4px; display:flex;"><span style="color:var(--text-light); font-weight:500; width:120px; flex-shrink:0;">' + formatFieldLabel(ik) + ':</span> <span style="font-weight:500;">' + esc(String(iv)) + '</span></div>';
+            });
+            html += '</div>';
+         });
+         html += '</div>';
+         return html;
+      }
+      // If array of strings
+      return '<ul style="margin:4px 0 0 0; padding-left:20px; color:var(--text);">' + v.map(item => '<li style="margin-bottom:2px;">' + esc(String(item)) + '</li>').join('') + '</ul>';
+    }
+    // If it's a plain object
+    let html = '<div style="background:var(--bg); border:1px solid var(--line-light); padding:8px 12px; border-radius:4px; margin-top:4px;">';
+    Object.entries(v).forEach(([ik, iv]) => {
+        html += '<div style="margin-bottom:4px; display:flex;"><span style="color:var(--text-light); font-weight:500; width:120px; flex-shrink:0;">' + formatFieldLabel(ik) + ':</span> <span style="font-weight:500;">' + esc(String(iv)) + '</span></div>';
+    });
+    html += '</div>';
+    return html;
+}
+
+function formatFieldValue(k, v) {
     if (v == null || v === "" || v === "—") return "—";
     if (isFinancialField(k) && typeof v === "number") return fmtINR(v);
-    if (typeof v === "object") return JSON.stringify(v);
+    if (typeof v === "object") return _renderObject(v);
     return String(v);
   }
 
@@ -486,7 +839,7 @@
                 ${Object.entries(p.fields || {}).map(([fk, fv]) => `
                   <tr>
                     <td class="pft-k" style="padding:8px; border-bottom:1px solid var(--line-light); vertical-align:top;">${esc(formatFieldLabel(fk))}</td>
-                    <td class="pft-v${isFinancialField(fk) ? ' mono' : ''}" style="padding:8px; border-bottom:1px solid var(--line-light); font-weight:500;">${esc(formatFieldValue(fk, fv))}</td>
+                    <td class="pft-v${isFinancialField(fk) ? ' mono' : ''}" style="padding:8px; border-bottom:1px solid var(--line-light); font-weight:500;">${formatFieldValue(fk, fv)}</td>
                   </tr>`).join("")}
               </tbody>
             </table>` : `<div style="color:var(--ink-soft); font-size:13px; padding:12px; background:var(--surface); border-radius:4px; border:1px dashed var(--line-strong);">No specific key fields extracted from this page.</div>`}
@@ -526,8 +879,7 @@
     $("#dRawLink").href = "/logs/legal/" + encodeURIComponent(j.lead_id);
 
     const raw = f.raw_extractions || {};
-    const pageExtractions = Array.isArray(raw.page_extractions) ? raw.page_extractions : [];
-    const fieldProv = (raw.field_provenance && typeof raw.field_provenance === "object") ? raw.field_provenance : {};
+    const pageExtractions = Array.isArray(raw.page_extractions) ? raw.page_extractions : (Array.isArray(raw._page_extractions) ? raw._page_extractions : []);
     const leadMeta = raw.lead_metadata || {};
     const docs = j.documents || [];
 
@@ -535,15 +887,55 @@
     const summary = `
       <div class="lead-summary">
         <div class="ls-cell"><div class="ls-k">Account LAN</div><div class="ls-v mono">${esc(f.account_no_lan || lead.account_lan || "—")}</div></div>
-        <div class="ls-cell"><div class="ls-k">Primary Applicant</div><div class="ls-v">${esc(f.applicant_name || lead.lead_name || "—")}</div></div>
+        <div class="ls-cell"><div class="ls-k">Primary Borrower</div><div class="ls-v">${esc(f.borrower_name || f.applicant_name || lead.lead_name || "—")}</div></div>
         <div class="ls-cell"><div class="ls-k">Sanction Amount</div><div class="ls-v mono">${fmtINR(f.sanction_amount)}</div></div>
         <div class="ls-cell"><div class="ls-k">Total Outstanding (TOS)</div><div class="ls-v mono" style="font-weight:700">${fmtINR(f.tos)}</div></div>
       </div>`;
 
-    // 2. Comprehensive Lead Metadata Grid
+    // 1.5 Model Execution & Token Telemetry Banner
+    const tel = f.telemetry || raw.telemetry || raw._telemetry || lead.telemetry || {};
+    const totalTokens = (tel.total_tokens != null) ? tel.total_tokens.toLocaleString() : (tel.prompt_tokens != null && tel.completion_tokens != null ? (tel.prompt_tokens + tel.completion_tokens).toLocaleString() : "—");
+    const promptTokens = (tel.prompt_tokens != null) ? tel.prompt_tokens.toLocaleString() : "—";
+    const completionTokens = (tel.completion_tokens != null) ? tel.completion_tokens.toLocaleString() : "—";
     const pt = f.phase_timings || leadMeta.phase_timings || {};
+    const vlmTime = tel.vlm_latency_ms ? `${(tel.vlm_latency_ms / 1000).toFixed(2)}s (${tel.vlm_latency_ms}ms)` : (pt.document_extraction_ms ? `${(pt.document_extraction_ms / 1000).toFixed(2)}s` : "—");
+    const totalTime = tel.pipeline_latency_ms ? `${(tel.pipeline_latency_ms / 1000).toFixed(2)}s` : (pt.total_pipeline_ms ? `${(pt.total_pipeline_ms / 1000).toFixed(2)}s` : "—");
+    const modelName = tel.model || "Medha VLM";
+
+    const telemetryBanner = `
+      <div class="d-section" style="margin-top: 16px;">
+        <div style="background: linear-gradient(135deg, var(--surface), var(--surface-2)); border: 1px solid var(--line); border-radius: 8px; padding: 14px 18px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--line-light); padding-bottom: 8px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 15px;">⚡</span>
+              <span style="font-size: 12px; font-weight: 700; color: var(--ink); text-transform: uppercase; letter-spacing: 0.05em;">Model Execution &amp; Token Telemetry</span>
+            </div>
+            <span class="tag ok" style="font-size: 11px; font-weight: 600; padding: 3px 8px;">API Engine: ${esc(modelName)}</span>
+          </div>
+          <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
+            <div style="background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px;">
+              <div style="font-size: 10.5px; color: var(--ink-faint); text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">VLM Latency</div>
+              <div class="mono" style="font-size: 13.5px; font-weight: 700; color: var(--ink);">${esc(vlmTime)}</div>
+            </div>
+            <div style="background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px;">
+              <div style="font-size: 10.5px; color: var(--ink-faint); text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">Total Tokens</div>
+              <div class="mono" style="font-size: 13.5px; font-weight: 700; color: var(--accent);">${esc(String(totalTokens))}</div>
+            </div>
+            <div style="background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px;">
+              <div style="font-size: 10.5px; color: var(--ink-faint); text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">Prompt Tokens</div>
+              <div class="mono" style="font-size: 13px; font-weight: 600; color: var(--ink-soft);">${esc(String(promptTokens))}</div>
+            </div>
+            <div style="background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px;">
+              <div style="font-size: 10.5px; color: var(--ink-faint); text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">Completion Tokens</div>
+              <div class="mono" style="font-size: 13px; font-weight: 600; color: var(--ink-soft);">${esc(String(completionTokens))}</div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+
+    // 2. Comprehensive Lead Metadata Grid
     const timingStr = Object.entries(pt).map(([k, ms]) => `${k.replace('_ms','').replace('phase','')}: ${ms}ms`).join(" · ") || "—";
-    const routesStr = (f.ocr_routes_used || leadMeta.ocr_routes_used || []).join(", ") || "RapidOCR + VLM";
+    const routesStr = (f.ocr_routes_used || leadMeta.ocr_routes_used || []).join(", ") || "Medha VLM";
     const totalPgs = docs.reduce((acc, d) => acc + (d.page_count || 1), 0);
 
     const metaSection = `
@@ -562,62 +954,81 @@
       </div>`;
 
     // 2.5 Consolidated Dossier Extractions
-    // Start with the standard fixed schema keys
-    const baseKeys = [
-      "account_no_lan", "applicant_name", "applicant_address",
-      "co_applicant_1", "co_applicant_address_1", "co_applicant_2", "co_applicant_address_2",
-      "guarantor_1", "guarantor_1_add",
-      "sanction_amount", "sanction_date", "disbursal_date", "roi_in_number", "npa_date",
+    const priorityCols = [
+      "borrower_name", "borrower_address",
+      "co_borrower_1_name", "co_borrower_1_address",
+      "co_borrower_2_name", "co_borrower_2_address",
+      "co_borrower_3_name", "co_borrower_3_address",
+      "applicant_name", "applicant_address",
+      "account_no_lan", "sanction_amount", "sanction_date", "disbursal_date", "roi_in_number", "npa_date",
       "future_principal", "principal_overdue", "interest_overdue", "interest_on_termination",
       "late_payment_penal", "cheque_bounce_inc_gst", "other_charges_inc_gst", 
       "foreclosure_charges", "litigation_charges", "tos",
       "mortgaged_property_detail_1", "directions", "property_owner_mortgagor"
     ];
-    
-    // Add any custom fields extracted by the LLM that were placed in custom_fields
+
     const customFields = (f.extracted_data && f.extracted_data.custom_fields) ? f.extracted_data.custom_fields : {};
-    const customKeys = Object.keys(customFields);
-    const extractKeys = [...new Set([...baseKeys, ...customKeys])];
-    
-    // Create a flat dictionary combining base properties and custom_fields properties
     const flatF = { ...f, ...customFields };
-    
+    const allExtractKeys = Object.keys(flatF).filter(k => 
+      !k.startsWith("_") && 
+      !["lead_id", "status", "processing_status", "raw_extractions", "extracted_data", "telemetry", "phase_timings", "updated_at", "created_at"].includes(k) &&
+      flatF[k] != null && flatF[k] !== "" && flatF[k] !== "—"
+    );
+
+    const sortedExtractKeys = allExtractKeys.sort((a, b) => {
+      const idxA = priorityCols.indexOf(a);
+      const idxB = priorityCols.indexOf(b);
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
+      return a.localeCompare(b);
+    });
+
     let consolidatedHtml = "";
-    const hasData = extractKeys.some(k => flatF[k] != null && flatF[k] !== "");
-    if (hasData) {
+    if (sortedExtractKeys.length > 0) {
       consolidatedHtml = `
         <div class="d-section" style="margin-top:20px;">
-          <h4>Consolidated Dossier Extractions <span class="n">Final merged payload</span></h4>
+          <h4>Consolidated Dossier Extractions <span class="n">${sortedExtractKeys.length} fields resolved</span></h4>
           <table class="page-fields-table" style="width:100%; border-collapse:collapse; margin-top:12px; background:var(--surface); border:1px solid var(--line); border-radius:6px; overflow:hidden;">
             <tbody>
-              ${extractKeys.filter(k => flatF[k] != null && flatF[k] !== "").map(k => `
+              ${sortedExtractKeys.map(k => `
                 <tr>
-                  <td class="pft-k" style="padding:10px 14px; border-bottom:1px solid var(--line-light); vertical-align:top; width:220px;">${esc(formatFieldLabel(k))}</td>
-                  <td class="pft-v${isFinancialField(k) ? ' mono' : ''}" style="padding:10px 14px; border-bottom:1px solid var(--line-light); font-weight:500;">${esc(formatFieldValue(k, flatF[k]))}</td>
+                  <td class="pft-k" style="padding:10px 14px; border-bottom:1px solid var(--line-light); vertical-align:top; width:220px; font-weight:600;">${esc(formatFieldLabel(k))}</td>
+                  <td class="pft-v${isFinancialField(k) ? ' mono' : ''}" style="padding:10px 14px; border-bottom:1px solid var(--line-light); font-weight:500; ${k.toLowerCase().includes('address') ? 'white-space:normal; line-height:1.45;' : ''}">${formatFieldValue(k, flatF[k])}</td>
                 </tr>`).join("")}
             </tbody>
           </table>
         </div>`;
     }
 
-    // 3. Document & Page-by-Page Extraction Provenance Section (ONLY PAGES WITH EXTRACTED DATA)
-    const docsWithPages = docs.filter(d => {
-      const dPages = pageExtractions.filter(p => p.document_id === d.document_id || p.filename === d.filename);
-      if (dPages.some(p => Object.keys(p.fields || {}).length > 0)) return true;
-      if (d.extracted_data && Array.isArray(d.extracted_data.pages) && d.extracted_data.pages.some(p => Object.keys(p.fields || {}).length > 0)) return true;
-      return false;
+    // 3. Document & Page-by-Page Extraction Provenance Section (ONLY EXACT PAGES WITH EXTRACTED DATA)
+    const docMap = new Map();
+    docs.forEach(d => docMap.set(d.document_id, { ...d }));
+    pageExtractions.forEach(p => {
+      if (p.document_id && !docMap.has(p.document_id)) {
+        docMap.set(p.document_id, {
+          document_id: p.document_id,
+          filename: p.filename || "Document",
+          document_type: "document",
+          page_count: p.total_pages || 1
+        });
+      }
     });
-    const docsNoPages = docs.filter(d => !docsWithPages.includes(d));
+    const allDocs = Array.from(docMap.values());
+
+    const docsWithPages = allDocs.filter(d => {
+      const dPages = pageExtractions.filter(p => (p.document_id === d.document_id || p.filename === d.filename) && p.fields && Object.keys(p.fields).length > 0);
+      return dPages.length > 0;
+    });
+    const docsNoPages = allDocs.filter(d => !docsWithPages.includes(d));
 
     const docProvenanceSection = `
       <div class="d-section">
         <h4>Page Extraction Provenance <span class="n">${docsWithPages.length} document${docsWithPages.length === 1 ? '' : 's'} with extracted data</span></h4>
         <p class="lede" style="margin-bottom:14px">Exact pages where data was extracted — side-by-side visual evidence with the precise fields pulled from each page.</p>
-          ${docsWithPages.map(d => {
-          let dPages = pageExtractions.filter(p => (p.document_id === d.document_id || p.filename === d.filename) && Object.keys(p.fields || {}).length > 0);
-          if (!dPages.length && d.extracted_data && Array.isArray(d.extracted_data.pages)) {
-            dPages = d.extracted_data.pages.filter(p => Object.keys(p.fields || {}).length > 0);
-          }
+        ${docsWithPages.length === 0 ? `<div style="color:var(--ink-faint); font-style:italic; padding:12px; background:var(--surface); border:1px dashed var(--line); border-radius:6px;">No specific cited pages with data found.</div>` : ""}
+        ${docsWithPages.map(d => {
+          const dPages = pageExtractions.filter(p => (p.document_id === d.document_id || p.filename === d.filename) && p.fields && Object.keys(p.fields).length > 0);
           
           dPages.forEach(p => {
             window.__pageData[`${d.document_id}-${p.page_number}`] = p;
@@ -628,15 +1039,12 @@
               <div class="doc-prov-head">
                 <div class="doc-prov-title">
                   <span>📄 ${esc(d.filename)}</span>
-                  <span class="tag" style="background:var(--surface);border:1px solid var(--line-strong)">${esc(d.document_type || "unclassified")}</span>
-                  ${(d.metadata && d.metadata.shared_fcl) ? '<span class="tag warn" style="font-size:10.5px">SHARED FCL</span>' : ''}
+                  <span class="tag" style="background:var(--surface);border:1px solid var(--line-strong)">${esc(d.document_type || "document")}</span>
                 </div>
                 <div class="doc-prov-meta">
                   <span>${formatBytes(d.file_size_bytes)}</span>
                   <span>·</span>
                   <span>${d.page_count || 1} page${(d.page_count || 1) === 1 ? "" : "s"} total</span>
-                  <span>·</span>
-                  <span class="mono">${esc(d.ocr_route || "—")}</span>
                   <a class="btn line small" href="/api/legal/document/${encodeURIComponent(d.document_id)}/file" target="_blank" style="margin-left:6px">View File ↗</a>
                 </div>
               </div>
@@ -645,7 +1053,7 @@
                   <div class="page-card" id="page-${esc(d.document_id)}-${p.page_number}">
                     <!-- Left: Page Preview -->
                     <div class="page-card-side">
-                      <div class="page-num-badge">PAGE ${p.page_number} OF ${d.page_count || p.total_pages || 1}</div>
+                      <div class="page-num-badge">PAGE ${p.page_number} OF ${d.page_count || 1}</div>
                       <div class="page-thumb-wrap" onclick="openPageModal('${d.document_id}', '${esc(d.filename)}', ${p.page_number}, ${d.page_count || 1})" title="Click to view full-resolution page">
                         <img class="page-thumb-img" src="/api/legal/document/${encodeURIComponent(d.document_id)}/page/${encodeURIComponent(p.page_number)}" loading="lazy" alt="Page ${p.page_number}" onerror="this.onerror=null;this.src='';this.alt='Preview unavailable'">
                       </div>
@@ -654,19 +1062,21 @@
                     </div>
                     <!-- Right: Extracted Data from This Exact Page -->
                     <div class="page-card-main">
-                      <div class="page-sec-title">DATA EXTRACTED FROM THIS PAGE (${Object.keys(p.fields || {}).length} field${Object.keys(p.fields || {}).length === 1 ? "" : "s"})</div>
-                      ${Object.keys(p.fields || {}).length > 0 ? `
-                        <table class="page-fields-table">
-                          <tbody>
-                            ${Object.entries(p.fields || {}).map(([fk, fv]) => `
-                              <tr>
-                                <td class="pft-k">${esc(formatFieldLabel(fk))}</td>
-                                <td class="pft-v${isFinancialField(fk) ? ' mono' : ''}">${esc(formatFieldValue(fk, fv))}</td>
-                              </tr>`).join("")}
-                          </tbody>
-                        </table>` : `<div style="font-size:12.5px;color:var(--ink-faint);padding:6px 0">No direct key fields extracted on this page.</div>`}
+                      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                        <div class="page-sec-title" style="margin:0;">DATA EXTRACTED FROM THIS PAGE (${Object.keys(p.fields || {}).length} field${Object.keys(p.fields || {}).length === 1 ? "" : "s"})</div>
+                        ${(p.telemetry && p.telemetry.ms) ? `<span style="font-size:11px; font-family:'JetBrains Mono',monospace; color:var(--ink-faint);">${p.telemetry.ms}ms · ${(p.telemetry.total_tokens || 0)} tokens</span>` : ''}
+                      </div>
+                      <table class="page-fields-table">
+                        <tbody>
+                          ${Object.entries(p.fields || {}).map(([fk, fv]) => `
+                            <tr>
+                              <td class="pft-k" style="width:200px; vertical-align:top;">${esc(formatFieldLabel(fk))}</td>
+                              <td class="pft-v${isFinancialField(fk) ? ' mono' : ''}" style="${fk.toLowerCase().includes('address') ? 'white-space:normal; line-height:1.45;' : ''}">${formatFieldValue(fk, fv)}</td>
+                            </tr>`).join("")}
+                        </tbody>
+                      </table>
                       ${p.snippet ? `
-                        <div>
+                        <div style="margin-top:8px;">
                           <div class="page-sec-title" style="margin-top:6px">TEXT EVIDENCE ON PAGE</div>
                           <div class="evidence-snippet">${esc(p.snippet)}</div>
                         </div>` : ""}
@@ -682,7 +1092,7 @@
               <div style="display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid var(--line)">
                 <span style="font-size:13px">📄</span>
                 <span style="font-size:12.5px;font-family:'JetBrains Mono',monospace;flex:1">${esc(d.filename)}</span>
-                <span class="tag" style="font-size:10.5px">${esc(d.document_type || "unclassified")}</span>
+                <span class="tag" style="font-size:10.5px">${esc(d.document_type || "document")}</span>
                 <span style="font-size:11.5px;color:var(--ink-faint)">${formatBytes(d.file_size_bytes)}</span>
                 <a class="btn line small" href="/api/legal/document/${encodeURIComponent(d.document_id)}/file" target="_blank">View ↗</a>
               </div>`).join("")}
@@ -729,7 +1139,7 @@
       `;
     }
 
-    $("#drawerBody").innerHTML = summary + metaSection + consolidatedHtml + docProvenanceSection + eventLogsHtml;
+    $("#drawerBody").innerHTML = summary + telemetryBanner + metaSection + consolidatedHtml + docProvenanceSection + eventLogsHtml;
   }
 
   async function openLead(id) {
@@ -1362,8 +1772,84 @@
   /* ── refresh all ────────────────────────── */
   function refreshAll() { loadStats(); loadLeads(); }
 
+  /* ── prompt history dropdown & persistence ── */
+  async function initPromptHistory() {
+    const btn = $("#btnPromptHistory");
+    const dropdown = $("#promptHistoryDropdown");
+    const list = $("#promptHistoryList");
+    const ep = $("#extractionPrompt");
+    
+    // Auto-restore prompt from localStorage or server history if textarea is empty
+    if (ep) {
+      const saved = localStorage.getItem("legal-last-prompt");
+      if (saved && !ep.value.trim()) {
+        ep.value = saved;
+      } else if (!ep.value.trim()) {
+        fetch("/api/legal/prompt_history")
+          .then(r => r.ok ? r.json() : [])
+          .then(prompts => {
+            if (prompts && prompts.length > 0 && !ep.value.trim()) {
+              ep.value = prompts[0].prompt;
+              localStorage.setItem("legal-last-prompt", prompts[0].prompt);
+            }
+          })
+          .catch(() => {});
+      }
+      
+      ep.addEventListener("input", () => {
+        const val = ep.value.trim();
+        if (val) localStorage.setItem("legal-last-prompt", val);
+      });
+    }
+
+    if (!btn || !dropdown || !list) return;
+
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const isHidden = dropdown.classList.contains("hidden");
+      if (isHidden) {
+        try {
+          const resp = await fetch("/api/legal/prompt_history");
+          if (resp.ok) {
+            const prompts = await resp.json();
+            if (prompts.length > 0) {
+              list.innerHTML = prompts.map(p => `
+                <div class="ph-item" style="padding: 10px 12px; font-size: 12px; color: var(--ink); border-bottom: 1px solid var(--line); cursor: pointer; transition: background 0.15s; font-family: 'JetBrains Mono', monospace; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;" title="Click to apply">
+                  ${esc(p.prompt)}
+                </div>
+              `).join("");
+              
+              $$(".ph-item", list).forEach(el => {
+                el.onmouseenter = () => el.style.background = "var(--surface-2)";
+                el.onmouseleave = () => el.style.background = "transparent";
+                el.onclick = () => {
+                  const pText = el.textContent.trim();
+                  if (ep) {
+                    ep.value = pText;
+                    localStorage.setItem("legal-last-prompt", pText);
+                  }
+                  dropdown.classList.add("hidden");
+                };
+              });
+            } else {
+              list.innerHTML = `<div style="padding: 12px; font-size: 12px; color: var(--ink-faint); text-align: center;">No history found.</div>`;
+            }
+          }
+        } catch (err) {}
+      }
+      dropdown.classList.toggle("hidden");
+    };
+
+    document.addEventListener("click", (e) => {
+      if (!dropdown.contains(e.target) && e.target !== btn) {
+        dropdown.classList.add("hidden");
+      }
+    });
+  }
+
   /* ── initialization ─────────────────────── */
   function init() {
+    initPromptHistory();
     // Nav tabs
     $$(".rail-nav .nav-item").forEach(b => b.onclick = () => switchView(b.dataset.view));
     const nrb = $("#newRunBtn");

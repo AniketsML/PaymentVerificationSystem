@@ -45,7 +45,8 @@
 
       <nav class="rail-nav">
         <button class="nav-item active" data-view="dashboard"><span class="idx">01</span><span>Extractor</span></button>
-        <button class="nav-item" data-view="observability"><span class="idx">02</span><span>Observability</span></button>
+        <button class="nav-item" data-view="runs"><span class="idx">02</span><span>Runs History</span></button>
+        <button class="nav-item" data-view="observability"><span class="idx">03</span><span>Observability</span></button>
       </nav>
 
       <div class="rail-foot">
@@ -113,9 +114,21 @@
                 <button class="btn line small" id="btnPickZip">Select ZIP</button>
               </div>
             </div>
-            <div>
-              <label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 8px; color: var(--ink);">LLM Extraction Requirement Prompt</label>
-              <textarea id="extractionPrompt" rows="6" style="width: 100%; border: 1px solid var(--line); border-radius: 4px; padding: 12px; font-family: inherit; font-size: 13px; background: var(--surface-2); resize: vertical;" placeholder="Enter extraction requirements. e.g., 'Extract borrower name, property details, and all financial figures. Return as JSON.'"></textarea>
+            <div style="position: relative;">
+              <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;">
+                <label style="font-size: 12px; font-weight: 600; color: var(--ink);">LLM Extraction Requirement Prompt</label>
+                <button id="btnPromptHistory" class="btn line small" style="padding: 2px 8px; font-size: 11px;">Prompt History ▾</button>
+              </div>
+              
+              <!-- Prompt History Dropdown -->
+              <div id="promptHistoryDropdown" class="hidden" style="position: absolute; top: 30px; right: 0; width: 100%; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 4px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); z-index: 100; max-height: 200px; overflow-y: auto;">
+                <div style="padding: 8px 12px; font-size: 11px; font-weight: 600; color: var(--ink-faint); border-bottom: 1px solid var(--line); background: var(--surface-2);">Recent Prompts</div>
+                <div id="promptHistoryList">
+                   <div style="padding: 12px; font-size: 12px; color: var(--ink-faint); text-align: center;">No history found.</div>
+                </div>
+              </div>
+
+              <textarea id="extractionPrompt" rows="6" style="width: 100%; border: 1px solid var(--line); border-radius: 4px; padding: 12px; font-family: inherit; font-size: 13px; background: var(--surface-2); resize: vertical; margin-bottom: 0;" placeholder="Enter extraction requirements. e.g., 'Extract borrower name, property details, and all financial figures. Return as JSON.'"></textarea>
               <button class="btn solid big" id="runZip" style="width: 100%; margin-top: 16px;" disabled>Start Extraction</button>
             </div>
           </div>
@@ -181,16 +194,12 @@
 
           <div class="tablewrap">
             <table>
-              <thead><tr>
-                <th class="th-filter" data-col="lead_id">Lead ID<span class="th-caret" aria-hidden="true">▾</span></th>
-                <th class="th-filter" data-col="account_no_lan">Account LAN<span class="th-caret" aria-hidden="true">▾</span></th>
-                <th class="th-filter" data-col="applicant_name">Applicant<span class="th-caret" aria-hidden="true">▾</span></th>
-                <th style="text-align:right">Total Docs</th>
-                <th style="text-align:right">Processed</th>
-                <th class="th-filter" data-col="property_verification_status">Property Status<span class="th-caret" aria-hidden="true">▾</span></th>
-                <th>Status</th>
-                <th>Updated</th>
-              </tr></thead>
+              <thead>
+                <tr id="dynamicTheadRow">
+                  <th class="th-filter" data-col="lead_id">Lead ID<span class="th-caret" aria-hidden="true">▾</span></th>
+                  <th class="th-filter" data-col="processing_status">Status<span class="th-caret" aria-hidden="true">▾</span></th>
+                </tr>
+              </thead>
               <tbody id="leadsBody"></tbody>
             </table>
             <div class="empty hidden" id="tableEmpty">
@@ -199,6 +208,53 @@
             </div>
           </div>
         </section>
+      </section>
+
+      <!-- ═══ RUNS HISTORY ═══ -->
+      <section class="view hidden" id="view-runs" style="position: relative; overflow: hidden; min-height: 500px;">
+        <div id="runViewer" style="width: 100%; transition: opacity 0.3s ease, transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);">
+          <!-- Header and Controls -->
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+             <div style="display: flex; align-items: center; gap: 20px;">
+                <div style="display: flex; gap: 8px;">
+                  <button id="runPrevBtn" class="btn line icon-only" style="border-radius: 50%; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;" title="Previous Run">←</button>
+                  <button id="runNextBtn" class="btn line icon-only" style="border-radius: 50%; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;" title="Next Run">→</button>
+                </div>
+                <div>
+                  <h2 id="runViewName" style="margin: 0; font-size: 24px; color: var(--ink); line-height: 1.2;">Run Name</h2>
+                  <div id="runViewMeta" style="color: var(--ink-faint); font-size: 13px; margin-top: 4px; display: flex; gap: 12px; align-items: center;">
+                    <span id="runViewDate">Date</span>
+                    <span id="runViewCount">0 dossiers</span>
+                    <span id="runViewStatusBadge"></span>
+                  </div>
+                </div>
+             </div>
+             <div>
+                <button id="runViewDashBtn" class="btn solid">View in Dashboard</button>
+             </div>
+          </div>
+
+          <!-- The Prompt -->
+          <div style="margin-bottom: 32px;">
+            <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--ink-faint); margin-bottom: 8px; font-weight: 600;">Extraction Prompt Used</div>
+            <div id="runViewPrompt" style="background: var(--surface-2); border-left: 3px solid var(--accent); padding: 16px; border-radius: 0 8px 8px 0; font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--ink-soft); line-height: 1.6; white-space: pre-wrap; word-break: break-word;"></div>
+          </div>
+
+          <!-- Extracted Leads Grid -->
+          <div style="font-size: 16px; font-weight: 600; color: var(--ink); margin-bottom: 16px; display: flex; justify-content: space-between; align-items: flex-end;">
+            <span>Extracted Dossiers</span>
+            <span id="runViewPageMeta" style="font-size: 13px; color: var(--ink-faint); font-weight: 400;">Showing 0 of 0 runs</span>
+          </div>
+          
+          <div id="runViewLeads" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 16px;">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+
+        <div class="empty hidden" id="runsEmpty" style="margin-top: 40px; background: var(--surface); border: 1px dashed var(--line); border-radius: 8px; padding: 60px; text-align: center;">
+          <div style="font-size: 24px; margin-bottom: 8px;">📭</div>
+          <span style="color: var(--ink-faint);">No runs recorded in this scope yet.</span>
+        </div>
       </section>
 
       <!-- ═══ OBSERVABILITY ═══ -->

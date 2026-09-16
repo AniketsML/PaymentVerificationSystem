@@ -178,6 +178,7 @@ class PgLegalLeadLogger:
     def get_lead_journey(self, lead_id: str) -> Dict[str, Any]:
         with pg.pool().connection() as c:
             final = c.execute("SELECT * FROM legal_lead_results WHERE lead_id=%s", (lead_id,)).fetchone()
+            
             events = c.execute(
                 "SELECT id,lead_id,document_id,stage,status,reason,round(ms::numeric,1) as ms,metrics,data,"
                 "ts AT TIME ZONE 'UTC' as ts FROM legal_processing_events WHERE lead_id=%s ORDER BY id ASC",
@@ -186,16 +187,67 @@ class PgLegalLeadLogger:
                              (lead_id,)).fetchall()
             lead_info = c.execute("SELECT * FROM legal_leads WHERE lead_id=%s", (lead_id,)).fetchone()
 
+            ed = (lead_info.get("extracted_data") if (lead_info and isinstance(lead_info.get("extracted_data"), dict)) else {}) or {}
+
+            # Build or enrich final result
+            if not final:
+                final = {
+                    "processing_status": lead_info["status"] if lead_info else "completed",
+                    "raw_extractions": {
+                        "page_extractions": ed.get("_page_extractions", []),
+                        "cited_pages": ed.get("_cited_pages", []),
+                        "telemetry": ed.get("_telemetry", {}),
+                    },
+                    "telemetry": ed.get("_telemetry", {}),
+                    "phase_timings": ed.get("_phase_timings", {}),
+                    "extracted_data": {
+                        "custom_fields": {k: v for k, v in ed.items() if not k.startswith("_")}
+                    },
+                    **{k: v for k, v in ed.items() if not k.startswith("_")}
+                }
+            else:
+                final = dict(final)
+                raw_ex = final.get("raw_extractions")
+                if isinstance(raw_ex, str):
+                    try:
+                        raw_ex = json.loads(raw_ex)
+                    except Exception:
+                        raw_ex = {}
+                elif not isinstance(raw_ex, dict):
+                    raw_ex = {}
+
+                if ed:
+                    if "_page_extractions" in ed:
+                        raw_ex["page_extractions"] = ed["_page_extractions"]
+                    if "_telemetry" in ed:
+                        raw_ex["telemetry"] = ed["_telemetry"]
+                        final["telemetry"] = ed["_telemetry"]
+                    if "_cited_pages" in ed:
+                        raw_ex["cited_pages"] = ed["_cited_pages"]
+                    if "_phase_timings" in ed:
+                        final["phase_timings"] = ed["_phase_timings"]
+                    
+                    if not final.get("extracted_data"):
+                        final["extracted_data"] = {}
+                    final["extracted_data"]["custom_fields"] = {k: v for k, v in ed.items() if not k.startswith("_")}
+                    for k, v in ed.items():
+                        if not k.startswith("_") and k not in final:
+                            final[k] = v
+
+                final["raw_extractions"] = raw_ex
+
         if final:
-            final = dict(final)
-            if final.get("updated_at"):
+            if final.get("updated_at") and hasattr(final["updated_at"], "isoformat"):
                 final["updated_at"] = final["updated_at"].isoformat()
             for fld in ("sanction_amount", "future_principal", "principal_overdue",
                         "interest_overdue", "interest_on_termination", "late_payment_penal",
                         "cheque_bounce_inc_gst", "other_charges_inc_gst", "foreclosure_charges",
                         "litigation_charges", "excess_amount", "tos"):
                 if final.get(fld) is not None:
-                    final[fld] = float(final[fld])
+                    try:
+                        final[fld] = float(final[fld])
+                    except (ValueError, TypeError):
+                        pass
 
         ev_list = []
         for e in events:
@@ -223,12 +275,15 @@ class PgLegalLeadLogger:
                 "documents": doc_list, "journey": ev_list}
 
     def query_leads(self, status: str = "all", q: str = "", limit: int = 300,
-                    scope: str = "real") -> List[Dict[str, Any]]:
+                    scope: str = "real", batch_id: str = None) -> List[Dict[str, Any]]:
         clauses, params = [], []
         if scope == "real":
             clauses.append("l.is_test = false")
         elif scope == "test":
             clauses.append("l.is_test = true")
+        if batch_id:
+            clauses.append("l.batch_id = %s")
+            params.append(batch_id)
         if status and status != "all":
             clauses.append("COALESCE(r.processing_status, l.status, 'pending') = %s")
             params.append(status)
@@ -241,39 +296,54 @@ class PgLegalLeadLogger:
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = f"""SELECT
                     l.lead_id,
-                    COALESCE(r.account_no_lan, l.account_lan, '—') AS account_no_lan,
-                    COALESCE(r.applicant_name, l.lead_name, l.folder_name, '—') AS applicant_name,
-                    r.applicant_address,
-                    r.sanction_amount,
-                    r.tos,
-                    COALESCE(r.property_verification_status, 'pending') AS property_verification_status,
-                    COALESCE(r.processing_status, l.status, 'pending') AS processing_status,
-                    COALESCE(r.confidence_score, 0.0) AS confidence_score,
-                    r.summary,
-                    r.flags,
-                    l.is_test,
-                    COALESCE(r.updated_at, l.updated_at, l.created_at) AS updated_at
+                    l.folder_name,
+                    l.batch_id,
+                    COALESCE(r.processing_status, l.status, 'pending') as processing_status,
+                    l.extracted_data,
+                    l.total_documents,
+                    l.processed_documents,
+                    l.failed_documents,
+                    l.created_at,
+                    l.updated_at
                 FROM legal_leads l
                 LEFT JOIN legal_lead_results r ON l.lead_id = r.lead_id
                 {where}
-                ORDER BY COALESCE(r.updated_at, l.updated_at, l.created_at) DESC
-                LIMIT %s"""
-        params.append(limit)
+                ORDER BY l.updated_at DESC
+                LIMIT {limit}
+        """
         with pg.pool().connection() as c:
             rows = c.execute(sql, params).fetchall()
-        res = []
-        for r in rows:
-            d = dict(r)
-            if d.get("updated_at"):
-                d["updated_at"] = d["updated_at"].isoformat()
-            for fld in ("sanction_amount", "tos"):
-                if d.get(fld) is not None:
-                    d[fld] = float(d[fld])
-            res.append(d)
-        return res
+            ret = []
+            for r in rows:
+                d = dict(r)
+                for f in ("created_at", "updated_at"):
+                    if d.get(f):
+                        d[f] = d[f].isoformat()
+                
+                # Flatten extracted_data into root level, keeping internal fields private
+                extracted = d.pop("extracted_data") or {}
+                if isinstance(extracted, str):
+                    try:
+                        extracted = json.loads(extracted)
+                    except Exception:
+                        extracted = {}
 
-    def status_counts(self, scope: str = "real") -> Dict[str, int]:
-        where = "WHERE l.is_test=false" if scope == "real" else ("WHERE l.is_test=true" if scope == "test" else "")
+                for key, val in extracted.items():
+                    if key not in d and not key.startswith("_"):
+                        d[key] = val
+                        
+                if "_telemetry" in extracted and "telemetry" not in d:
+                    d["telemetry"] = extracted["_telemetry"]
+
+                ret.append(d)
+            return ret
+
+    def status_counts(self, scope: str = "real", batch_id: str = None) -> Dict[str, int]:
+        clauses = []
+        if scope == "real": clauses.append("l.is_test=false")
+        elif scope == "test": clauses.append("l.is_test=true")
+        if batch_id: clauses.append(f"l.batch_id='{batch_id}'")
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
         with pg.pool().connection() as c:
             rows = c.execute(f"""
                 SELECT COALESCE(r.processing_status, l.status, 'pending') as st, count(*) as n
@@ -299,8 +369,12 @@ class PgLegalLeadLogger:
         counts["total_documents"] = doc_total["cnt"] if doc_total else 0
         return counts
 
-    def document_type_counts(self, scope: str = "real") -> List[Dict[str, Any]]:
-        where = "WHERE l.is_test=false" if scope == "real" else ("WHERE l.is_test=true" if scope == "test" else "")
+    def document_type_counts(self, scope: str = "real", batch_id: str = None) -> List[Dict[str, Any]]:
+        clauses = []
+        if scope == "real": clauses.append("l.is_test=false")
+        elif scope == "test": clauses.append("l.is_test=true")
+        if batch_id: clauses.append(f"l.batch_id='{batch_id}'")
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
         with pg.pool().connection() as c:
             rows = c.execute(
                 f"SELECT COALESCE(NULLIF(d.document_type,''),'unclassified') as doc_type,count(*) as n "

@@ -174,6 +174,12 @@ CREATE TABLE IF NOT EXISTS legal_ocr_cache (
     hits        INT NOT NULL DEFAULT 0,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS legal_prompt_history (
+    id          SERIAL PRIMARY KEY,
+    prompt      TEXT NOT NULL UNIQUE,
+    last_used   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 

@@ -58,6 +58,17 @@ def legal_index(lead_id=None):
 def api_legal_upload_folder():
     is_test = request.form.get("test") in ("on", "true", "1")
     extraction_prompt = request.form.get("extraction_prompt", "").strip()
+    if extraction_prompt:
+        try:
+            with pg.pool().connection() as c:
+                c.execute("""
+                    INSERT INTO legal_prompt_history (prompt, last_used)
+                    VALUES (%s, now())
+                    ON CONFLICT (prompt) DO UPDATE SET last_used = EXCLUDED.last_used;
+                """, (extraction_prompt,))
+        except Exception:
+            pass
+
     batch_folder_name = f"upload_batch_{int(time.time())}"
     target_extract_dir = os.path.join(settings.UPLOAD_DIR, "legal_batches", batch_folder_name)
     os.makedirs(target_extract_dir, exist_ok=True)
@@ -168,9 +179,10 @@ def api_legal_batch(batch_id):
 @legal_bp.route("/api/legal/stats")
 def api_legal_stats():
     scope = request.args.get("scope", "real")
+    batch_id = request.args.get("batch_id")
     return jsonify({
-        "counts": logger.status_counts(scope=scope),
-        "document_types": logger.document_type_counts(scope=scope),
+        "counts": logger.status_counts(scope=scope, batch_id=batch_id),
+        "document_types": logger.document_type_counts(scope=scope, batch_id=batch_id),
         "scope": scope,
         "model": _model_info(),
         "workspace": "legal",
@@ -182,10 +194,120 @@ def api_legal_leads():
     status = request.args.get("status", "all")
     q = request.args.get("q", "").strip()
     scope = request.args.get("scope", "real")
+    batch_id = request.args.get("batch_id")
     limit = min(int(request.args.get("limit", 300)), 2000)
-    rows = logger.query_leads(status=status, q=q, limit=limit, scope=scope)
+    # When batch_id is explicitly passed, do not restrict by scope
+    if batch_id:
+        scope = "all"
+    rows = logger.query_leads(status=status, q=q, limit=limit, scope=scope, batch_id=batch_id)
     return jsonify(rows)
 
+
+@legal_bp.route("/api/legal/runs")
+def api_legal_runs():
+    """Fetch history of distinct runs (batches) and their prompts."""
+    scope = request.args.get("scope")
+    where_sql = ""
+    if scope == "test":
+        where_sql = "WHERE is_test = true"
+    elif scope == "real":
+        where_sql = "WHERE is_test = false"
+
+    try:
+        with pg.pool().connection() as c:
+            runs = c.execute(f"""
+                SELECT 
+                    batch_id, 
+                    MAX(folder_name) as run_name, 
+                    MAX(extraction_prompt) as prompt,
+                    MIN(created_at) as started_at,
+                    COUNT(lead_id) as total_leads,
+                    BOOL_OR(is_test) as is_test,
+                    SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
+                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
+                    SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) as processing,
+                    SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending
+                FROM legal_leads
+                {where_sql}
+                GROUP BY batch_id
+                ORDER BY started_at DESC
+                LIMIT 50
+            """).fetchall()
+
+            # If no runs found in requested scope, fallback to returning all available runs
+            if not runs and where_sql:
+                runs = c.execute("""
+                    SELECT 
+                        batch_id, 
+                        MAX(folder_name) as run_name, 
+                        MAX(extraction_prompt) as prompt,
+                        MIN(created_at) as started_at,
+                        COUNT(lead_id) as total_leads,
+                        BOOL_OR(is_test) as is_test,
+                        SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
+                        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
+                        SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) as processing,
+                        SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending
+                    FROM legal_leads
+                    GROUP BY batch_id
+                    ORDER BY started_at DESC
+                    LIMIT 50
+                """).fetchall()
+            
+            # Format results
+            result = []
+            for r in runs:
+                status = "completed"
+                if (r["processing"] or 0) > 0 or (r["pending"] or 0) > 0:
+                    status = "processing"
+                elif (r["failed"] or 0) > 0 and (r["completed"] or 0) == 0:
+                    status = "failed"
+                elif (r["failed"] or 0) > 0:
+                    status = "partial"
+                
+                result.append({
+                    "run_id": r["batch_id"],
+                    "run_name": r["run_name"] or "Untitled Run",
+                    "prompt": r["prompt"] or "",
+                    "started_at": r["started_at"].isoformat() if r["started_at"] else None,
+                    "leads": r["total_leads"],
+                    "status": status,
+                    "is_test": bool(r["is_test"])
+                })
+            return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@legal_bp.route("/api/legal/prompt_history")
+def api_legal_prompt_history():
+    """Fetch top 10 recent distinct prompts used in runs, preserving across test workspace resets."""
+    try:
+        with pg.pool().connection() as c:
+            # Sync from legal_leads in case any lead had a prompt set
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS legal_prompt_history (
+                    id SERIAL PRIMARY KEY,
+                    prompt TEXT NOT NULL UNIQUE,
+                    last_used TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                INSERT INTO legal_prompt_history (prompt, last_used)
+                SELECT extraction_prompt, MAX(created_at)
+                FROM legal_leads
+                WHERE extraction_prompt IS NOT NULL AND trim(extraction_prompt) != ''
+                GROUP BY extraction_prompt
+                ON CONFLICT (prompt) DO UPDATE SET last_used = GREATEST(legal_prompt_history.last_used, EXCLUDED.last_used);
+            """)
+            prompts = c.execute("""
+                SELECT last_used, prompt
+                FROM legal_prompt_history
+                WHERE prompt IS NOT NULL AND trim(prompt) != ''
+                ORDER BY last_used DESC
+                LIMIT 10
+            """).fetchall()
+            return jsonify([{"prompt": p["prompt"], "last_used": p["last_used"].isoformat() if p["last_used"] else None} for p in prompts])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @legal_bp.route("/api/legal/lead/<lead_id>")
 def api_legal_lead_detail(lead_id):

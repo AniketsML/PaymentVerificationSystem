@@ -1,11 +1,12 @@
 """
-Triple-route OCR engine for SARFAESI document extraction.
+OCR / VLM extraction engine for the Legal Pipeline.
 
-Updated to 8-Stage CV Pipeline:
-Stage 1: Triage (CNN/heuristic) -> printed / handwritten / blank
-Stage 2A: Printed path (RapidOCR) -> check confidence
-Stage 2B: Handwritten path (TrOCR)
-Stage 3: Dual extraction & comparison (VLM)
+Handles:
+  - Page number stamping on PDFs before sending to the VLM
+  - Rendering PDF pages as images
+  - Calling Medha VLM API (primary) with Gemini fallback
+  - Language detection for routing Indic scripts to Gemini
+  - Extraction caching via legal_ocr_cache table
 """
 from __future__ import annotations
 
@@ -13,102 +14,42 @@ import base64
 import hashlib
 import io
 import json
+import os
 import re
 import sys
-import threading
+import tempfile
 import time
-from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 
-from PIL import Image, ImageStat
-from psycopg.types.json import Jsonb
+from PIL import Image
 
-from config import settings
-from db import pg
-from workspaces.legal.circuit_breaker import CircuitBreaker
-from workspaces.legal.prompts import PROMPT_VERSION
-from workspaces.legal.models import ExtractionSource, PageType
 
-# Module-level circuit breaker instance
-_vlm_breaker = CircuitBreaker(
-    name="legal_vlm",
-    threshold=settings.VLM_BREAKER_THRESHOLD,
-    cooldown_seconds=settings.VLM_BREAKER_COOLDOWN,
-    max_wait=settings.VLM_BREAKER_MAX_WAIT,
-)
-
-_rapid_engine = None
-_rapid_available: Optional[bool] = None
-
-def _get_rapid():
-    global _rapid_engine, _rapid_available
-    if _rapid_available is not None:
-        return _rapid_engine
-    try:
-        from rapidocr_onnxruntime import RapidOCR
-        _rapid_engine = RapidOCR()
-        _rapid_available = True
-    except ImportError:
-        _rapid_available = False
-    return _rapid_engine
-
-def get_breaker_status() -> dict:
-    return _vlm_breaker.status()
-
-class LegalOCRClient(ABC):
-    @abstractmethod
-    def classify_document(self, image: Optional[Image.Image], filename: str = "") -> Dict[str, Any]: ...
-    @abstractmethod
-    def extract_data(self, image: Optional[Image.Image], document_type: str, prompt: str = "", row: Dict[str, Any] = None, extraction_plan: dict = None) -> Dict[str, Any]: ...
-    def extract_raw_text(self, image: Optional[Image.Image]) -> str: ...
+# ── Helpers ────────────────────────────────────────────────────────────────
 
 def _image_to_bytes(image: Image.Image, fmt: str = "JPEG") -> bytes:
+    """Convert a PIL Image to bytes."""
     buf = io.BytesIO()
     if image.mode in ("RGBA", "P"):
         image = image.convert("RGB")
     image.save(buf, format=fmt, quality=90)
     return buf.getvalue()
 
-def _cache_key(image_bytes: bytes, model: str, prompt_hint: str) -> str:
-    h = hashlib.sha256(image_bytes).hexdigest()[:16]
-    return f"{h}:{model}:{PROMPT_VERSION}:{prompt_hint[:20]}"
-
-def _cache_get(key: str) -> Optional[Dict]:
-    try:
-        with pg.pool().connection() as c:
-            r = c.execute(
-                "UPDATE legal_ocr_cache SET hits=hits+1 WHERE cache_key=%s RETURNING extraction",
-                (key,)
-            ).fetchone()
-            if r:
-                return r["extraction"]
-    except Exception:
-        pass
-    return None
-
-def _cache_set(key: str, extraction: dict, model: str, route: str):
-    try:
-        with pg.pool().connection() as c:
-            c.execute(
-                "INSERT INTO legal_ocr_cache(cache_key,extraction,model,ocr_route) "
-                "VALUES(%s,%s,%s,%s) ON CONFLICT(cache_key) DO NOTHING",
-                (key, Jsonb(extraction), model, route)
-            )
-    except Exception:
-        pass
 
 def _parse_json(raw: str) -> Dict[str, Any]:
+    """Robustly parse JSON from LLM output (handles code fences, embedded text)."""
     raw = raw.strip()
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
+    # Try markdown code fences
     m = re.search(r"```(?:json)?\s*\n?(\{.*?\})\s*```", raw, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(1))
         except json.JSONDecodeError:
             pass
+    # Try finding raw JSON object
     start, end = raw.find("{"), raw.rfind("}")
     if start != -1 and end > start:
         try:
@@ -117,378 +58,324 @@ def _parse_json(raw: str) -> Dict[str, Any]:
             pass
     return {"_parse_error": True, "_raw_text": raw[:500]}
 
-# Stage 1: Triage (CNN/heuristic)
-def classify_page_type(image: Image.Image) -> PageType:
-    """Stage 1: Classify image as PRINTED, HANDWRITTEN, or BLANK."""
-    if not image:
-        return PageType.BLANK
-        
-    # Check if blank using simple heuristic (standard deviation of grayscale)
-    gray = image.convert("L")
-    stat = ImageStat.Stat(gray)
-    if stat.stddev[0] < 5.0: # Very low variance means mostly solid color (blank)
-        return PageType.BLANK
-        
-    # Heuristic for MobileNetV3 (Simulated for now, as loading the actual torch model on every frame is heavy unless cached)
-    # A true implementation would pass `gray` into a MobileNetV3-Small classifier.
-    # We will rely on RapidOCR's confidence later if we guess wrong.
-    # For now, default to PRINTED unless it's a small crop.
-    return PageType.PRINTED
 
+# ── PDF Utilities ──────────────────────────────────────────────────────────
 
-def rapidocr_extract(image: Image.Image) -> str:
-    res = rapidocr_detect_and_recognize(image)
-    return res.get("text", "")
+def print_page_numbers_on_pdf(file_path: str) -> str:
+    """
+    Stamp page numbers (PAGE 1, PAGE 2, ...) on each page of a PDF.
 
-def rapidocr_detect_and_recognize(image: Image.Image) -> Dict[str, Any]:
-    """Stage 2A: Printed path using RapidOCR (with per-word/line confidence)."""
-    engine = _get_rapid()
-    if not engine or image is None:
-        return {"text": "", "lines": [], "confidence": 0.0, "uncertain": True, "uncertain_crops": 0, "low_conf_lines": []}
+    Creates a temporary copy with page numbers stamped in red.
+    Returns the path to the stamped temp file.
+    """
     try:
-        import numpy as np
-        img_array = np.array(image.convert("RGB"))
-        result, _ = engine(img_array)
-        if not result:
-            return {"text": "", "lines": [], "confidence": 0.0, "uncertain": True, "uncertain_crops": 0, "low_conf_lines": []}
-
-        lines = []
-        scores = []
-        low_conf = []
-
-        for item in result:
-            if not item or len(item) < 3:
-                continue
-            box, txt, score = item[0], item[1], float(item[2])
-            txt = txt.strip()
-            if not txt:
-                continue
-            lines.append(txt)
-            scores.append(score)
-            if score < 0.85:
-                low_conf.append({"text": txt, "score": round(score, 3)})
-
-        full_text = "\n".join(lines)
-        avg_score = float(np.mean(scores)) if scores else 0.0
-
-        is_uncertain = (avg_score < 0.90) or (len(low_conf) > max(1, int(len(lines) * 0.10))) or (len(full_text) < 20)
-
-        return {
-            "text": full_text,
-            "lines": lines,
-            "confidence": round(avg_score, 3),
-            "uncertain": is_uncertain,
-            "uncertain_crops": len(low_conf),
-            "low_conf_lines": [lc["text"] for lc in low_conf[:8]],
-            "total_lines": len(lines)
-        }
-    except Exception as e:
-        sys.stderr.write(f"[legal_ocr] RapidOCR DET/REC error: {e}\n")
-        return {"text": "", "lines": [], "confidence": 0.0, "uncertain": True, "uncertain_crops": 0, "low_conf_lines": []}
-
-def trocr_extract(image: Image.Image) -> Dict[str, Any]:
-    """Stage 2B: Handwritten Path using TrOCR."""
-    try:
-        from transformers import TrOCRProcessor, VisionEncoderDecoderModel
-        import torch
+        import fitz
     except ImportError:
-        sys.stderr.write("[trocr] TrOCR dependencies not installed. Falling back.\n")
-        return {"text": "", "route": "trocr_failed", "lines": []}
+        sys.stderr.write("[ocr] PyMuPDF (fitz) not installed, skipping page stamping\n")
+        return file_path
 
     try:
-        global _trocr_processor, _trocr_model
-        if '_trocr_processor' not in globals():
-            sys.stderr.write("[trocr] Loading TrOCR model (QuickHawk/trocr-indic)...\n")
-            _trocr_processor = TrOCRProcessor.from_pretrained("QuickHawk/trocr-indic")
-            _trocr_model = VisionEncoderDecoderModel.from_pretrained("QuickHawk/trocr-indic")
-        
-        pixel_values = _trocr_processor(image.convert("RGB"), return_tensors="pt").pixel_values
-        generated_ids = _trocr_model.generate(pixel_values)
-        generated_text = _trocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        return {
-            "text": generated_text,
-            "route": "trocr",
-            "lines": [generated_text]
-        }
-    except Exception as e:
-        sys.stderr.write(f"[trocr] TrOCR failed: {e}\n")
-        return {"text": "", "route": "trocr_failed", "lines": []}
-_prompt_plan_cache = {}
+        doc = fitz.open(file_path)
+        for page_idx in range(doc.page_count):
+            page = doc[page_idx]
+            try:
+                page.insert_text(
+                    fitz.Point(10, 50),
+                    f"PAGE {page_idx + 1}",
+                    fontsize=48,
+                    color=(1, 0, 0),
+                )
+            except Exception:
+                pass
 
-class SARFAESIDocumentOCR(LegalOCRClient):
-    """Production OCR client: Triage -> Printed/Handwritten -> VLM Dual Extraction."""
+        # Save to temp file
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".pdf", prefix="stamped_")
+        os.close(temp_fd)
+        doc.save(temp_path)
+        doc.close()
+        return temp_path
+    except Exception as e:
+        sys.stderr.write(f"[ocr] page stamp error: {e}\n")
+        return file_path
+
+
+def render_pdf_page(file_path: str, page_idx: int, dpi: int = 200) -> Optional[Image.Image]:
+    """Render a single PDF page as a PIL Image at the given DPI."""
+    try:
+        import fitz
+        doc = fitz.open(file_path)
+        if page_idx < 0 or page_idx >= doc.page_count:
+            doc.close()
+            return None
+        page = doc[page_idx]
+        mat = fitz.Matrix(dpi / 72, dpi / 72)
+        pix = page.get_pixmap(matrix=mat)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        doc.close()
+        return img
+    except ImportError:
+        sys.stderr.write("[ocr] PyMuPDF (fitz) not installed\n")
+        return None
+    except Exception as e:
+        sys.stderr.write(f"[ocr] PDF page render error: {e}\n")
+        return None
+
+
+# ── Language Detection ─────────────────────────────────────────────────────
+
+_INDIC_RANGES = [
+    (0x0900, 0x097F),  # Devanagari (Hindi, Marathi, Sanskrit)
+    (0x0980, 0x09FF),  # Bengali
+    (0x0A00, 0x0A7F),  # Gurmukhi (Punjabi)
+    (0x0A80, 0x0AFF),  # Gujarati
+    (0x0B00, 0x0B7F),  # Oriya
+    (0x0B80, 0x0BFF),  # Tamil
+    (0x0C00, 0x0C7F),  # Telugu
+    (0x0C80, 0x0CFF),  # Kannada
+    (0x0D00, 0x0D7F),  # Malayalam
+]
+
+
+def detect_language(text: str) -> str:
+    """
+    Simple heuristic: check if text contains significant Indic script characters.
+
+    Returns 'indic' if more than 5% of characters are Indic, else 'english'.
+    """
+    if not text:
+        return "english"
+    indic_count = 0
+    total = 0
+    for ch in text:
+        cp = ord(ch)
+        if cp > 127:
+            total += 1
+            if any(lo <= cp <= hi for lo, hi in _INDIC_RANGES):
+                indic_count += 1
+    if indic_count > 0 and (indic_count / max(len(text), 1)) > 0.05:
+        return "indic"
+    return "english"
+
+
+# ── Cache Layer ────────────────────────────────────────────────────────────
+
+# Cache layer removed per user request
+
+
+# ── Extraction Prompt Builder ──────────────────────────────────────────────
+
+def _build_extraction_prompt(
+    document_type: str,
+    fields_to_extract: List[str],
+    page_number: int,
+    user_prompt: str = "",
+    heading_hint: str = "",
+) -> str:
+    """Build the prompt that instructs the VLM to extract specific fields."""
+    fields_str = ", ".join(fields_to_extract)
+
+    prompt = (
+        f"You are a legal document extraction specialist for SARFAESI loan dossiers.\n"
+        f"This is page {page_number} of a '{document_type}' document.\n\n"
+        f"Extract the following fields from this document image:\n{fields_str}\n\n"
+        f"IMPORTANT RULES:\n"
+        f"1. Return a JSON object with keys EXACTLY matching the field names listed above.\n"
+        f"2. For currency amounts, return the numeric value (e.g. 4500000, not '₹45,00,000').\n"
+        f"3. For dates, return in DD/MM/YYYY format where possible.\n"
+        f"4. For names and addresses, preserve the exact text as written in the document.\n"
+        f"5. If a field is not found on this page, set its value to null.\n"
+        f"6. You MUST extract 'account_no_lan' (Loan Account Number) if present.\n"
+        f"7. You MUST extract 'applicant_name' (Primary Borrower name) if present.\n"
+    )
+
+    if heading_hint:
+        prompt += f"8. CRITICAL CONSTRAINT: You must ONLY extract these fields from the section under the heading '{heading_hint}'. Ignore any matching information found elsewhere on the page.\n"
+
+    if user_prompt:
+        prompt += f"\nAdditional user instructions: {user_prompt}\n"
+
+    prompt += "\nReturn ONLY the JSON object, no explanations."
+    return prompt
+
+
+# ── VLM Client ─────────────────────────────────────────────────────────────
+
+class LegalVLMClient:
+    """
+    VLM extraction client for legal documents.
+
+    Routes to Medha API (primary) or Gemini (fallback / Indic script).
+    """
 
     def __init__(self):
         from config import runtime
         self._cfg = runtime.model_config()
 
-    def analyze_prompt_intent(self, prompt: str) -> Dict[str, Any]:
-        """Stage 0: Use text-LLM to parse the prompt into an ExtractionPlan (Cached per batch)."""
-        if not prompt or len(prompt.strip()) < 5:
-            return {"target_docs": [], "target_pages": [], "keywords": []}
+    def extract_from_images(
+        self,
+        images: List[Image.Image],
+        document_type: str,
+        fields_to_extract: List[str] = None,
+        page_numbers: List[int] = None,
+        extraction_prompt: str = "",
+        heading_hint: str = "",
+        keywords: List[str] = None,
+        headings: List[str] = None,
+        total_pages: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Extract structured data from multiple document page images in a single call.
+        """
+        if not images:
+            return {}
             
-        if prompt in _prompt_plan_cache:
-            return _prompt_plan_cache[prompt]
-            
-        sys_prompt = (
-            "You are a pipeline planner. Analyze the user's extraction prompt and output a strict JSON object:\n"
-            "- 'target_docs': list of relevant document types (e.g. ['sanction_letter', 'loan_agreement', 'modt']). Empty if not specified.\n"
-            "- 'target_pages': list of specific page numbers (0-indexed) if mentioned. Empty if not specified.\n"
-            "- 'keywords': list of 10-15 highly relevant synonyms, field names, or related words that MUST appear on a page for it to contain this data. (lowercase).\n"
-            f"User Prompt: {prompt}\n"
-            "Return ONLY valid JSON."
-        )
-        
-        parsed, _ = self._call_vlm(sys_prompt, image=None, cache_hint="prompt_planner")
-        
-        plan = {"target_docs": [], "target_pages": [], "keywords": []}
-        if isinstance(parsed, dict):
-            plan["target_docs"] = [str(d).lower() for d in parsed.get("target_docs", [])]
-            plan["target_pages"] = [int(p) for p in parsed.get("target_pages", []) if str(p).isdigit()]
-            plan["keywords"] = [str(k).lower() for k in parsed.get("keywords", [])]
-            
-        _prompt_plan_cache[prompt] = plan
-        return plan
-
-    def _call_vlm(self, prompt: str, image: Optional[Image.Image],
-                  cache_hint: str = "") -> Tuple[Dict[str, Any], str]:
-        """Call primary VLM (Medha), fallback to Gemini on circuit break."""
-        img_bytes = _image_to_bytes(image) if image else b""
+        imgs_bytes = [_image_to_bytes(img) for img in images]
         cfg = self._cfg
+        
+        pages_str = ", ".join(str(p) for p in (page_numbers or [1]))
+        page_info = f"Pages {pages_str}" if not total_pages else f"Pages {pages_str} of {total_pages}"
+        
+        kw_parts = []
+        if heading_hint:
+            kw_parts.append(f"Target Heading: {heading_hint}")
+        if headings:
+            kw_parts.append(f"Headings: {', '.join(headings)}")
+        if keywords:
+            kw_parts.append(f"Key Terms/Keywords: {', '.join(keywords)}")
+        kw_clause = f"\nFocus Areas: {'; '.join(kw_parts)}\n" if kw_parts else ""
 
-        if img_bytes:
-            ck = _cache_key(img_bytes, cfg["model"], cache_hint)
-            cached = _cache_get(ck)
-            if cached:
-                cached["_meta"] = {"ms": 0, "model": cfg["model"], "cached": True, "route": "cache"}
-                return cached, "cache"
+        prompt = (
+            f"You are a professional legal document extraction AI.\n\n"
+            f"This is the document being read: {document_type} ({page_info}).{kw_clause}\n\n"
+            f"USER EXTRACTION INSTRUCTIONS:\n"
+            f"\"{extraction_prompt}\"\n\n"
+            f"TASK:\n"
+            f"Visually inspect the provided document page image(s) in this batch and extract all information requested in the USER EXTRACTION INSTRUCTIONS.\n"
+            f"Each image is clearly stamped with its exact page number [PAGE X].\n\n"
+            f"RULES:\n"
+            f"1. Return ONLY a valid JSON object. No preamble, no markdown fences, no conversational text.\n"
+            f"2. Use clean, descriptive flat snake_case keys at the root level.\n"
+            f"   - For primary borrower: 'borrower_name', 'borrower_address'.\n"
+            f"   - For co-borrowers: 'co_borrower_1_name', 'co_borrower_1_address', 'co_borrower_2_name', 'co_borrower_2_address', etc.\n"
+            f"   - CRITICAL: Return flat key-value pairs. DO NOT return nested objects (e.g. no 'borrower': {{'name': ...}}) and DO NOT return arrays of objects.\n"
+            f"3. PROVENANCE & PAGE CITATION (MANDATORY):\n"
+            f"   In your JSON response, provide:\n"
+            f"   - '_cited_pages': a JSON list of integer page numbers where the extracted data was found, e.g. [1, 2]. If nothing found, return [].\n"
+            f"   - '_field_page_sources': a JSON object mapping each extracted field name to the page number where it was found, e.g. {{\"borrower_name\": 1, \"borrower_address\": 1, \"co_borrower_1_name\": 2}}.\n"
+            f"4. For names and addresses, preserve the exact text as written or printed in the document.\n"
+            f"5. For numbers or monetary amounts, extract the exact figures.\n"
+            f"6. If the requested information is not found in this batch of pages, return an empty JSON object {{}}.\n"
+            f"\nReturn ONLY the JSON object."
+        )
 
-        if _vlm_breaker.allow_request():
+        parsed = None
+        route = ""
+
+        try:
+            parsed, route = self._call_medha(prompt, imgs_bytes)
+        except Exception as e:
+            sys.stderr.write(f"[ocr] Medha VLM failed: {e}\n")
+
+        if parsed is None or parsed.get("_parse_error"):
             try:
-                parsed, route = self._call_medha(prompt, image, img_bytes, cfg)
-                _vlm_breaker.record_success()
-                if img_bytes:
-                    _cache_set(_cache_key(img_bytes, cfg["model"], cache_hint), parsed, cfg["model"], route)
-                return parsed, route
+                parsed, route = self._call_gemini(prompt, imgs_bytes)
             except Exception as e:
-                _vlm_breaker.record_failure(str(e))
-                sys.stderr.write(f"[legal_ocr] Medha VLM failed: {e}\n")
+                sys.stderr.write(f"[ocr] Gemini fallback also failed: {e}\n")
+                parsed = {"_error": str(e)}
+                route = "failed"
 
-        return self._call_gemini_fallback(prompt, img_bytes, cache_hint)
+        parsed["_ocr_route"] = route
+        return parsed
 
-    def _call_medha(self, prompt: str, image: Optional[Image.Image],
-                    img_bytes: bytes, cfg: dict) -> Tuple[Dict[str, Any], str]:
+    def _call_medha(self, prompt: str, images_bytes: List[bytes]) -> Tuple[Dict[str, Any], str]:
         import httpx
-        content_parts = []
-        if image and img_bytes:
-            b64 = base64.b64encode(img_bytes).decode()
-            content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-        content_parts.append({"type": "text", "text": prompt})
 
-        t0 = time.perf_counter()
-        body = {
-            "model": cfg["model"],
-            "messages": [{"role": "user", "content": content_parts}],
-            "max_tokens": cfg.get("max_tokens", 4096),
-            "temperature": cfg.get("temperature", 0.1),
-        }
-        headers = {"Content-Type": "application/json"}
-        api_key = cfg.get("api_key") or getattr(settings, "VISION_API_KEY", "")
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        cfg = self._cfg
+        content_parts = []
+        for b in images_bytes:
+            b64 = base64.b64encode(b).decode()
+            content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+            
+        content_parts.append({"type": "text", "text": prompt})
 
         url = cfg["url"]
         if url.endswith("/v1") or url.endswith("/v1/"):
             url = url.rstrip("/") + "/chat/completions"
-            
-        resp = httpx.post(
-            url, json=body,
-            headers=headers,
-            timeout=120.0,
-        )
+        elif not url.endswith("/chat/completions"):
+            url = url.rstrip("/") + "/chat/completions"
+
+        body = {
+            "model": cfg["model"],
+            "messages": [{"role": "user", "content": content_parts}],
+            "max_tokens": 4096,
+            "temperature": 0.1,
+        }
+        headers = {"Content-Type": "application/json"}
+        api_key = cfg.get("key", "")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        t0 = time.perf_counter()
+        resp = httpx.post(url, json=body, headers=headers, timeout=120.0)
         resp.raise_for_status()
         ms = round((time.perf_counter() - t0) * 1000, 1)
-        raw = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        resp_data = resp.json()
+        raw = resp_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        usage = resp_data.get("usage", {})
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+
         parsed = _parse_json(raw)
-        parsed["_meta"] = {"ms": ms, "model": cfg["model"], "cached": False, "route": "medha_vlm"}
+        parsed["_meta"] = {
+            "ms": ms,
+            "model": cfg.get("model", "medha-vlm"),
+            "route": "medha_vlm",
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
         return parsed, "medha_vlm"
 
-    def _call_gemini_fallback(self, prompt: str, img_bytes: bytes,
-                              cache_hint: str) -> Tuple[Dict[str, Any], str]:
-        from workspaces.legal.gemini_client import call_gemini
-        parsed, meta = call_gemini(prompt, image_bytes=img_bytes if img_bytes else None)
-        if not meta.get("error") and img_bytes:
-            _cache_set(_cache_key(img_bytes, meta.get("model", "gemini"), cache_hint),
-                       parsed, meta.get("model", "gemini"), "gemini_fallback")
-        parsed["_meta"] = meta
+    def _call_gemini(self, prompt: str, images_bytes: List[bytes]) -> Tuple[Dict[str, Any], str]:
+        import google.generativeai as genai
+        from config import settings
+
+        if not settings.GEMINI_API_KEY:
+            raise RuntimeError("No GEMINI_API_KEY configured")
+
+        genai.configure(api_key=settings.GEMINI_API_KEY)
+        model = genai.GenerativeModel(settings.GEMINI_MODEL)
+
+        contents = [prompt]
+        for b in images_bytes:
+            contents.append({"mime_type": "image/jpeg", "data": b})
+
+        t0 = time.perf_counter()
+        response = model.generate_content(contents)
+        ms = round((time.perf_counter() - t0) * 1000, 1)
+
+        raw = response.text
+        usage_meta = getattr(response, "usage_metadata", None)
+        prompt_tokens = getattr(usage_meta, "prompt_token_count", 0) if usage_meta else 0
+        completion_tokens = getattr(usage_meta, "candidates_token_count", 0) if usage_meta else 0
+        total_tokens = getattr(usage_meta, "total_token_count", 0) if usage_meta else (prompt_tokens + completion_tokens)
+
+        parsed = _parse_json(raw)
+        parsed["_meta"] = {
+            "ms": ms,
+            "model": settings.GEMINI_MODEL,
+            "route": "gemini_fallback",
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
         return parsed, "gemini_fallback"
 
-    def classify_document(self, image: Optional[Image.Image], filename: str = "") -> Dict[str, Any]:
-        from workspaces.legal.prompts import SARFAESI_CLASSIFY_PROMPT
-        prompt = SARFAESI_CLASSIFY_PROMPT
-        if filename:
-            prompt += f"\n\nFilename hint: {filename}"
-        parsed, route = self._call_vlm(prompt, image, cache_hint="classify")
-        parsed["_ocr_route"] = route
-        return parsed
 
-    def extract_raw_text(self, image: Optional[Image.Image]) -> str:
-        if image is None: return ""
-        
-        # Stage 1: Triage
-        page_type = classify_page_type(image)
-        
-        if page_type == PageType.BLANK:
-            return ""
-            
-        if page_type == PageType.HANDWRITTEN:
-            # Stage 2B
-            tr_res = trocr_extract(image)
-            return tr_res.get("text", "")
-            
-        # Stage 2A
-        res = rapidocr_detect_and_recognize(image)
-        if res.get("uncertain"):
-            # Handwritten fallback inside printed doc
-            tr_res = trocr_extract(image)
-            return f"{res.get('text', '')}\n{tr_res.get('text', '')}"
-            
-        return res.get("text", "")
+# ── Breaker status stub (for metrics.py compatibility) ─────────────────────
 
-    def extract_data(self, image: Optional[Image.Image], document_type: str,
-                     prompt: str = "", row: Dict[str, Any] = None, extraction_plan: dict = None) -> Dict[str, Any]:
-        """Runs the document extraction phase for a single page."""
-        if not prompt:
-            prompt = self._get_prompt_for_type(document_type)
-
-        schema_instruction = (
-            "\n\nIMPORTANT: You must return the extracted data as a JSON object. "
-            "You MUST extract the Loan Account Number and map it to the exact key 'account_no_lan'. "
-            "You MUST extract the Primary Borrower's name and map it to the exact key 'applicant_name'. "
-            "If they are not found, return null for those keys."
-        )
-        if schema_instruction not in prompt:
-            prompt += schema_instruction
-
-        # Stage 1: Triage
-        page_type = classify_page_type(image)
-        if page_type == PageType.BLANK:
-            return {"_status": "blank_discarded"}
-            
-        raw_ocr_text = ""
-        ocr_conf = 0.0
-        is_uncertain = False
-        low_conf_lines = []
-        route_used = ""
-
-        if page_type == PageType.HANDWRITTEN:
-            # Stage 2B: Handwritten Path
-            tr_res = trocr_extract(image)
-            raw_ocr_text = tr_res.get("text", "")
-            is_uncertain = True # Handwritten path ALWAYS escalates to Stage 3
-            ocr_conf = 0.5
-            route_used = "trocr"
-        else:
-            # Stage 2A: Printed Path
-            ocr_det = rapidocr_detect_and_recognize(image)
-            raw_ocr_text = ocr_det.get("text", "")
-            ocr_conf = ocr_det.get("confidence", 0.0)
-            is_uncertain = ocr_det.get("uncertain", True)
-            low_conf_lines = ocr_det.get("low_conf_lines", [])
-            route_used = "rapidocr"
-            
-            # Stage 2.5: Boilerplate Filtering (Heuristic)
-            # Use dynamic keywords from the ExtractionPlan (Stage 0).
-            text_lower = raw_ocr_text.lower()
-            plan_keywords = extraction_plan.get("keywords", []) if extraction_plan else []
-            
-            # Only apply strict boilerplate filtering if we successfully generated keywords
-            if len(text_lower) > 200 and plan_keywords:
-                # If the page contains ZERO of the generated synonyms/keywords, drop it.
-                if not any(kw in text_lower for kw in plan_keywords):
-                    return {"_status": "boilerplate_discarded", "_ocr_route": "smart_filter"}
-
-        # Check if we can skip Stage 3 Dual Extraction
-        if (not is_uncertain) and (ocr_conf >= 0.90):
-            # High confidence printed -> send OCR text only to LLM (no VLM).
-            llm_prompt = f"{prompt}\n\nDOCUMENT TEXT:\n{raw_ocr_text}"
-            parsed, route = self._call_vlm(llm_prompt, image=None, cache_hint=f"{document_type}_llm")
-            parsed["_ocr_route"] = "ocr_only_llm"
-            parsed["_confidence"] = ocr_conf
-            parsed["_raw_ocr_text"] = raw_ocr_text
-            parsed["_source"] = ExtractionSource.OCR_ONLY.value
-            return parsed
-
-        # Stage 3: Dual extraction & comparison (low-confidence printed + all handwritten)
-        escalated_prompt = prompt + (
-            "\n\n--- DUAL EXTRACTION RECONCILIATION INSTRUCTIONS ---\n"
-            "You are performing Stage 3 Dual Extraction. You have been provided the original image AND the raw OCR text below. "
-            "You must extract the requested fields independently from the image, compare them against the OCR text, and reconcile any differences. "
-            "If the OCR and your visual extraction AGREE, return the value. "
-            "If they DISAGREE, pick the most visually accurate answer, but YOU MUST FLAG the field by adding it to the 'dual_source_mismatch_fields' array in your JSON output. "
-            "Output Format: { \"extracted_fields\": { ... }, \"dual_source_mismatch_fields\": [\"field_name_1\"] }\n\n"
-        )
-        
-        if raw_ocr_text:
-            escalated_prompt += (
-                f"--- RAW OCR TEXT (Detected via {route_used}) ---\n"
-                f"{raw_ocr_text[:3000]}\n"
-                f"--- END RAW OCR TEXT ---\n"
-            )
-
-        parsed, route = self._call_vlm(escalated_prompt, image, cache_hint=f"{document_type}_dual")
-        
-        # Format the output to support Stage 4 Provenance Tracking
-        final_fields = parsed.get("extracted_fields", parsed)
-        mismatches = parsed.get("dual_source_mismatch_fields", [])
-        
-        candidates = {}
-        for k, v in final_fields.items():
-            if k.startswith("_"): continue
-            source = ExtractionSource.OCR_VLM_AGREED.value
-            mismatch_flag = False
-            if k in mismatches:
-                source = ExtractionSource.OCR_VLM_MISMATCH.value
-                mismatch_flag = True
-                
-            candidates[k] = {
-                "value": v,
-                "source": source,
-                "confidence": 1.0 if not mismatch_flag else 0.5,
-                "mismatch_flag": mismatch_flag,
-                "ocr_value": None,
-            }
-            
-        parsed["_ocr_route"] = route
-        parsed["_vlm_escalated"] = True
-        parsed["_ocr_confidence"] = ocr_conf
-        parsed["_raw_ocr_text"] = raw_ocr_text
-        parsed["_field_candidates"] = candidates
-        return parsed
-
-    def _get_prompt_for_type(self, doc_type: str) -> str:
-        from workspaces.legal import prompts
-        mapping = {
-            "sanction_letter": prompts.SANCTION_LETTER_EXTRACT_PROMPT,
-            "foreclosure_notice": prompts.FCL_EXTRACT_PROMPT,
-            "fcl": prompts.FCL_EXTRACT_PROMPT,
-            "modt": prompts.PROPERTY_EXTRACT_PROMPT.format(document_type="MODT"),
-            "legal_report": prompts.PROPERTY_EXTRACT_PROMPT.format(document_type="Legal/Title Search Report"),
-            "title_search": prompts.PROPERTY_EXTRACT_PROMPT.format(document_type="Legal/Title Search Report"),
-            "collateral_deed": prompts.PROPERTY_EXTRACT_PROMPT.format(document_type="Collateral Deed / Title Deed"),
-            "loan_agreement": prompts.LOAN_AGREEMENT_SCHEDULE_PROMPT,
-        }
-        return mapping.get(doc_type, prompts.DOCUMENT_EXTRACT_PROMPT.format(document_type=doc_type))
-
-
-class PrecomputedLegalOCR(LegalOCRClient):
-    def classify_document(self, image: Optional[Image.Image], filename: str = "") -> Dict[str, Any]:
-        return {"document_type": "other", "confidence": 0.85, "_ocr_route": "precomputed"}
-
-    def extract_data(self, image: Optional[Image.Image], document_type: str,
-                     prompt: str = "", row: Dict[str, Any] = None) -> Dict[str, Any]:
-        return {"document_type": document_type, "verbatim_text": "[precomputed]",
-                "_ocr_route": "precomputed"}
-
-    def extract_raw_text(self, image: Optional[Image.Image]) -> str:
-        return "[precomputed raw text]"
+def get_breaker_status() -> dict:
+    """Return circuit breaker status (simplified for new pipeline)."""
+    return {"state": "closed", "failures": 0, "cooldown_remaining": 0}

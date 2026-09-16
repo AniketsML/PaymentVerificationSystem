@@ -8,7 +8,6 @@ from workspaces.base import Workspace
 from workspaces.legal.db import init_schema, purge_expired_legal_test_data
 from workspaces.legal.jobs import claim_one_lead, complete_lead, fail_lead
 from workspaces.legal.logger import PgLegalLeadLogger
-from workspaces.legal.ocr import SARFAESIDocumentOCR, PrecomputedLegalOCR
 from workspaces.legal.pipeline import process_lead
 from workspaces.legal.routes import legal_bp
 
@@ -43,10 +42,14 @@ class LegalWorkspace(Workspace):
         documents = job.get("documents", [])
         is_test = bool(job.get("is_test"))
         extraction_prompt = job.get("extraction_prompt", "")
-        ocr = SARFAESIDocumentOCR()
         logger = PgLegalLeadLogger()
-        res = process_lead(lead_id, lead_name, folder_name, documents, ocr, logger, is_test=is_test, extraction_prompt=extraction_prompt)
-        return res["processing_status"]
+        from workspaces.legal.ocr import LegalVLMClient
+        ocr = LegalVLMClient()
+        res = process_lead(
+            lead_id, lead_name, folder_name, documents, ocr, logger,
+            is_test=is_test, extraction_prompt=extraction_prompt,
+        )
+        return res.get("status", "failed")
 
     def complete_worker_job(self, job_id: str, status: str) -> None: complete_lead(job_id, status)
     def fail_worker_job(self, job_id: str, error: str) -> None: fail_lead(job_id, error)

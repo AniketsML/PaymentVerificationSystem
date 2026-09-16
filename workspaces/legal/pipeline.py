@@ -27,12 +27,8 @@ from workspaces.legal.models import (
     DOC_TYPE_PRIORITY, DOC_TYPE_PROPERTY_TIER,
     ExtractionSource, PageType, FieldCandidate, ValidationFlag, MergeConfidence
 )
-from workspaces.legal.ocr import LegalOCRClient
-from workspaces.legal.sanitize import (
-    sanitize_name, sanitize_address, parse_amount,
-    extract_financial_from_text, check_third_party_mortgagor,
-    apply_provenance_gate, compute_tos,
-)
+from workspaces.legal.ocr import LegalVLMClient
+
 from workspaces.legal.logger import PgLegalLeadLogger
 from workspaces.legal.jobs import update_document_status, update_lead_doc_counts
 
@@ -74,20 +70,60 @@ def _load_document(file_path: str) -> Tuple[Optional[Image.Image], str, int]:
             return None, f"Failed to process PDF: {e}", 0
     return None, f"Unsupported file type: {ext}", 0
 
+def _extract_document_batch(file_path: str, pages: List[int], dpi: int = 90) -> List[Tuple[int, Image.Image]]:
+    """
+    Extracts specified 0-indexed pages from a document (PDF or image) and stamps
+    a clear [PAGE X] visual badge on each image for direct multi-page VLM understanding.
+    Returns list of (page_num_1_indexed, PIL_Image).
+    """
+    results = []
+    if not file_path or not os.path.exists(file_path):
+        return results
+
+    ext = os.path.splitext(file_path)[1].lower()
+    from PIL import ImageDraw
+
+    if ext in ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp', '.gif'):
+        try:
+            img = Image.open(file_path)
+            img.load()
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+            draw = ImageDraw.Draw(img)
+            draw.rectangle([(10, 10), (140, 45)], fill=(220, 30, 30))
+            draw.text((20, 18), "PAGE 1", fill=(255, 255, 255))
+            results.append((1, img))
+        except Exception as e:
+            sys.stderr.write(f"[pipeline] Image load error {file_path}: {e}\n")
+        return results
+
+    if ext == '.pdf':
+        try:
+            import fitz
+            doc = fitz.open(file_path)
+            scale = max(0.9, dpi / 72.0)
+            for p_idx in pages:
+                if 0 <= p_idx < doc.page_count:
+                    pix = doc[p_idx].get_pixmap(matrix=fitz.Matrix(scale, scale))
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    
+                    # Stamp clear [PAGE X] badge
+                    draw = ImageDraw.Draw(img)
+                    badge_w = min(160, max(100, int(pix.width * 0.22)))
+                    badge_h = min(40, max(28, int(pix.height * 0.045)))
+                    draw.rectangle([(10, 10), (10 + badge_w, 10 + badge_h)], fill=(220, 30, 30))
+                    draw.text((20, 16), f"PAGE {p_idx + 1}", fill=(255, 255, 255))
+                    
+                    results.append((p_idx + 1, img))
+            doc.close()
+        except Exception as e:
+            sys.stderr.write(f"[pipeline] PDF batch extract error {file_path}: {e}\n")
+    return results
+
 def _extract_pdf_pages(file_path: str, pages: List[int]) -> List[Image.Image]:
-    images = []
-    try:
-        import fitz
-        doc = fitz.open(file_path)
-        for p in pages:
-            if 0 <= p < doc.page_count:
-                pix = doc[p].get_pixmap(matrix=fitz.Matrix(200/72, 200/72))
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                images.append(img)
-        doc.close()
-    except Exception as e:
-        sys.stderr.write(f"[pipeline] PDF page extract error: {e}\n")
-    return images
+    """Backward-compatible helper returning raw PIL images."""
+    items = _extract_document_batch(file_path, pages, dpi=120)
+    return [img for _, img in items]
 
 def _classify_by_filename(filename: str) -> str:
     fn = filename.lower()
@@ -218,27 +254,159 @@ def stage_6_validation_pass(result: SARFAESILeadResult) -> List[ValidationFlag]:
     return flags
 
 
+def _normalize_extracted_fields(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalizes and flattens dynamic extractions into clean top-level fields.
+    Guarantees standard naming for:
+      - borrower_name, borrower_address
+      - co_borrower_1_name, co_borrower_1_address
+      - co_borrower_2_name, co_borrower_2_address, etc.
+    Flattens any nested dictionaries or lists of objects so no raw JSON objects reach the UI.
+    """
+    if not isinstance(data, dict):
+        return {}
+
+    normalized = {}
+
+    def _clean_str(val):
+        if val is None:
+            return None
+        s = str(val).strip()
+        if not s or s.lower() in ("null", "none", "n/a", "not applicable", "not mentioned", "not found", "{}", "[]", "—"):
+            return None
+        return s
+
+    # 1. Handle borrower / primary borrower objects
+    borrower_obj = data.get("borrower") or data.get("primary_borrower") or data.get("applicant")
+    if isinstance(borrower_obj, dict):
+        if "name" in borrower_obj and _clean_str(borrower_obj["name"]):
+            normalized["borrower_name"] = _clean_str(borrower_obj["name"])
+        if "address" in borrower_obj and _clean_str(borrower_obj["address"]):
+            normalized["borrower_address"] = _clean_str(borrower_obj["address"])
+        for bk, bv in borrower_obj.items():
+            if bk not in ("name", "address"):
+                cval = _clean_str(bv)
+                if cval:
+                    normalized[f"borrower_{bk}"] = cval
+
+    # 2. Handle co-borrowers (list of dicts, list of strings, single dict, etc.)
+    co_borrowers_raw = (
+        data.get("co_borrowers") or data.get("co_borrower") or
+        data.get("co_applicants") or data.get("co_applicant")
+    )
+    if isinstance(co_borrowers_raw, list):
+        for idx, item in enumerate(co_borrowers_raw, start=1):
+            if isinstance(item, dict):
+                if "name" in item and _clean_str(item["name"]):
+                    normalized[f"co_borrower_{idx}_name"] = _clean_str(item["name"])
+                if "address" in item and _clean_str(item["address"]):
+                    normalized[f"co_borrower_{idx}_address"] = _clean_str(item["address"])
+                for ik, iv in item.items():
+                    if ik not in ("name", "address"):
+                        cval = _clean_str(iv)
+                        if cval:
+                            normalized[f"co_borrower_{idx}_{ik}"] = cval
+            elif isinstance(item, str) and _clean_str(item):
+                normalized[f"co_borrower_{idx}_name"] = _clean_str(item)
+    elif isinstance(co_borrowers_raw, dict):
+        if "name" in co_borrowers_raw and _clean_str(co_borrowers_raw["name"]):
+            normalized["co_borrower_1_name"] = _clean_str(co_borrowers_raw["name"])
+        if "address" in co_borrowers_raw and _clean_str(co_borrowers_raw["address"]):
+            normalized["co_borrower_1_address"] = _clean_str(co_borrowers_raw["address"])
+        for ik, iv in co_borrowers_raw.items():
+            if ik not in ("name", "address"):
+                cval = _clean_str(iv)
+                if cval:
+                    normalized[f"co_borrower_1_{ik}"] = cval
+
+    # 3. Process remaining keys from data
+    for k, v in data.items():
+        if k.startswith("_") or k.endswith("_page_sources") or k in ("borrower", "primary_borrower", "applicant", "co_borrowers", "co_borrower", "co_applicants", "co_applicant", "cited_pages", "field_page_sources"):
+            continue
+
+        clean_k = k.strip().lower().replace("-", "_").replace(" ", "_")
+
+        # Normalize borrower aliases
+        if clean_k in ("applicant_name", "primary_applicant", "name_of_borrower", "borrower") and "borrower_name" not in normalized:
+            cval = _clean_str(v)
+            if cval:
+                normalized["borrower_name"] = cval
+            continue
+        if clean_k in ("applicant_address", "address_of_borrower") and "borrower_address" not in normalized:
+            cval = _clean_str(v)
+            if cval:
+                normalized["borrower_address"] = cval
+            continue
+
+        # Normalize single co-borrower
+        if clean_k in ("co_borrower_name", "co_applicant_name") and "co_borrower_1_name" not in normalized:
+            cval = _clean_str(v)
+            if cval:
+                normalized["co_borrower_1_name"] = cval
+            continue
+        if clean_k in ("co_borrower_address", "co_applicant_address") and "co_borrower_1_address" not in normalized:
+            cval = _clean_str(v)
+            if cval:
+                normalized["co_borrower_1_address"] = cval
+            continue
+
+        # Match co_borrower_1_name, co_applicant_1_address, etc.
+        m_co = re.match(r"co_(?:borrower|applicant)_?(\d+)(?:_(name|address))?", clean_k)
+        if m_co:
+            num = m_co.group(1)
+            field_type = m_co.group(2) or "name"
+            target_key = f"co_borrower_{num}_{field_type}"
+            cval = _clean_str(v)
+            if cval:
+                normalized[target_key] = cval
+            continue
+
+        # Nested dict
+        if isinstance(v, dict):
+            for sub_k, sub_v in v.items():
+                cval = _clean_str(sub_v)
+                if cval:
+                    normalized[f"{clean_k}_{sub_k}"] = cval
+            continue
+
+        # List
+        if isinstance(v, list):
+            scalar_items = [str(x).strip() for x in v if _clean_str(x)]
+            if scalar_items:
+                normalized[clean_k] = ", ".join(scalar_items)
+            continue
+
+        cval = _clean_str(v)
+        if cval:
+            normalized[clean_k] = cval
+
+    return normalized
+
+
 def process_lead(
     lead_id: str, lead_name: str, folder_name: str,
-    documents: List[Dict[str, Any]], ocr: LegalOCRClient,
+    documents: List[Dict[str, Any]], ocr: Any,
     logger: PgLegalLeadLogger, is_test: bool = False,
     extraction_prompt: str = "",
 ) -> Dict[str, Any]:
-    """Process an entire lead through the 8-stage pipeline."""
+    """Process an entire lead through the intelligent scope & VLM extraction pipeline."""
     t_start = time.perf_counter()
     phase_timings: Dict[str, float] = {}
     ocr_routes_used: List[str] = []
-    doc_types_found: List[str] = []
 
     logger.log(lead_id, "lead_received", "PASS",
                reason=f"Lead '{lead_name}' with {len(documents)} document(s)", is_test=is_test)
 
-    result = SARFAESILeadResult(lead_id=lead_id)
-    total_docs = len(documents)
-    processed_docs, failed_docs = 0, 0
-    raw_extractions: Dict[str, Any] = {}
-    page_extractions: List[Dict[str, Any]] = []
-    all_field_candidates: List[FieldCandidate] = []
+    # Fetch documents from DB if not provided
+    if not documents:
+        from db import pg
+        with pg.pool().connection() as c:
+            documents = c.execute("SELECT * FROM legal_lead_documents WHERE lead_id=%s ORDER BY filename", (lead_id,)).fetchall()
+            documents = [dict(d) for d in documents]
+
+    if not documents:
+        logger.log(lead_id, "load_docs", "FAIL", reason="No documents registered", is_test=is_test)
+        return {"status": "missing_documents", "lead_id": lead_id, "error": "No documents"}
 
     docs_sorted = sorted(documents, key=lambda d: (
         1 if (d.get("metadata") or {}).get("shared_fcl") else 0,
@@ -246,20 +414,37 @@ def process_lead(
             DocumentType(_classify_by_filename(d.get("filename", "")) or "other")
             if _classify_by_filename(d.get("filename", "")) else DocumentType.OTHER, 9)
     ))
-    
+
     filenames = [d.get("filename", "") for d in docs_sorted]
     folder_lan = _discover_lan(folder_name, filenames, [])
-    if folder_lan:
-        result.account_no_lan = folder_lan
 
     import threading
     seen_page_hashes = set()
     hash_lock = threading.Lock()
-    
-    # ── Stage 0: The Intent Planner ──
-    extraction_plan = ocr.analyze_prompt_intent(extraction_prompt) if hasattr(ocr, "analyze_prompt_intent") else {}
-    
-    # ── Stage 4: Per-document structured output ──
+
+    # Stage 0: The Intent Planner
+    try:
+        from workspaces.legal.prompt_analyzer import analyze_extraction_prompt
+        plan_obj = analyze_extraction_prompt(extraction_prompt)
+        headings = [inst.heading_hint for inst in getattr(plan_obj, "instructions", []) if getattr(inst, "heading_hint", "")]
+        extraction_plan = {
+            "target_docs": plan_obj.target_docs,
+            "target_pages": plan_obj.target_pages,
+            "keywords": plan_obj.keywords,
+            "headings": headings,
+            "heading": headings[0] if headings else "",
+        }
+    except Exception as e:
+        sys.stderr.write(f"[pipeline] Planner failed: {e}\n")
+        extraction_plan = {}
+
+    processed_docs, failed_docs = 0, 0
+    raw_extractions: Dict[str, Any] = {}
+    if folder_lan:
+        raw_extractions["account_no_lan"] = folder_lan
+
+    page_extractions: List[Dict[str, Any]] = []
+
     t_ocr = time.perf_counter()
     for doc in docs_sorted:
         fp = doc.get("file_path", "")
@@ -267,125 +452,176 @@ def process_lead(
         filename = doc.get("filename", "")
         is_shared_fcl = bool((doc.get("metadata") or {}).get("shared_fcl"))
         doc_type_hint = _classify_by_filename(filename) or ("foreclosure_notice" if is_shared_fcl else "document")
-        doc_types_found.append(doc_type_hint)
 
-        # Stage 1.5: Document Routing
-        if extraction_plan.get("target_docs"):
-            if doc_type_hint not in extraction_plan["target_docs"]:
-                # The LLM planner says this document is not relevant to the prompt. Skip it!
+        # Shortlist doc if mentioned in prompt
+        target_docs = extraction_plan.get("target_docs", [])
+        if target_docs:
+            fn_lower = filename.lower()
+            matches_target = False
+            for td in target_docs:
+                td_clean = td.lower().replace("_", " ")
+                if doc_type_hint == td or td in doc_type_hint:
+                    matches_target = True
+                    break
+                if td_clean in fn_lower or any(part in fn_lower for part in td_clean.split() if len(part) > 3):
+                    matches_target = True
+                    break
+            if not matches_target:
                 continue
 
         if not fp or not os.path.exists(fp):
             continue
-            
+
         fsize = os.path.getsize(fp)
-        
+
         try:
-            img, load_err, page_count = _load_document(fp)
-            if load_err or img is None:
-                logger.log(lead_id, "doc_load", "FAIL", document_id=doc_id, reason=load_err, is_test=is_test)
+            # Check page count
+            ext = os.path.splitext(fp)[1].lower()
+            page_count = 1
+            if ext == '.pdf':
+                try:
+                    import fitz
+                    pdoc = fitz.open(fp)
+                    page_count = pdoc.page_count
+                    pdoc.close()
+                except Exception:
+                    page_count = 1
+
+            if page_count == 0:
+                logger.log(lead_id, "doc_load", "FAIL", document_id=doc_id, reason="PDF has no pages", is_test=is_test)
                 failed_docs += 1
                 continue
 
-            # Stage 1.6: Page Routing
+            # Stage 1.6: Scope Pages for this document
             if extraction_plan.get("target_pages"):
-                # Use ONLY the exact target pages if they are valid for this document
-                prio_pages = [p for p in extraction_plan["target_pages"] if 0 <= p < page_count]
-                if not prio_pages:
-                    # Fallback to default if out of bounds or empty
-                    prio_pages = _get_priority_pages_for_type(doc_type_hint, page_count)
+                pages_to_process = [p for p in extraction_plan["target_pages"] if 0 <= p < page_count]
+                if not pages_to_process:
+                    pages_to_process = list(range(page_count))
             else:
-                prio_pages = _get_priority_pages_for_type(doc_type_hint, page_count)
-            
-            doc_extractions = []
-            
-            import concurrent.futures
-            
-            def process_page(p_idx):
-                try:
-                    if p_idx == 0:
-                        p_img = img
-                    else:
-                        rendered = _extract_pdf_pages(fp, [p_idx])
-                        p_img = rendered[0] if rendered else None
-                        
-                    if not p_img: return None
-                    
-                    # 1. Rotation Correction (EXIF transpose)
-                    from PIL import ImageOps
-                    p_img = ImageOps.exif_transpose(p_img)
-                    
-                    # 2. Perceptual Hashing (Dedup)
-                    # Resize to 8x8 grayscale and create a 64-bit string hash
-                    thumb = p_img.convert("L").resize((8, 8))
-                    pixels = list(thumb.getdata())
-                    avg = sum(pixels) / 64.0
-                    phash = "".join("1" if p > avg else "0" for p in pixels)
-                    
-                    with hash_lock:
-                        if phash in seen_page_hashes:
-                            return {"_status": "duplicate_discarded", "_page_number": p_idx + 1}
-                        seen_page_hashes.add(phash)
-                    
-                    extracted = ocr.extract_data(p_img, document_type=doc_type_hint, prompt=extraction_prompt, extraction_plan=extraction_plan)
-                    if extracted.get("_status") in ("blank_discarded", "duplicate_discarded", "boilerplate_discarded"):
-                        return None
-                        
-                    extracted["_page_number"] = p_idx + 1
-                    return extracted
-                except Exception as e:
-                    return {"_error": str(e), "_page_number": p_idx + 1}
+                # Process the whole document in batches
+                pages_to_process = list(range(page_count))
 
-            extracted_results = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                futures = [executor.submit(process_page, p_idx) for p_idx in prio_pages]
-                for fut in concurrent.futures.as_completed(futures):
-                    res = fut.result()
-                    if res: extracted_results.append(res)
-                    
-            extracted_results.sort(key=lambda x: x["_page_number"])
-            
-            for extracted in extracted_results:
-                if "_error" in extracted:
+            # Batch pages into chunks of at most 20 pages (or 1 batch if <= 20)
+            BATCH_SIZE = 20
+            page_chunks = [pages_to_process[i:i + BATCH_SIZE] for i in range(0, len(pages_to_process), BATCH_SIZE)]
+
+            for chunk in page_chunks:
+                # 1. Render and stamp pages with [PAGE X]
+                page_items = _extract_document_batch(fp, chunk, dpi=90)
+                if not page_items:
                     continue
-                    
-                p_num = extracted["_page_number"]
-                route = extracted.get("_ocr_route", "unknown")
+
+                chunk_page_nums = [item[0] for item in page_items]
+                chunk_images = [item[1] for item in page_items]
+
+                # 2. Directly call VLM on the entire batch in a single API call!
+                extracted = ocr.extract_from_images(
+                    images=chunk_images,
+                    document_type=f"{filename} ({doc_type_hint})",
+                    page_numbers=chunk_page_nums,
+                    extraction_prompt=extraction_prompt,
+                    heading_hint=extraction_plan.get("heading", ""),
+                    headings=extraction_plan.get("headings", []),
+                    keywords=extraction_plan.get("keywords", []),
+                    total_pages=page_count
+                )
+
+                if not extracted or extracted.get("_status") in ("blank_discarded", "duplicate_discarded"):
+                    continue
+
+                meta = extracted.pop("_meta", {})
+                route = extracted.pop("_ocr_route", "vlm")
                 if route not in ocr_routes_used:
                     ocr_routes_used.append(route)
-                    
-                # Extract candidates
-                candidates = extracted.get("_field_candidates", {})
-                for field_name, cand_data in candidates.items():
-                    fc = FieldCandidate(
-                        value=cand_data.get("value"),
-                        source=cand_data.get("source"),
-                        confidence=cand_data.get("confidence", 0.0),
-                        role_tag=field_name, # Use field name as role tag for simplicity here
-                        document_type=doc_type_hint,
-                        document_id=doc_id,
-                        page_number=p_num,
-                        model_used=route,
-                        mismatch_flag=cand_data.get("mismatch_flag", False),
-                        merge_priority=_get_merge_priority(cand_data.get("source", ""))
-                    )
-                    all_field_candidates.append(fc)
-                    
-                page_extractions.append({
-                    "document_id": doc_id,
-                    "filename": filename,
-                    "page_number": p_num,
-                    "fields": extracted.get("extracted_fields", extracted),
-                    "ocr_route": route,
-                    "mismatches": extracted.get("dual_source_mismatch_fields", []),
-                    "raw_ocr_text": extracted.get("_raw_ocr_text", ""),
-                    "ocr_confidence": extracted.get("_ocr_confidence", 0.0)
-                })
-                    
+
+                # Capture provenance metadata
+                cited_pages = extracted.pop("_cited_pages", [])
+                field_page_sources = extracted.pop("_field_page_sources", {}) or {}
+
+                # Also capture flat keys like borrower_name_page_sources
+                for k in list(extracted.keys()):
+                    if k.endswith("_page_sources"):
+                        val = extracted.pop(k)
+                        base_field = k[:-len("_page_sources")]
+                        if val and base_field not in field_page_sources:
+                            try:
+                                p_str = str(val).split(",")[0].strip()
+                                if p_str.isdigit():
+                                    field_page_sources[base_field] = int(p_str)
+                            except Exception:
+                                pass
+
+                # Normalize extracted fields
+                norm_fields = _normalize_extracted_fields(extracted)
+                if not norm_fields:
+                    continue
+
+                # Record page_extractions with EXACT pages where data was found
+                if isinstance(field_page_sources, dict) and field_page_sources:
+                    by_page = {}
+                    for fk, fv in norm_fields.items():
+                        src_p = field_page_sources.get(fk)
+                        if src_p is None:
+                            for spk, spv in field_page_sources.items():
+                                if spk in fk or fk in spk:
+                                    src_p = spv
+                                    break
+                        try:
+                            src_p_int = int(src_p) if src_p is not None else None
+                        except (ValueError, TypeError):
+                            src_p_int = None
+
+                        if not src_p_int and cited_pages:
+                            try:
+                                src_p_int = int(cited_pages[0])
+                            except Exception:
+                                src_p_int = chunk_page_nums[0]
+                        elif not src_p_int:
+                            src_p_int = chunk_page_nums[0]
+
+                        by_page.setdefault(src_p_int, {})[fk] = fv
+
+                    for p_num, p_fields in by_page.items():
+                        if p_fields:
+                            page_extractions.append({
+                                "document_id": doc_id,
+                                "filename": filename,
+                                "page_number": p_num,
+                                "fields": p_fields,
+                                "ocr_route": route,
+                                "telemetry": meta,
+                                "mismatches": [],
+                                "raw_ocr_text": "",
+                                "ocr_confidence": 1.0
+                            })
+                else:
+                    target_cited = []
+                    if isinstance(cited_pages, list):
+                        for p in cited_pages:
+                            try:
+                                target_cited.append(int(p))
+                            except Exception:
+                                pass
+                    if not target_cited:
+                        target_cited = [chunk_page_nums[0]]
+
+                    for p_num in target_cited:
+                        page_extractions.append({
+                            "document_id": doc_id,
+                            "filename": filename,
+                            "page_number": p_num,
+                            "fields": norm_fields,
+                            "ocr_route": route,
+                            "telemetry": meta,
+                            "mismatches": [],
+                            "raw_ocr_text": "",
+                            "ocr_confidence": 1.0
+                        })
+
             processed_docs += 1
             update_document_status(doc_id, "processed", document_type=doc_type_hint, file_size_bytes=fsize, page_count=page_count)
             update_lead_doc_counts(lead_id)
-                        
+
         except Exception as e:
             logger.log(lead_id, "doc_ocr", "FAIL", document_id=doc_id, reason=str(e), is_test=is_test)
             update_document_status(doc_id, "failed", error_message=str(e), file_size_bytes=fsize, page_count=page_count)
@@ -394,72 +630,107 @@ def process_lead(
             continue
 
     phase_timings["document_extraction_ms"] = round((time.perf_counter() - t_ocr) * 1000, 1)
+    phase_timings["total_pipeline_ms"] = round((time.perf_counter() - t_start) * 1000, 1)
 
-    # ── Stage 5: Cross-document merge ──
-    stage_5_cross_document_merge(lead_id, all_field_candidates, result)
-    
-    # ── Stage 6: Validation pass ──
-    val_flags = stage_6_validation_pass(result)
-    for vf in val_flags:
-        if vf.severity == "error" and f"error:{vf.field_name}" not in result.flags:
-            result.flags.append(f"error:{vf.field_name}")
-            
-    # Stage 7 Human Review Queue is handled by the UI filtering for `mismatch:` or `error:` flags in `result.flags`.
-
-    # Finalize
     final_status = "completed"
     if processed_docs == 0:
-        final_status = "failed"
+        final_status = "missing_documents"
     elif failed_docs > 0:
         final_status = "partial"
-    elif any(f.startswith("error:") for f in result.flags):
-        final_status = "validation_failed"
-    elif any(f.startswith("mismatch:") for f in result.flags):
-        final_status = "needs_review"
 
-    result.processing_status = final_status
-    total_ms = round((time.perf_counter() - t_start) * 1000, 1)
-
-    raw_extractions["page_extractions"] = page_extractions
-    raw_extractions["custom_fields"] = getattr(result, "custom_fields", {})
-    raw_extractions["validation_flags"] = [vars(f) for f in val_flags]
-    raw_extractions["field_candidates"] = [vars(f) for f in all_field_candidates]
-
-    raw_extractions["lead_metadata"] = {
-        "lead_id": lead_id,
-        "lead_name": lead_name,
-        "folder_name": folder_name,
-        "account_lan": result.account_no_lan,
-        "applicant_name": result.applicant_name,
-        "total_documents": total_docs,
-        "processed_documents": processed_docs,
-        "failed_documents": failed_docs,
-        "phase_timings": phase_timings,
-        "total_ms": total_ms,
-    }
-
-    # Save
-    import json
     try:
+        from db import pg
+        import json
+
+        # Merge page extractions into top-level raw_extractions keeping longest string
+        for px in page_extractions:
+            for k, v in px.get("fields", {}).items():
+                if k.startswith("_"):
+                    continue
+                if v is None or v == "" or v == "null" or v == {}:
+                    continue
+                if isinstance(v, str):
+                    if k not in raw_extractions or len(v.strip()) > len(str(raw_extractions[k]).strip()):
+                        raw_extractions[k] = v
+                else:
+                    if k not in raw_extractions:
+                        raw_extractions[k] = v
+
+        # Re-normalize full raw_extractions payload
+        clean_top_level = _normalize_extracted_fields(raw_extractions)
+        raw_extractions.update(clean_top_level)
+
+        # Lead-level aggregated model and token telemetry
+        total_prompt_tokens = sum(px.get("telemetry", {}).get("prompt_tokens", 0) for px in page_extractions)
+        total_completion_tokens = sum(px.get("telemetry", {}).get("completion_tokens", 0) for px in page_extractions)
+        total_vlm_ms = sum(px.get("telemetry", {}).get("ms", 0) for px in page_extractions)
+        models_used = list(set(px.get("telemetry", {}).get("model") for px in page_extractions if px.get("telemetry", {}).get("model")))
+        model_name = ", ".join(models_used) if models_used else "Medha VLM"
+
+        lead_telemetry = {
+            "model": model_name,
+            "vlm_latency_ms": round(total_vlm_ms, 1),
+            "pipeline_latency_ms": phase_timings.get("total_pipeline_ms", 0),
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "total_tokens": total_prompt_tokens + total_completion_tokens,
+            "cited_page_count": len(page_extractions),
+        }
+
+        raw_extractions["_telemetry"] = lead_telemetry
+        raw_extractions["telemetry"] = lead_telemetry
+        raw_extractions["_phase_timings"] = phase_timings
+        raw_extractions["_page_extractions"] = page_extractions
+        raw_extractions["page_extractions"] = page_extractions
+        raw_extractions["_cited_pages"] = sorted(list(set(px["page_number"] for px in page_extractions)))
+
         with pg.pool().connection() as c:
             c.execute(
-                "UPDATE legal_leads SET extracted_data = %s WHERE lead_id = %s",
-                (json.dumps(result.to_dict()), lead_id)
+                "UPDATE legal_leads SET status = %s, extracted_data = %s, updated_at = now() WHERE lead_id = %s",
+                (final_status, json.dumps(raw_extractions), lead_id)
             )
-    except: pass
+            c.execute("""
+                INSERT INTO legal_lead_results (
+                    lead_id, processing_status, applicant_name, applicant_address,
+                    account_no_lan, raw_extractions, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (lead_id) DO UPDATE SET
+                    processing_status = EXCLUDED.processing_status,
+                    applicant_name = COALESCE(EXCLUDED.applicant_name, legal_lead_results.applicant_name),
+                    applicant_address = COALESCE(EXCLUDED.applicant_address, legal_lead_results.applicant_address),
+                    account_no_lan = COALESCE(EXCLUDED.account_no_lan, legal_lead_results.account_no_lan),
+                    raw_extractions = EXCLUDED.raw_extractions,
+                    updated_at = now()
+            """, (
+                lead_id,
+                final_status,
+                raw_extractions.get("borrower_name") or raw_extractions.get("applicant_name"),
+                raw_extractions.get("borrower_address") or raw_extractions.get("applicant_address"),
+                raw_extractions.get("account_no_lan") or raw_extractions.get("loan_account_number"),
+                json.dumps(raw_extractions)
+            ))
 
-    logger.save_lead_result(
-        lead_id, result.to_dict(), processing_status=final_status,
-        is_test=is_test, phase_timings=phase_timings,
-        ocr_routes_used=ocr_routes_used,
-        raw_extractions=raw_extractions
+        update_lead_doc_counts(lead_id)
+        logger.log(lead_id, "pipeline_complete", "SUCCESS", is_test=is_test, reason=final_status)
+    except Exception as e:
+        sys.stderr.write(f"[pipeline] DB update failed: {e}\n")
+        try:
+            from db import pg
+            with pg.pool().connection() as c:
+                c.execute("UPDATE legal_leads SET status = %s WHERE lead_id = %s", ("failed", lead_id))
+        except:
+            pass
+
+    return {"status": final_status, "lead_id": lead_id, "extracted": len(raw_extractions)}
+
+
+def run_dynamic_extraction(lead_id: str, extraction_prompt: str, is_test: bool = False) -> Dict[str, Any]:
+    """Execute dynamic user-prompt-driven extraction for a single lead dossier."""
+    logger = PgLegalLeadLogger()
+    from workspaces.legal.ocr import LegalVLMClient
+    ocr = LegalVLMClient()
+    return process_lead(
+        lead_id=lead_id, lead_name="", folder_name="", documents=[],
+        ocr=ocr, logger=logger, is_test=is_test, extraction_prompt=extraction_prompt
     )
-    update_lead_doc_counts(lead_id)
 
-    logger.log(lead_id, "lead_closed", "PASS",
-               reason=f"Final: {final_status} ({processed_docs}/{total_docs})",
-               ms=total_ms, is_test=is_test)
-
-    return {"lead_id": lead_id, "processing_status": final_status,
-            "total_documents": total_docs, "processed_documents": processed_docs,
-            "failed_documents": failed_docs}
