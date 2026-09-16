@@ -835,7 +835,13 @@ function formatFieldValue(k, v) {
     const p = window.__pageData[`${docId}-${pageNum}`] || {};
     const dataBox = $("#pageModalData");
     if (dataBox) {
-      const fieldCount = Object.keys(p.fields || {}).length;
+      const realFields = {};
+      for (const [k, v] of Object.entries(p.fields || {})) {
+        if (!k.startsWith("_") && v != null && v !== "" && v !== "—") {
+          realFields[k] = v;
+        }
+      }
+      const fieldCount = Object.keys(realFields).length;
       dataBox.innerHTML = `
         <div style="margin-bottom:20px;">
           <h4 style="margin:0 0 4px 0; font-size:13px; color:var(--ink-faint); text-transform:uppercase; letter-spacing:0.05em;">Extraction Metadata</h4>
@@ -849,7 +855,7 @@ function formatFieldValue(k, v) {
           ${fieldCount > 0 ? `
             <table class="page-fields-table" style="width:100%; border-collapse:collapse;">
               <tbody>
-                ${Object.entries(p.fields || {}).map(([fk, fv]) => `
+                ${Object.entries(realFields).map(([fk, fv]) => `
                   <tr>
                     <td class="pft-k" style="padding:8px; border-bottom:1px solid var(--line-light); vertical-align:top;">${esc(formatFieldLabel(fk))}</td>
                     <td class="pft-v${isFinancialField(fk) ? ' mono' : ''}" style="padding:8px; border-bottom:1px solid var(--line-light); font-weight:500;">${formatFieldValue(fk, fv)}</td>
@@ -1037,8 +1043,22 @@ function formatFieldValue(k, v) {
     });
     const allDocs = Array.from(docMap.values());
 
+    function getPageRealFields(p) {
+      if (!p || !p.fields || typeof p.fields !== 'object') return {};
+      const res = {};
+      for (const [k, v] of Object.entries(p.fields)) {
+        if (!k.startsWith("_") && v != null && v !== "" && v !== "—") {
+          res[k] = v;
+        }
+      }
+      return res;
+    }
+
     const docsWithPages = allDocs.filter(d => {
-      const dPages = pageExtractions.filter(p => (p.document_id === d.document_id || p.filename === d.filename) && p.fields && Object.keys(p.fields).length > 0);
+      const dPages = pageExtractions.filter(p => {
+        const isDoc = p.document_id === d.document_id || p.filename === d.filename;
+        return isDoc && Object.keys(getPageRealFields(p)).length > 0;
+      });
       return dPages.length > 0;
     });
     const docsNoPages = allDocs.filter(d => !docsWithPages.includes(d));
@@ -1049,7 +1069,10 @@ function formatFieldValue(k, v) {
         <p class="lede" style="margin-bottom:14px">Exact pages where data was extracted — side-by-side visual evidence with the precise fields pulled from each page.</p>
         ${docsWithPages.length === 0 ? `<div style="color:var(--ink-faint); font-style:italic; padding:12px; background:var(--surface); border:1px dashed var(--line); border-radius:6px;">No specific cited pages with data found.</div>` : ""}
         ${docsWithPages.map(d => {
-          const dPages = pageExtractions.filter(p => (p.document_id === d.document_id || p.filename === d.filename) && p.fields && Object.keys(p.fields).length > 0);
+          const dPages = pageExtractions.filter(p => {
+            const isDoc = p.document_id === d.document_id || p.filename === d.filename;
+            return isDoc && Object.keys(getPageRealFields(p)).length > 0;
+          });
           
           dPages.forEach(p => {
             window.__pageData[`${d.document_id}-${p.page_number}`] = p;
@@ -1070,7 +1093,10 @@ function formatFieldValue(k, v) {
                 </div>
               </div>
               <div class="page-cards-list">
-                ${dPages.map(p => `
+                ${dPages.map(p => {
+                  const realFields = getPageRealFields(p);
+                  const fieldCount = Object.keys(realFields).length;
+                  return `
                   <div class="page-card" id="page-${esc(d.document_id)}-${p.page_number}">
                     <!-- Left: Page Preview -->
                     <div class="page-card-side">
@@ -1084,12 +1110,12 @@ function formatFieldValue(k, v) {
                     <!-- Right: Extracted Data from This Exact Page -->
                     <div class="page-card-main">
                       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                        <div class="page-sec-title" style="margin:0;">DATA EXTRACTED FROM THIS PAGE (${Object.keys(p.fields || {}).length} field${Object.keys(p.fields || {}).length === 1 ? "" : "s"})</div>
+                        <div class="page-sec-title" style="margin:0;">DATA EXTRACTED FROM THIS PAGE (${fieldCount} field${fieldCount === 1 ? "" : "s"})</div>
                         ${(p.telemetry && p.telemetry.ms) ? `<span style="font-size:11px; font-family:'JetBrains Mono',monospace; color:var(--ink-faint);">${p.telemetry.ms}ms · ${(p.telemetry.total_tokens || 0)} tokens</span>` : ''}
                       </div>
                       <table class="page-fields-table">
                         <tbody>
-                          ${Object.entries(p.fields || {}).map(([fk, fv]) => `
+                          ${Object.entries(realFields).map(([fk, fv]) => `
                             <tr>
                               <td class="pft-k" style="width:200px; vertical-align:top;">${esc(formatFieldLabel(fk))}</td>
                               <td class="pft-v${isFinancialField(fk) ? ' mono' : ''}" style="${fk.toLowerCase().includes('address') ? 'white-space:normal; line-height:1.45;' : ''}">${formatFieldValue(fk, fv)}</td>
@@ -1103,7 +1129,8 @@ function formatFieldValue(k, v) {
                           <div class="evidence-snippet">${esc(p.snippet)}</div>
                         </div>` : ""}
                     </div>
-                  </div>`).join("")}
+                  </div>`;
+                }).join("")}
               </div>
             </div>`;
         }).join("")}

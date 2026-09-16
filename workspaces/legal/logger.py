@@ -234,6 +234,29 @@ class PgLegalLeadLogger:
                         if not k.startswith("_") and k not in final:
                             final[k] = v
 
+                # Filter page_extractions to strictly pages that contain extracted business data
+                raw_pxs = raw_ex.get("page_extractions") or raw_ex.get("_page_extractions") or []
+                clean_pxs = []
+                for px in raw_pxs:
+                    if isinstance(px, dict) and isinstance(px.get("fields"), dict):
+                        real_flds = {k: v for k, v in px["fields"].items() if not k.startswith("_") and v not in (None, "", "—", {})}
+                        if real_flds:
+                            try:
+                                from workspaces.legal.pipeline import _normalize_extracted_fields
+                                norm_flds = _normalize_extracted_fields(real_flds)
+                                if norm_flds:
+                                    real_flds.update(norm_flds)
+                            except Exception:
+                                pass
+                            for sk in ("borrower_details", "co_borrower_details", "details_of_borrower", "details_of_co_borrower", "borrower", "co_borrowers"):
+                                real_flds.pop(sk, None)
+                            if real_flds:
+                                px_copy = dict(px)
+                                px_copy["fields"] = real_flds
+                                clean_pxs.append(px_copy)
+                raw_ex["page_extractions"] = clean_pxs
+                raw_ex["_page_extractions"] = clean_pxs
+
                 final["raw_extractions"] = raw_ex
 
         if final:
