@@ -296,10 +296,16 @@ class PgLegalLeadLogger:
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = f"""SELECT
                     l.lead_id,
+                    l.lead_name,
+                    l.account_lan,
                     l.folder_name,
                     l.batch_id,
                     COALESCE(r.processing_status, l.status, 'pending') as processing_status,
                     l.extracted_data,
+                    r.raw_extractions,
+                    r.applicant_name,
+                    r.applicant_address,
+                    r.account_no_lan,
                     l.total_documents,
                     l.processed_documents,
                     l.failed_documents,
@@ -328,12 +334,38 @@ class PgLegalLeadLogger:
                     except Exception:
                         extracted = {}
 
-                for key, val in extracted.items():
-                    if key not in d and not key.startswith("_"):
+                raw_r = d.pop("raw_extractions", None) or {}
+                if isinstance(raw_r, str):
+                    try:
+                        raw_r = json.loads(raw_r)
+                    except Exception:
+                        raw_r = {}
+
+                # Merge both sources
+                merged = {**raw_r, **extracted}
+                try:
+                    from workspaces.legal.pipeline import _normalize_extracted_fields
+                    norm = _normalize_extracted_fields(merged)
+                    merged.update(norm)
+                except Exception:
+                    pass
+
+                # Fallback to direct columns if needed
+                if "borrower_name" not in merged and d.get("applicant_name"):
+                    merged["borrower_name"] = d["applicant_name"]
+                if "borrower_name" not in merged and d.get("lead_name"):
+                    merged["borrower_name"] = d["lead_name"]
+                if "borrower_address" not in merged and d.get("applicant_address"):
+                    merged["borrower_address"] = d["applicant_address"]
+                if "account_no_lan" not in merged and (d.get("account_no_lan") or d.get("account_lan")):
+                    merged["account_no_lan"] = d.get("account_no_lan") or d.get("account_lan")
+
+                for key, val in merged.items():
+                    if key not in d and not key.startswith("_") and not key.endswith("_page_sources") and key not in ("page_extractions", "telemetry"):
                         d[key] = val
                         
-                if "_telemetry" in extracted and "telemetry" not in d:
-                    d["telemetry"] = extracted["_telemetry"]
+                if ("_telemetry" in merged or "telemetry" in merged) and "telemetry" not in d:
+                    d["telemetry"] = merged.get("telemetry") or merged.get("_telemetry")
 
                 ret.append(d)
             return ret

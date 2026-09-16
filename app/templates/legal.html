@@ -188,8 +188,12 @@
               <button class="chip" data-status="processing"><i class="dot d"></i>Processing</button>
               <button class="chip" data-status="failed"><i class="dot n"></i>Failed</button>
             </div>
-            <button class="cf-clear hidden" id="clearFilters" title="Remove all column filters">✕ Clear filters</button>
-            <span class="count" id="tableCount">—</span>
+            <div style="display: flex; gap: 8px; align-items: center; margin-left: auto;">
+              <button class="cf-clear hidden" id="clearFilters" title="Remove all column filters">✕ Clear filters</button>
+              <span class="count" id="tableCount">—</span>
+              <button class="btn line small" id="tableExportCsvBtn" title="Download table data as CSV">📥 Download CSV</button>
+              <button class="btn solid small" id="tableExportExcelBtn" title="Download table data as Excel">📊 Download Excel</button>
+            </div>
           </div>
 
           <div class="tablewrap">

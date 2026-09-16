@@ -1847,6 +1847,89 @@ function formatFieldValue(k, v) {
     });
   }
 
+  /* ── export table data ───────────────────── */
+  function exportTableData(format = 'csv') {
+    const rows = (Array.isArray(allRows) ? allRows : []).filter(passesColFilters);
+    if (!rows.length) return toast("No leads to export", "warn");
+
+    const baseCols = ["lead_id", "processing_status"];
+    const exportCols = [...baseCols, ...dynamicColumns];
+    const headerLabels = exportCols.map(c => {
+      if (c === "lead_id") return "Lead ID";
+      if (c === "processing_status") return "Status";
+      return formatColName(c);
+    });
+
+    const dateStr = new Date().toISOString().slice(0, 10);
+
+    if (format === 'excel') {
+      let tableHtml = `
+        <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+        <head>
+          <meta charset="utf-8">
+          <!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>Leads Extraction</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->
+          <style>
+            th { background-color: #0d9488; color: #ffffff; font-weight: bold; border: 1px solid #cbd5e1; padding: 8px 12px; }
+            td { border: 1px solid #e2e8f0; padding: 6px 10px; vertical-align: top; mso-number-format: "\\@"; }
+          </style>
+        </head>
+        <body>
+          <table>
+            <thead>
+              <tr>${headerLabels.map(h => `<th>${esc(h)}</th>`).join("")}</tr>
+            </thead>
+            <tbody>
+              ${rows.map(r => `
+                <tr>
+                  ${exportCols.map(col => {
+                    let v = r[col];
+                    if (v === undefined || v === null) v = "";
+                    else if (typeof v === "object") v = JSON.stringify(v);
+                    else v = String(v);
+                    return `<td>${esc(v)}</td>`;
+                  }).join("")}
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </body>
+        </html>
+      `;
+      const blob = new Blob([tableHtml], { type: "application/vnd.ms-excel;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `extracted_leads_${dateStr}.xls`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast("Excel downloaded successfully", "ok");
+    } else {
+      let csv = "\uFEFF" + headerLabels.map(h => `"${String(h).replace(/"/g, '""')}"`).join(",") + "\r\n";
+      rows.forEach(r => {
+        const line = exportCols.map(col => {
+          let v = r[col];
+          if (v === undefined || v === null) v = "";
+          else if (typeof v === "object") v = JSON.stringify(v);
+          else v = String(v);
+          return `"${v.replace(/"/g, '""')}"`;
+        }).join(",");
+        csv += line + "\r\n";
+      });
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `extracted_leads_${dateStr}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast("CSV downloaded successfully", "ok");
+    }
+  }
+
   /* ── initialization ─────────────────────── */
   function init() {
     initPromptHistory();
@@ -1865,26 +1948,15 @@ function formatFieldValue(k, v) {
     // Search and filters
     $("#globalSearch").oninput = debounce((e) => { state.q = e.target.value.trim(); loadLeads(); }, 300);
     $("#refreshBtn").onclick = refreshAll;
+    
+    // Export buttons
     const exportBtn = $("#exportCsvBtn");
-    if (exportBtn) {
-      exportBtn.onclick = () => {
-        const rows = (Array.isArray(allRows) ? allRows : []).filter(passesColFilters);
-        if (!rows.length) return toast("No leads to export", "warn");
-        const keys = ["lead_id", "batch_id", "processing_status", "account_no_lan", "applicant_name", "sanction_amount", "total_outstanding_amount", "npa_date", "property_verification_status", "total_documents", "failed_documents", "created_at"];
-        let csv = keys.join(",") + "\\n";
-        rows.forEach(r => {
-          csv += keys.map(k => {
-            let v = String(r[k] ?? "").replace(/"/g, '""');
-            return v.includes(",") || v.includes("\\n") || v.includes('"') ? `"${v}"` : v;
-          }).join(",") + "\\n";
-        });
-        const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
-        const a = document.createElement("a");
-        a.href = url; a.download = `sarfaesi_leads_${new Date().toISOString().split("T")[0]}.csv`;
-        document.body.appendChild(a); a.click(); a.remove();
-        URL.revokeObjectURL(url);
-      };
-    }
+    if (exportBtn) exportBtn.onclick = () => exportTableData('csv');
+    const tableCsvBtn = $("#tableExportCsvBtn");
+    if (tableCsvBtn) tableCsvBtn.onclick = () => exportTableData('csv');
+    const tableExcelBtn = $("#tableExportExcelBtn");
+    if (tableExcelBtn) tableExcelBtn.onclick = () => exportTableData('excel');
+
     $("#clearFilters").onclick = resetColFilters;
 
     $$("#statusChips .chip").forEach(c => {
