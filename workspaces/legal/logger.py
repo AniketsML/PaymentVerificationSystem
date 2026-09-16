@@ -277,13 +277,13 @@ class PgLegalLeadLogger:
     def query_leads(self, status: str = "all", q: str = "", limit: int = 300,
                     scope: str = "real", batch_id: str = None) -> List[Dict[str, Any]]:
         clauses, params = [], []
-        if scope == "real":
-            clauses.append("l.is_test = false")
-        elif scope == "test":
-            clauses.append("l.is_test = true")
         if batch_id:
             clauses.append("l.batch_id = %s")
             params.append(batch_id)
+        elif scope == "real":
+            clauses.append("l.is_test = false")
+        elif scope == "test":
+            clauses.append("l.is_test = true")
         if status and status != "all":
             clauses.append("COALESCE(r.processing_status, l.status, 'pending') = %s")
             params.append(status)
@@ -347,6 +347,16 @@ class PgLegalLeadLogger:
                     from workspaces.legal.pipeline import _normalize_extracted_fields
                     norm = _normalize_extracted_fields(merged)
                     merged.update(norm)
+
+                    # Also pull from page_extractions if fields are missing
+                    pxs = merged.get("_page_extractions") or merged.get("page_extractions") or []
+                    if isinstance(pxs, list):
+                        for px in pxs:
+                            if isinstance(px, dict) and isinstance(px.get("fields"), dict):
+                                p_norm = _normalize_extracted_fields(px["fields"])
+                                for pk, pv in p_norm.items():
+                                    if pk not in merged or not merged[pk]:
+                                        merged[pk] = pv
                 except Exception:
                     pass
 
@@ -361,8 +371,13 @@ class PgLegalLeadLogger:
                     merged["account_no_lan"] = d.get("account_no_lan") or d.get("account_lan")
 
                 for key, val in merged.items():
-                    if key not in d and not key.startswith("_") and not key.endswith("_page_sources") and key not in ("page_extractions", "telemetry"):
-                        d[key] = val
+                    if key not in d and not key.startswith("_") and not key.endswith("_page_sources") and key not in (
+                        "page_extractions", "telemetry", "borrower_details", "co_borrower_details",
+                        "details_of_borrower", "details_of_co_borrower", "details_of_the_borrower",
+                        "borrower", "co_borrowers", "co_applicants"
+                    ) and not key.startswith("telemetry_"):
+                        if not isinstance(val, (dict, list)):
+                            d[key] = val
                         
                 if ("_telemetry" in merged or "telemetry" in merged) and "telemetry" not in d:
                     d["telemetry"] = merged.get("telemetry") or merged.get("_telemetry")

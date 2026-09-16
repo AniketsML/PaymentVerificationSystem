@@ -378,12 +378,17 @@
       "total_documents", "processed_documents", "failed_documents", "status",
       "processing_status", "is_test", "extraction_prompt", "created_at",
       "updated_at", "account_lan", "lead_name", "telemetry", "_raw_ocr_text",
-      "_page_extractions", "page_extractions", "_cited_pages", "_telemetry", "_phase_timings"
+      "_page_extractions", "page_extractions", "_cited_pages", "_telemetry", "_phase_timings",
+      "borrower_details", "co_borrower_details", "details_of_borrower", "details_of_co_borrower",
+      "details_of_the_borrower", "borrowers", "co_borrowers", "co_applicants",
+      "applicant_name", "applicant_address"
     ]);
     const keys = new Set();
     allRows.forEach(r => {
        Object.keys(r).forEach(k => {
-           if (!excludeKeys.has(k) && !k.startsWith("_")) keys.add(k);
+           if (!excludeKeys.has(k) && !k.startsWith("_") && !k.startsWith("telemetry_") && typeof r[k] !== 'object') {
+             keys.add(k);
+           }
        });
     });
 
@@ -392,7 +397,8 @@
       "co_borrower_1_name", "co_borrower_1_address",
       "co_borrower_2_name", "co_borrower_2_address",
       "co_borrower_3_name", "co_borrower_3_address",
-      "applicant_name", "applicant_address",
+      "co_borrower_4_name", "co_borrower_4_address",
+      "account_no_lan",
       "sanction_amount", "tos"
     ];
 
@@ -540,32 +546,39 @@
            leadsGrid.innerHTML = leads.map(l => {
               const status = esc(l.processing_status || "—");
               
-              const excludeKeys = new Set([
-                "lead_id", "batch_id", "folder_name", "folder_path", "dossier_type",
-                "total_documents", "processed_documents", "failed_documents", "status",
-                "processing_status", "is_test", "extraction_prompt", "created_at",
-                "updated_at", "account_lan", "lead_name", "telemetry", "_raw_ocr_text",
-                "_page_extractions", "page_extractions", "_cited_pages", "_telemetry", "_phase_timings"
-              ]);
-              
-              const priorityCols = [
-                "borrower_name", "borrower_address",
-                "co_borrower_1_name", "co_borrower_1_address",
-                "co_borrower_2_name", "co_borrower_2_address",
-                "co_borrower_3_name", "co_borrower_3_address",
-                "applicant_name", "applicant_address",
-                "sanction_amount", "tos"
-              ];
+               const excludeKeys = new Set([
+                 "lead_id", "batch_id", "folder_name", "folder_path", "dossier_type",
+                 "total_documents", "processed_documents", "failed_documents", "status",
+                 "processing_status", "is_test", "extraction_prompt", "created_at",
+                 "updated_at", "account_lan", "lead_name", "telemetry", "_raw_ocr_text",
+                 "_page_extractions", "page_extractions", "_cited_pages", "_telemetry", "_phase_timings",
+                 "borrower_details", "co_borrower_details", "details_of_borrower", "details_of_co_borrower",
+                 "details_of_the_borrower", "borrowers", "co_borrowers", "co_applicants",
+                 "applicant_name", "applicant_address"
+               ]);
+               
+               const priorityCols = [
+                 "borrower_name", "borrower_address",
+                 "co_borrower_1_name", "co_borrower_1_address",
+                 "co_borrower_2_name", "co_borrower_2_address",
+                 "co_borrower_3_name", "co_borrower_3_address",
+                 "co_borrower_4_name", "co_borrower_4_address",
+                 "account_no_lan",
+                 "sanction_amount", "tos"
+               ];
 
-              const cardKeys = Object.keys(l).filter(k => !excludeKeys.has(k) && !k.startsWith("_") && l[k] != null && l[k] !== "");
-              cardKeys.sort((a, b) => {
-                const idxA = priorityCols.indexOf(a);
-                const idxB = priorityCols.indexOf(b);
-                if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-                if (idxA !== -1) return -1;
-                if (idxB !== -1) return 1;
-                return a.localeCompare(b);
-              });
+               const cardKeys = Object.keys(l).filter(k => 
+                 !excludeKeys.has(k) && !k.startsWith("_") && !k.startsWith("telemetry_") && 
+                 typeof l[k] !== 'object' && l[k] != null && l[k] !== "" && l[k] !== "—"
+               );
+               cardKeys.sort((a, b) => {
+                 const idxA = priorityCols.indexOf(a);
+                 const idxB = priorityCols.indexOf(b);
+                 if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+                 if (idxA !== -1) return -1;
+                 if (idxB !== -1) return 1;
+                 return a.localeCompare(b);
+               });
 
               let dynamicFieldsHtml = "";
               cardKeys.forEach(k => {

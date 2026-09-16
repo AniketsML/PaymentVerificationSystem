@@ -284,12 +284,18 @@ def _normalize_extracted_fields(data: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(borrower_obj, list) and borrower_obj:
         first_b = borrower_obj[0]
         if isinstance(first_b, dict):
-            b_name = first_b.get("borrower_name") or first_b.get("name")
-            b_addr = first_b.get("borrower_address") or first_b.get("address")
+            b_name = (
+                first_b.get("borrower_name") or first_b.get("applicant_name") or
+                first_b.get("primary_borrower_name") or first_b.get("name")
+            )
+            b_addr = (
+                first_b.get("borrower_address") or first_b.get("applicant_address") or
+                first_b.get("primary_borrower_address") or first_b.get("address")
+            )
             if _clean_str(b_name): normalized["borrower_name"] = _clean_str(b_name)
             if _clean_str(b_addr): normalized["borrower_address"] = _clean_str(b_addr)
             for bk, bv in first_b.items():
-                if bk not in ("name", "borrower_name", "address", "borrower_address"):
+                if bk not in ("name", "borrower_name", "address", "borrower_address", "applicant_name", "applicant_address"):
                     cval = _clean_str(bv)
                     if cval: normalized[f"borrower_{bk}"] = cval
         elif isinstance(first_b, str) and _clean_str(first_b):
@@ -298,20 +304,32 @@ def _normalize_extracted_fields(data: Dict[str, Any]) -> Dict[str, Any]:
         # Subsequent entries in borrower_details are secondary parties (co-borrowers)
         for extra_idx, extra_b in enumerate(borrower_obj[1:], start=1):
             if isinstance(extra_b, dict):
-                eb_name = extra_b.get("borrower_name") or extra_b.get("name")
-                eb_addr = extra_b.get("borrower_address") or extra_b.get("address")
+                eb_name = (
+                    extra_b.get("co_borrower_name") or extra_b.get("co_applicant_name") or
+                    extra_b.get("borrower_name") or extra_b.get("name")
+                )
+                eb_addr = (
+                    extra_b.get("co_borrower_address") or extra_b.get("co_applicant_address") or
+                    extra_b.get("borrower_address") or extra_b.get("address")
+                )
                 if _clean_str(eb_name): normalized[f"co_borrower_{extra_idx}_name"] = _clean_str(eb_name)
                 if _clean_str(eb_addr): normalized[f"co_borrower_{extra_idx}_address"] = _clean_str(eb_addr)
             elif isinstance(extra_b, str) and _clean_str(extra_b):
                 normalized[f"co_borrower_{extra_idx}_name"] = _clean_str(extra_b)
 
     elif isinstance(borrower_obj, dict):
-        b_name = borrower_obj.get("name") or borrower_obj.get("borrower_name")
-        b_addr = borrower_obj.get("address") or borrower_obj.get("borrower_address")
+        b_name = (
+            borrower_obj.get("borrower_name") or borrower_obj.get("applicant_name") or
+            borrower_obj.get("primary_borrower_name") or borrower_obj.get("name")
+        )
+        b_addr = (
+            borrower_obj.get("borrower_address") or borrower_obj.get("applicant_address") or
+            borrower_obj.get("primary_borrower_address") or borrower_obj.get("address")
+        )
         if _clean_str(b_name): normalized["borrower_name"] = _clean_str(b_name)
         if _clean_str(b_addr): normalized["borrower_address"] = _clean_str(b_addr)
         for bk, bv in borrower_obj.items():
-            if bk not in ("name", "borrower_name", "address", "borrower_address"):
+            if bk not in ("name", "borrower_name", "address", "borrower_address", "applicant_name", "applicant_address"):
                 cval = _clean_str(bv)
                 if cval: normalized[f"borrower_{bk}"] = cval
 
@@ -327,23 +345,35 @@ def _normalize_extracted_fields(data: Dict[str, Any]) -> Dict[str, Any]:
             start_idx += 1
         for idx, item in enumerate(co_borrowers_raw, start=start_idx):
             if isinstance(item, dict):
-                c_name = item.get("name") or item.get("co_borrower_name")
-                c_addr = item.get("address") or item.get("co_borrower_address")
+                c_name = (
+                    item.get("co_borrower_name") or item.get("co_applicant_name") or
+                    item.get("name") or item.get("borrower_name")
+                )
+                c_addr = (
+                    item.get("co_borrower_address") or item.get("co_applicant_address") or
+                    item.get("address") or item.get("borrower_address")
+                )
                 if _clean_str(c_name): normalized[f"co_borrower_{idx}_name"] = _clean_str(c_name)
                 if _clean_str(c_addr): normalized[f"co_borrower_{idx}_address"] = _clean_str(c_addr)
                 for ik, iv in item.items():
-                    if ik not in ("name", "co_borrower_name", "address", "co_borrower_address"):
+                    if ik not in ("name", "co_borrower_name", "address", "co_borrower_address", "borrower_name", "borrower_address", "co_applicant_name", "co_applicant_address"):
                         cval = _clean_str(iv)
                         if cval: normalized[f"co_borrower_{idx}_{ik}"] = cval
             elif isinstance(item, str) and _clean_str(item):
                 normalized[f"co_borrower_{idx}_name"] = _clean_str(item)
     elif isinstance(co_borrowers_raw, dict):
-        c_name = co_borrowers_raw.get("name") or co_borrowers_raw.get("co_borrower_name")
-        c_addr = co_borrowers_raw.get("address") or co_borrowers_raw.get("co_borrower_address")
+        c_name = (
+            co_borrowers_raw.get("co_borrower_name") or co_borrowers_raw.get("co_applicant_name") or
+            co_borrowers_raw.get("name") or co_borrowers_raw.get("borrower_name")
+        )
+        c_addr = (
+            co_borrowers_raw.get("co_borrower_address") or co_borrowers_raw.get("co_applicant_address") or
+            co_borrowers_raw.get("address") or co_borrowers_raw.get("borrower_address")
+        )
         if _clean_str(c_name): normalized["co_borrower_1_name"] = _clean_str(c_name)
         if _clean_str(c_addr): normalized["co_borrower_1_address"] = _clean_str(c_addr)
         for ik, iv in co_borrowers_raw.items():
-            if ik not in ("name", "co_borrower_name", "address", "co_borrower_address"):
+            if ik not in ("name", "co_borrower_name", "address", "co_borrower_address", "borrower_name", "borrower_address", "co_applicant_name", "co_applicant_address"):
                 cval = _clean_str(iv)
                 if cval: normalized[f"co_borrower_1_{ik}"] = cval
 
