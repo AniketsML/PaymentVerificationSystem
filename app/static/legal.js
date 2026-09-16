@@ -1444,6 +1444,7 @@ function formatFieldValue(k, v) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", url);
+      xhr.timeout = 600000; // 10 minute timeout for large legal batch archives
       xhr.upload.onprogress = e => {
         if (e.lengthComputable) {
           const pct = Math.round((e.loaded / e.total) * 100);
@@ -1458,11 +1459,32 @@ function formatFieldValue(k, v) {
       };
       xhr.onload = () => {
         btn.classList.remove("btn-progress");
-        if (xhr.status === 401) { window.location.href = "/login?next=" + encodeURIComponent(location.pathname); reject(new Error("unauthorized")); return; }
-        try { resolve({ json: () => Promise.resolve(JSON.parse(xhr.responseText)) }); }
-        catch (err) { reject(err); }
+        if (xhr.status === 401) {
+          window.location.href = "/login?next=" + encodeURIComponent(location.pathname);
+          reject(new Error("Session expired. Please log in again."));
+          return;
+        }
+        let data = null;
+        try { data = JSON.parse(xhr.responseText); } catch (_) {}
+        if (xhr.status >= 400) {
+          const msg = (data && (data.error || data.detail)) || `Server error (${xhr.status}): ${xhr.statusText || "Upload failed"}`;
+          reject(new Error(msg));
+          return;
+        }
+        if (data !== null) {
+          resolve({ json: () => Promise.resolve(data) });
+        } else {
+          reject(new Error(`Invalid server response: ${xhr.responseText.slice(0, 120)}`));
+        }
       };
-      xhr.onerror = () => { btn.classList.remove("btn-progress"); reject(new Error("Network Error")); };
+      xhr.onerror = () => {
+        btn.classList.remove("btn-progress");
+        reject(new Error("Connection error during upload. Check network connection or server status."));
+      };
+      xhr.ontimeout = () => {
+        btn.classList.remove("btn-progress");
+        reject(new Error("Upload timed out. Try uploading a smaller zip or check server load."));
+      };
       xhr.send(fd);
     });
   }
@@ -1579,15 +1601,22 @@ function formatFieldValue(k, v) {
           const resp = await uploadWithProgress("/api/legal/upload_folder", fd, runZip, "Extracting...");
           const r = await resp.json();
           if (r.error) {
-            toast(esc(r.error), "bad");
+            toast(esc(r.error), "bad", 8000);
             runZip.disabled = false;
             runZip.textContent = "Process Ingest";
             return;
           }
-          toast(`Enqueued ${r.leads_enqueued || 0} lead(s) with ${r.documents_enqueued || 0} document(s)`, "ok");
+          if ((r.leads_enqueued || 0) === 0) {
+            toast("No leads found to process. Ensure subfolders match Loan Account Numbers.", "bad", 8000);
+            runZip.disabled = false;
+            runZip.textContent = "Process Ingest";
+            return;
+          }
+          toast(`Enqueued ${r.leads_enqueued} lead(s) with ${r.documents_enqueued || 0} document(s)`, "ok");
           startBatchPoll(r.batch_id);
         } catch (e) {
-          toast("Upload failed", "bad");
+          console.error("Upload error:", e);
+          toast(e.message || "Upload failed", "bad", 8000);
           runZip.disabled = false;
           runZip.textContent = "Process Ingest";
         }
@@ -1616,11 +1645,23 @@ function formatFieldValue(k, v) {
         if (state.scope === "test") fd.append("test", "on");
         runDoc.disabled = true; runDoc.innerHTML = `<span class="spinner"></span> Starting…`;
         try {
-          const r = await (await uploadWithProgress("/api/legal/upload_folder", fd, runDoc, "Ingesting…")).json();
-          if (r.error) { toast(esc(r.error), "bad"); runDoc.disabled = false; runDoc.textContent = "Process Dossier"; return; }
-          toast(`Enqueued ${r.leads_enqueued || 0} dossier(s)`, "ok");
+          const resp = await uploadWithProgress("/api/legal/upload_folder", fd, runDoc, "Ingesting…");
+          const r = await resp.json();
+          if (r.error) { toast(esc(r.error), "bad", 8000); runDoc.disabled = false; runDoc.textContent = "Process Dossier"; return; }
+          if ((r.leads_enqueued || 0) === 0) {
+            toast("No dossiers could be enqueued.", "bad", 8000);
+            runDoc.disabled = false;
+            runDoc.textContent = "Process Dossier";
+            return;
+          }
+          toast(`Enqueued ${r.leads_enqueued} dossier(s)`, "ok");
           startBatchPoll(r.batch_id);
-        } catch (e) { toast("Dossier upload failed", "bad"); runDoc.disabled = false; runDoc.textContent = "Process Dossier"; }
+        } catch (e) {
+          console.error("Dossier upload error:", e);
+          toast(e.message || "Dossier upload failed", "bad", 8000);
+          runDoc.disabled = false;
+          runDoc.textContent = "Process Dossier";
+        }
       };
     }
 

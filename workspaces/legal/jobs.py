@@ -70,17 +70,16 @@ def _lead_has_fcl_doc(file_paths: List[str]) -> bool:
 
 
 def _find_shared_fcl_docs(root_path: str) -> List[str]:
-    """Return paths of all supported documents inside the shared FCL folder (if any)."""
+    """Return paths of all supported documents inside any shared FCL folder (at root or within subdirectories)."""
     shared: List[str] = []
     try:
-        for entry in sorted(os.listdir(root_path)):
-            if _is_shared_fcl_folder(entry):
-                fcl_dir = os.path.join(root_path, entry)
-                if os.path.isdir(fcl_dir):
-                    for f in sorted(os.listdir(fcl_dir)):
-                        fp = os.path.join(fcl_dir, f)
-                        if os.path.isfile(fp) and os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS:
-                            shared.append(fp)
+        for cur_dir, dirs, files in os.walk(root_path):
+            dir_name = os.path.basename(cur_dir.rstrip("/\\"))
+            if _is_shared_fcl_folder(dir_name):
+                for f in sorted(files):
+                    fp = os.path.join(cur_dir, f)
+                    if os.path.isfile(fp) and os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS:
+                        shared.append(fp)
     except Exception:
         pass
     return shared
@@ -244,10 +243,14 @@ def scan_and_enqueue_folder(root_path: str, is_test: bool = False, extraction_pr
                 continue
 
             # Re-determine inject_fcl now that shared_fcl_files might have grown
-            inject_fcl = (
-                shared_fcl_files if (shared_fcl_files and not _lead_has_fcl_doc(doc_files))
-                else []
-            )
+            if shared_fcl_files and not _lead_has_fcl_doc(doc_files):
+                matching_fcl = [
+                    f for f in shared_fcl_files
+                    if account_lan and account_lan.lower() in os.path.basename(f).lower()
+                ]
+                inject_fcl = matching_fcl if matching_fcl else (shared_fcl_files if len(shared_fcl_files) == 1 else [])
+            else:
+                inject_fcl = []
             total_doc_count = len(doc_files) + len(inject_fcl)
 
             lead_name = folder_name

@@ -56,83 +56,104 @@ def legal_index(lead_id=None):
 
 @legal_bp.route("/api/legal/upload_folder", methods=["POST"])
 def api_legal_upload_folder():
-    is_test = request.form.get("test") in ("on", "true", "1")
-    extraction_prompt = request.form.get("extraction_prompt", "").strip()
-    if extraction_prompt:
-        try:
-            with pg.pool().connection() as c:
-                c.execute("""
-                    INSERT INTO legal_prompt_history (prompt, last_used)
-                    VALUES (%s, now())
-                    ON CONFLICT (prompt) DO UPDATE SET last_used = EXCLUDED.last_used;
-                """, (extraction_prompt,))
-        except Exception:
-            pass
+    try:
+        is_test = request.form.get("test") in ("on", "true", "1")
+        extraction_prompt = request.form.get("extraction_prompt", "").strip()
+        if extraction_prompt:
+            try:
+                with pg.pool().connection() as c:
+                    c.execute("""
+                        INSERT INTO legal_prompt_history (prompt, last_used)
+                        VALUES (%s, now())
+                        ON CONFLICT (prompt) DO UPDATE SET last_used = EXCLUDED.last_used;
+                    """, (extraction_prompt,))
+            except Exception:
+                pass
 
-    batch_folder_name = f"upload_batch_{int(time.time())}"
-    target_extract_dir = os.path.join(settings.UPLOAD_DIR, "legal_batches", batch_folder_name)
-    os.makedirs(target_extract_dir, exist_ok=True)
+        batch_folder_name = f"upload_batch_{int(time.time())}"
+        target_extract_dir = os.path.join(settings.UPLOAD_DIR, "legal_batches", batch_folder_name)
+        os.makedirs(target_extract_dir, exist_ok=True)
 
-    local_path = request.form.get("folder_path", "").strip()
-    if local_path and os.path.isdir(local_path):
-        result = scan_and_enqueue_folder(local_path, is_test=is_test, extraction_prompt=extraction_prompt)
-        import worker; worker.start_pool()
-        return jsonify(result)
+        local_path = request.form.get("folder_path", "").strip()
+        if local_path and os.path.isdir(local_path):
+            result = scan_and_enqueue_folder(local_path, is_test=is_test, extraction_prompt=extraction_prompt)
+            if result.get("leads_enqueued", 0) == 0:
+                return jsonify({
+                    "error": "No valid loan leads found in directory. Ensure folders match LAN numbers (e.g. UGALWMS0000090828) containing loan documents.",
+                    **result
+                }), 400
+            import worker; worker.start_pool()
+            return jsonify(result)
 
-    zip_file = request.files.get("zip_file") or request.files.get("file")
-    if zip_file and zip_file.filename and zip_file.filename.lower().endswith(".zip"):
-        zip_path = os.path.join(target_extract_dir, secure_filename(zip_file.filename))
-        zip_file.save(zip_path)
-        try:
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(target_extract_dir)
-            os.remove(zip_path)
-        except Exception as e:
-            return jsonify({"error": f"Failed to extract zip file: {e}"}), 400
-        result = scan_and_enqueue_folder(target_extract_dir, is_test=is_test, extraction_prompt=extraction_prompt)
-        import worker; worker.start_pool()
-        return jsonify(result)
+        zip_file = request.files.get("zip_file") or request.files.get("file")
+        if zip_file and zip_file.filename and zip_file.filename.lower().endswith(".zip"):
+            safe_name = secure_filename(zip_file.filename) or "archive.zip"
+            zip_path = os.path.join(target_extract_dir, safe_name)
+            zip_file.save(zip_path)
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(target_extract_dir)
+                os.remove(zip_path)
+            except Exception as e:
+                return jsonify({"error": f"Failed to extract zip file: {e}"}), 400
+            result = scan_and_enqueue_folder(target_extract_dir, is_test=is_test, extraction_prompt=extraction_prompt)
+            if result.get("leads_enqueued", 0) == 0:
+                return jsonify({
+                    "error": "No valid loan leads found in ZIP archive. Ensure folders match LAN numbers (e.g. UGALWMS0000090828) containing loan documents.",
+                    **result
+                }), 400
+            import worker; worker.start_pool()
+            return jsonify(result)
 
-    paths = request.form.getlist("paths") or request.form.getlist("paths[]")
-    if not paths and request.form.get("file_paths"):
-        try:
-            paths = json.loads(request.form.get("file_paths"))
-        except Exception:
-            paths = []
+        paths = request.form.getlist("paths") or request.form.getlist("paths[]")
+        if not paths and request.form.get("file_paths"):
+            try:
+                paths = json.loads(request.form.get("file_paths"))
+            except Exception:
+                paths = []
 
-    uploaded_files = request.files.getlist("files") or request.files.getlist("files[]")
-    if not uploaded_files and request.files.get("file"):
-        uploaded_files = [request.files.get("file")]
+        uploaded_files = request.files.getlist("files") or request.files.getlist("files[]")
+        if not uploaded_files and request.files.get("file"):
+            uploaded_files = [request.files.get("file")]
 
-    if uploaded_files and any(f.filename for f in uploaded_files):
-        custom_lead = request.form.get("lead_name", "").strip() or "Lead_Direct_Dossier"
-        has_subfolder = False
-        if paths and any("/" in str(p).replace("\\", "/") for p in paths):
-            has_subfolder = True
-        elif any("/" in f.filename.replace("\\", "/") for f in uploaded_files if f.filename):
-            has_subfolder = True
+        if uploaded_files and any(f.filename for f in uploaded_files):
+            custom_lead = request.form.get("lead_name", "").strip() or "Lead_Direct_Dossier"
+            has_subfolder = False
+            if paths and any("/" in str(p).replace("\\", "/") for p in paths):
+                has_subfolder = True
+            elif any("/" in f.filename.replace("\\", "/") for f in uploaded_files if f.filename):
+                has_subfolder = True
 
-        for i, f in enumerate(uploaded_files):
-            if not f.filename:
-                continue
-            rel_path = ""
-            if paths and i < len(paths) and paths[i]:
-                rel_path = str(paths[i])
-            else:
-                rel_path = f.filename
-            clean_rel = rel_path.replace("\\", "/").lstrip("/")
-            if not has_subfolder:
-                dest = os.path.join(target_extract_dir, custom_lead, clean_rel)
-            else:
-                dest = os.path.join(target_extract_dir, clean_rel)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            f.save(dest)
+            for i, f in enumerate(uploaded_files):
+                if not f.filename:
+                    continue
+                rel_path = ""
+                if paths and i < len(paths) and paths[i]:
+                    rel_path = str(paths[i])
+                else:
+                    rel_path = f.filename
+                clean_rel = rel_path.replace("\\", "/").lstrip("/")
+                if not has_subfolder:
+                    dest = os.path.join(target_extract_dir, custom_lead, clean_rel)
+                else:
+                    dest = os.path.join(target_extract_dir, clean_rel)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                f.save(dest)
 
-        result = scan_and_enqueue_folder(target_extract_dir, is_test=is_test, extraction_prompt=extraction_prompt)
-        import worker; worker.start_pool()
-        return jsonify(result)
+            result = scan_and_enqueue_folder(target_extract_dir, is_test=is_test, extraction_prompt=extraction_prompt)
+            if result.get("leads_enqueued", 0) == 0:
+                return jsonify({
+                    "error": "No valid loan leads found in uploaded folder. Ensure folder contains lead directories matching LAN numbers (e.g. UGALWMS0000090828).",
+                    **result
+                }), 400
+            import worker; worker.start_pool()
+            return jsonify(result)
 
-    return jsonify({"error": "No valid zip file, folder upload, or folder path provided."}), 400
+        return jsonify({"error": "No valid zip file, folder upload, or folder path provided."}), 400
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Upload processing error: {str(e)}"}), 500
 
 
 @legal_bp.route("/api/legal/load_demo_dossier", methods=["POST"])

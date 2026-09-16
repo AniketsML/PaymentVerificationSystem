@@ -259,7 +259,15 @@ def main() -> int:
 
     from waitress import serve
     try:
-        serve(app, host=args.host, port=port, threads=settings.WEB_THREADS, _quiet=True)
+        serve(
+            app,
+            host=args.host,
+            port=port,
+            threads=settings.WEB_THREADS,
+            channel_timeout=300,
+            max_request_body_size=1073741824,
+            _quiet=True,
+        )
     except KeyboardInterrupt:
         pass
     print(dim("\n  Stopped.\n"))
