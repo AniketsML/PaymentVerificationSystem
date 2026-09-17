@@ -430,6 +430,8 @@
 
   let runsData = [];
   let currentRunIndex = 0;
+  let currentRunLeads = [];
+  let currentRunColumns = [];
   let runsPollTimer = null;
 
   async function loadRuns() {
@@ -439,40 +441,37 @@
       runsData = await resp.json();
       
       const viewer = $("#runViewer");
+      const railWrap = $("#runsRailWrap");
       const empty = $("#runsEmpty");
       
       if (!runsData || runsData.length === 0) {
-        viewer.classList.add("hidden");
-        empty.classList.remove("hidden");
+        if (viewer) viewer.classList.add("hidden");
+        if (railWrap) railWrap.classList.add("hidden");
+        if (empty) empty.classList.remove("hidden");
         if (runsPollTimer) { clearInterval(runsPollTimer); runsPollTimer = null; }
         return;
       }
       
-      empty.classList.add("hidden");
-      viewer.classList.remove("hidden");
+      if (empty) empty.classList.add("hidden");
+      if (viewer) viewer.classList.remove("hidden");
+      if (railWrap) railWrap.classList.remove("hidden");
       
       // Default to the most recent run or maintain index
       if (currentRunIndex >= runsData.length) currentRunIndex = 0;
+      
+      renderRunsRail();
       renderCurrentRun();
       
-      // Bind pagination
-      $("#runPrevBtn").onclick = () => {
-        if (currentRunIndex < runsData.length - 1) {
-           animateRunTransition(1);
-        }
-      };
-      
-      $("#runNextBtn").onclick = () => {
-        if (currentRunIndex > 0) {
-           animateRunTransition(-1);
-        }
-      };
-      
-      $("#runViewDashBtn").onclick = () => {
-         state.batchId = runsData[currentRunIndex].run_id;
-         updateBatchFilterUI();
-         switchView("dashboard");
-      };
+      // Carousel scroll buttons
+      const cLeft = $("#runCarouselLeft");
+      const cRight = $("#runCarouselRight");
+      const rail = $("#runsRail");
+      if (cLeft && rail) {
+        cLeft.onclick = () => rail.scrollBy({ left: -320, behavior: "smooth" });
+      }
+      if (cRight && rail) {
+        cRight.onclick = () => rail.scrollBy({ left: 320, behavior: "smooth" });
+      }
 
       // Auto-refresh runs view if any batch is currently processing
       const hasActive = runsData.some(r => r.status === "processing" || r.status === "pending");
@@ -497,22 +496,50 @@
     }
   }
 
-  function animateRunTransition(direction) {
-    const viewer = $("#runViewer");
-    viewer.style.opacity = "0";
-    viewer.style.transform = `translateX(${direction * 30}px)`;
+  function renderRunsRail() {
+    const rail = $("#runsRail");
+    if (!rail) return;
     
-    setTimeout(() => {
-       currentRunIndex += direction;
-       renderCurrentRun();
-       viewer.style.transform = `translateX(${-direction * 30}px)`;
-       
-       // Force reflow
-       void viewer.offsetWidth;
-       
-       viewer.style.opacity = "1";
-       viewer.style.transform = "translateX(0)";
-    }, 200);
+    rail.innerHTML = runsData.map((r, idx) => {
+      const isActive = idx === currentRunIndex;
+      const dateStr = r.started_at 
+        ? new Date(r.started_at).toLocaleDateString("en-IN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) 
+        : "Recent";
+      const statusHtml = badge(r.status);
+      const testPill = r.is_test 
+        ? '<span style="font-size:10px; background:var(--surface-2); border:1px solid var(--line); padding:1px 5px; border-radius:3px; color:var(--ink-faint); font-weight:600;">TEST</span>' 
+        : '';
+      
+      return `
+        <div class="run-card ${isActive ? 'active' : ''}" data-index="${idx}">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+            <div class="run-card-title" title="${esc(r.run_name)}">📁 ${esc(r.run_name)}</div>
+            ${statusHtml}
+          </div>
+          <div class="run-card-meta">
+            <span>${r.leads} dossier${r.leads === 1 ? '' : 's'} · ${r.completed || 0} done</span>
+            ${testPill}
+          </div>
+          <div style="font-size:11px; color:var(--ink-faint); margin-top:2px;">
+            🕒 ${esc(dateStr)}
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    // Bind card clicks
+    $$(".run-card", rail).forEach(card => {
+      card.onclick = () => {
+        const idx = parseInt(card.dataset.index, 10);
+        if (idx !== currentRunIndex) {
+          currentRunIndex = idx;
+          $$(".run-card", rail).forEach(c => c.classList.remove("active"));
+          card.classList.add("active");
+          card.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+          renderCurrentRun();
+        }
+      };
+    });
   }
 
   async function renderCurrentRun() {
@@ -520,100 +547,175 @@
     
     const run = runsData[currentRunIndex];
     $("#runViewName").textContent = run.run_name || "Unnamed Batch";
-    $("#runViewDate").textContent = run.started_at ? new Date(run.started_at).toLocaleString() : "Unknown date";
-    $("#runViewCount").textContent = `${run.leads} dossier${run.leads === 1 ? '' : 's'}`;
+    $("#runViewDate").textContent = "📅 " + (run.started_at ? new Date(run.started_at).toLocaleString() : "Unknown date");
+    $("#runViewCount").textContent = `📁 ${run.leads} dossier${run.leads === 1 ? '' : 's'}`;
+    $("#runViewCompletion").textContent = `✓ ${run.completed || 0} completed`;
     $("#runViewStatusBadge").innerHTML = badge(run.status) + (run.is_test ? ' <span style="background:var(--surface-2);color:var(--ink-faint);border:1px solid var(--line);font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;margin-left:6px;">TEST</span>' : '');
     $("#runViewPrompt").textContent = run.prompt || "No explicit extraction prompt provided.";
     
     $("#runViewPageMeta").textContent = `Run ${currentRunIndex + 1} of ${runsData.length}`;
-    
-    $("#runPrevBtn").disabled = currentRunIndex === runsData.length - 1;
-    $("#runNextBtn").disabled = currentRunIndex === 0;
-    
-    // Fetch leads for this specific run to display extracted info (without scope restriction)
-    try {
-       const url = `/api/legal/leads?batch_id=${encodeURIComponent(run.run_id)}&limit=100`;
-       const resp = await fetch(url);
-       if (resp.ok) {
-           const leads = await resp.json();
-           const leadsGrid = $("#runViewLeads");
-           
-           if (!leads || leads.length === 0) {
-               leadsGrid.innerHTML = `<div style="color: var(--ink-faint); font-style: italic;">No dossiers found for this run.</div>`;
-               return;
-           }
-           
-           leadsGrid.innerHTML = leads.map(l => {
-              const status = esc(l.processing_status || "—");
-              
-               const excludeKeys = new Set([
-                 "lead_id", "batch_id", "folder_name", "folder_path", "dossier_type",
-                 "total_documents", "processed_documents", "failed_documents", "status",
-                 "processing_status", "is_test", "extraction_prompt", "created_at",
-                 "updated_at", "account_lan", "lead_name", "telemetry", "_raw_ocr_text",
-                 "_page_extractions", "page_extractions", "_cited_pages", "_telemetry", "_phase_timings",
-                 "borrower_details", "co_borrower_details", "details_of_borrower", "details_of_co_borrower",
-                 "details_of_the_borrower", "borrowers", "co_borrowers", "co_applicants",
-                 "applicant_name", "applicant_address"
-               ]);
-               
-               const priorityCols = [
-                 "borrower_name", "borrower_address",
-                 "co_borrower_1_name", "co_borrower_1_address",
-                 "co_borrower_2_name", "co_borrower_2_address",
-                 "co_borrower_3_name", "co_borrower_3_address",
-                 "co_borrower_4_name", "co_borrower_4_address",
-                 "account_no_lan",
-                 "sanction_amount", "tos"
-               ];
 
-               const cardKeys = Object.keys(l).filter(k => 
-                 !excludeKeys.has(k) && !k.startsWith("_") && !k.startsWith("telemetry_") && 
-                 typeof l[k] !== 'object' && l[k] != null && l[k] !== "" && l[k] !== "—"
-               );
-               cardKeys.sort((a, b) => {
-                 const idxA = priorityCols.indexOf(a);
-                 const idxB = priorityCols.indexOf(b);
-                 if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-                 if (idxA !== -1) return -1;
-                 if (idxB !== -1) return 1;
-                 return a.localeCompare(b);
-               });
+    // Download button links
+    const dlCsv = $("#runDlCsvBtn");
+    if (dlCsv) dlCsv.href = `/api/legal/download/${encodeURIComponent(run.run_id)}`;
+    const dlExcel = $("#runDlExcelBtn");
+    if (dlExcel) dlExcel.href = `/api/legal/download/${encodeURIComponent(run.run_id)}/excel`;
 
-              let dynamicFieldsHtml = "";
-              cardKeys.forEach(k => {
-                 const val = l[k];
-                 const isAddr = k.toLowerCase().includes("address");
-                 const colSpan = isAddr ? 'style="grid-column: span 2;"' : '';
-                 dynamicFieldsHtml += `
-                  <div ${colSpan}>
-                    <div style="font-size: 11px; color: var(--ink-faint); margin-bottom: 4px; text-transform: uppercase; font-weight:600;">${esc(formatColName(k))}</div>
-                    <div style="font-size: 13px; color: var(--ink); ${isAddr ? 'white-space: normal; line-height: 1.45;' : ''}">${formatFieldValue(k, val)}</div>
-                  </div>
-                 `;
-              });
-              
-              return `
-                <div class="panel" style="padding: 20px; transition: box-shadow 0.2s; cursor:pointer;" onclick="openLead('${esc(l.lead_id)}')">
-                  <div style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 12px;">
-                     <div>
-                       <div style="font-size: 11px; color: var(--ink-faint); margin-bottom: 4px;">DOSSIER ID</div>
-                       <div style="font-weight: 600; font-size: 15px; color: var(--ink);">${esc(l.lead_id)}</div>
-                     </div>
-                     <div style="text-align: right;">
-                       ${badge(status)}
-                     </div>
-                  </div>
-                  <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px;">
-                     ${dynamicFieldsHtml || "<div style='color: var(--ink-faint); font-style: italic; font-size: 13px;'>No data extracted</div>"}
-                  </div>
-                </div>
-              `;
-            }).join("");
-       }
-    } catch (e) {
-        $("#runViewLeads").innerHTML = `<div style="color: var(--red);">Error loading extracted data.</div>`;
+    // Copy Prompt button
+    const copyPromptBtn = $("#runCopyPromptBtn");
+    if (copyPromptBtn) {
+      copyPromptBtn.onclick = () => {
+        navigator.clipboard.writeText(run.prompt || "");
+        toast("Extraction prompt copied to clipboard", "ok");
+      };
     }
+
+    // View in Dashboard button
+    const dashBtn = $("#runViewDashBtn");
+    if (dashBtn) {
+      dashBtn.onclick = () => {
+        state.batchId = run.run_id;
+        updateBatchFilterUI();
+        switchView("dashboard");
+      };
+    }
+
+    // Fetch leads for this specific run
+    const tbody = $("#runTableBody");
+    const theadRow = $("#runTableTheadRow");
+    tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:30px; color:var(--ink-faint);"><span class="spinner"></span> Loading extracted dossiers...</td></tr>`;
+
+    try {
+      const url = `/api/legal/leads?batch_id=${encodeURIComponent(run.run_id)}&limit=1000`;
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:30px; color:var(--red);">Failed to load dossiers for this run.</td></tr>`;
+        return;
+      }
+
+      currentRunLeads = await resp.json();
+      if (!Array.isArray(currentRunLeads) || currentRunLeads.length === 0) {
+        tbody.innerHTML = "";
+        $("#runTableEmpty").classList.remove("hidden");
+        $("#runTableCount").textContent = "0 dossiers";
+        return;
+      }
+
+      $("#runTableEmpty").classList.add("hidden");
+
+      // Determine dynamic columns for this run
+      const excludeKeys = new Set([
+        "lead_id", "batch_id", "batch_name", "folder_name", "folder_path", "dossier_type",
+        "total_documents", "processed_documents", "failed_documents", "status",
+        "processing_status", "is_test", "extraction_prompt", "created_at",
+        "updated_at", "account_lan", "lead_name", "telemetry", "_raw_ocr_text",
+        "_page_extractions", "page_extractions", "_cited_pages", "_telemetry", "_phase_timings",
+        "borrower_details", "co_borrower_details", "details_of_borrower", "details_of_co_borrower",
+        "details_of_the_borrower", "borrowers", "co_borrowers", "co_applicants",
+        "applicant_name", "applicant_address"
+      ]);
+
+      const keys = new Set();
+      currentRunLeads.forEach(r => {
+        Object.keys(r).forEach(k => {
+          if (!excludeKeys.has(k) && !k.startsWith("_") && !k.startsWith("telemetry_") && typeof r[k] !== 'object') {
+            keys.add(k);
+          }
+        });
+      });
+
+      const priorityCols = [
+        "borrower_name", "borrower_address",
+        "co_borrower_1_name", "co_borrower_1_address",
+        "co_borrower_2_name", "co_borrower_2_address",
+        "co_borrower_3_name", "co_borrower_3_address",
+        "co_borrower_4_name", "co_borrower_4_address",
+        "account_no_lan",
+        "sanction_amount", "tos"
+      ];
+
+      currentRunColumns = Array.from(keys).sort((a, b) => {
+        const idxA = priorityCols.indexOf(a);
+        const idxB = priorityCols.indexOf(b);
+        if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+        if (idxA !== -1) return -1;
+        if (idxB !== -1) return 1;
+        return a.localeCompare(b);
+      });
+
+      // Build table header
+      theadRow.innerHTML = `
+        <th style="min-width: 140px;">Dossier ID</th>
+        <th style="min-width: 110px;">Status</th>
+        ${currentRunColumns.map(c => {
+          const isAddr = c.toLowerCase().includes("address");
+          const style = isAddr ? 'style="min-width: 280px; max-width: 420px;"' : 'style="min-width: 140px;"';
+          return `<th ${style}>${formatColName(c)}</th>`;
+        }).join("")}
+      `;
+
+      // Set up search filter
+      const searchInput = $("#runTableSearch");
+      if (searchInput) {
+        searchInput.value = "";
+        searchInput.oninput = debounce(() => {
+          filterAndRenderRunRows(searchInput.value.trim().toLowerCase());
+        }, 180);
+      }
+
+      filterAndRenderRunRows("");
+
+    } catch (e) {
+      console.error(e);
+      tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:30px; color:var(--red);">Error loading dossier table: ${esc(e.message)}</td></tr>`;
+    }
+  }
+
+  function filterAndRenderRunRows(query = "") {
+    const tbody = $("#runTableBody");
+    const empty = $("#runTableEmpty");
+    const countEl = $("#runTableCount");
+
+    let filtered = currentRunLeads;
+    if (query) {
+      filtered = currentRunLeads.filter(r => {
+        if (r.lead_id && r.lead_id.toLowerCase().includes(query)) return true;
+        if (r.processing_status && r.processing_status.toLowerCase().includes(query)) return true;
+        return currentRunColumns.some(col => {
+          const val = r[col];
+          return val != null && String(val).toLowerCase().includes(query);
+        });
+      });
+    }
+
+    countEl.textContent = `Showing ${filtered.length} of ${currentRunLeads.length} dossier${currentRunLeads.length === 1 ? '' : 's'}`;
+    empty.classList.toggle("hidden", filtered.length > 0);
+
+    tbody.innerHTML = filtered.map(r => {
+      let tds = `
+        <td class="lead-id mono" style="font-weight:600; color:var(--accent);">${esc(r.lead_id)}</td>
+        <td>${badge(r.processing_status)}</td>
+      `;
+      currentRunColumns.forEach(col => {
+        let val = r[col];
+        if (val === undefined || val === null || val === "") val = "—";
+        else if (isFinancialField(col) && typeof val === "number") val = fmtINR(val);
+        else if (typeof val === 'number') val = val.toString();
+        
+        const isAddr = col.toLowerCase().includes("address");
+        const cellStyle = isAddr
+          ? 'style="min-width: 280px; max-width: 420px; white-space: normal; word-break: break-word; line-height: 1.45; font-size: 12.5px;"'
+          : '';
+        tds += `<td ${cellStyle}>${esc(val)}</td>`;
+      });
+
+      return `<tr data-id="${esc(r.lead_id)}" class="run-row-clickable">${tds}</tr>`;
+    }).join("");
+
+    // Clicking any lead row opens the full Lead Details Drawer
+    $$("#runTableBody tr.run-row-clickable").forEach(tr => {
+      tr.onclick = () => openLead(tr.dataset.id);
+    });
   }
 
   function passesColFilters(r) {
@@ -1199,6 +1301,7 @@ function formatFieldValue(k, v) {
       $("#drawer").classList.add("open"); $("#scrim").classList.add("open");
     } catch (e) { toast("Failed to open lead", "bad"); }
   }
+  window.openLead = openLead;
 
   function closeDrawer() {
     $("#drawer").classList.remove("open"); $("#scrim").classList.remove("open");
@@ -1580,7 +1683,13 @@ function formatFieldValue(k, v) {
         const fd = new FormData();
         if (selectedBatchType === "zip" && selectedZipFile) {
           fd.append("zip_file", selectedZipFile);
+          const zipBase = selectedZipFile.name.replace(/\.zip$/i, "");
+          fd.append("batch_name", zipBase);
         } else if (selectedBatchType === "folder" && selectedFolderFiles.length) {
+          const firstPath = selectedFolderFiles[0].path || "";
+          const parts = firstPath.split(/[\/\\]/).filter(Boolean);
+          const folderName = parts.length > 1 ? parts[0] : (selectedFolderFiles[0].file && selectedFolderFiles[0].file.webkitRelativePath ? selectedFolderFiles[0].file.webkitRelativePath.split(/[\/\\]/)[0] : "");
+          if (folderName) fd.append("batch_name", folderName);
           for (let i = 0; i < selectedFolderFiles.length; i++) {
             fd.append("files", selectedFolderFiles[i].file);
             fd.append("paths", selectedFolderFiles[i].path);

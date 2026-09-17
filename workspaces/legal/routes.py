@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import time
 import zipfile
 import json
@@ -70,13 +71,17 @@ def api_legal_upload_folder():
             except Exception:
                 pass
 
+        batch_name = request.form.get("batch_name", "").strip() or request.form.get("folder_name", "").strip()
+
         batch_folder_name = f"upload_batch_{int(time.time())}"
         target_extract_dir = os.path.join(settings.UPLOAD_DIR, "legal_batches", batch_folder_name)
         os.makedirs(target_extract_dir, exist_ok=True)
 
         local_path = request.form.get("folder_path", "").strip()
         if local_path and os.path.isdir(local_path):
-            result = scan_and_enqueue_folder(local_path, is_test=is_test, extraction_prompt=extraction_prompt)
+            if not batch_name:
+                batch_name = os.path.basename(local_path.rstrip("/\\"))
+            result = scan_and_enqueue_folder(local_path, is_test=is_test, extraction_prompt=extraction_prompt, batch_name=batch_name)
             if result.get("leads_enqueued", 0) == 0:
                 return jsonify({
                     "error": "No valid loan leads found in directory. Ensure folders match LAN numbers (e.g. UGALWMS0000090828) containing loan documents.",
@@ -87,6 +92,8 @@ def api_legal_upload_folder():
 
         zip_file = request.files.get("zip_file") or request.files.get("file")
         if zip_file and zip_file.filename and zip_file.filename.lower().endswith(".zip"):
+            if not batch_name:
+                batch_name = os.path.splitext(zip_file.filename)[0]
             safe_name = secure_filename(zip_file.filename) or "archive.zip"
             zip_path = os.path.join(target_extract_dir, safe_name)
             zip_file.save(zip_path)
@@ -96,7 +103,7 @@ def api_legal_upload_folder():
                 os.remove(zip_path)
             except Exception as e:
                 return jsonify({"error": f"Failed to extract zip file: {e}"}), 400
-            result = scan_and_enqueue_folder(target_extract_dir, is_test=is_test, extraction_prompt=extraction_prompt)
+            result = scan_and_enqueue_folder(target_extract_dir, is_test=is_test, extraction_prompt=extraction_prompt, batch_name=batch_name)
             if result.get("leads_enqueued", 0) == 0:
                 return jsonify({
                     "error": "No valid loan leads found in ZIP archive. Ensure folders match LAN numbers (e.g. UGALWMS0000090828) containing loan documents.",
@@ -118,6 +125,11 @@ def api_legal_upload_folder():
 
         if uploaded_files and any(f.filename for f in uploaded_files):
             custom_lead = request.form.get("lead_name", "").strip() or "Lead_Direct_Dossier"
+            if not batch_name:
+                if paths and paths[0]:
+                    batch_name = str(paths[0]).replace("\\", "/").split("/")[0]
+                elif custom_lead and custom_lead != "Lead_Direct_Dossier":
+                    batch_name = custom_lead
             has_subfolder = False
             if paths and any("/" in str(p).replace("\\", "/") for p in paths):
                 has_subfolder = True
@@ -140,7 +152,7 @@ def api_legal_upload_folder():
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
                 f.save(dest)
 
-            result = scan_and_enqueue_folder(target_extract_dir, is_test=is_test, extraction_prompt=extraction_prompt)
+            result = scan_and_enqueue_folder(target_extract_dir, is_test=is_test, extraction_prompt=extraction_prompt, batch_name=batch_name)
             if result.get("leads_enqueued", 0) == 0:
                 return jsonify({
                     "error": "No valid loan leads found in uploaded folder. Ensure folder contains lead directories matching LAN numbers (e.g. UGALWMS0000090828).",
@@ -224,6 +236,21 @@ def api_legal_leads():
     return jsonify(rows)
 
 
+def extract_run_folder_name(batch_name=None, folder_path=None, fallback=None):
+    if batch_name and str(batch_name).strip():
+        return str(batch_name).strip()
+    if folder_path:
+        norm = folder_path.replace("\\", "/")
+        m = re.search(r"legal_batches/(?:upload_batch|demo_batch)_[^/]+/([^/]+)", norm)
+        if m:
+            clean = re.sub(r"\s*\(\d+\)$", "", m.group(1)).strip()
+            if clean:
+                return clean
+    if fallback and str(fallback).strip():
+        return str(fallback).strip()
+    return "Untitled Run"
+
+
 @legal_bp.route("/api/legal/runs")
 def api_legal_runs():
     """Fetch history of distinct runs (batches) and their prompts."""
@@ -236,10 +263,12 @@ def api_legal_runs():
 
     try:
         with pg.pool().connection() as c:
-            runs = c.execute(f"""
+            query = f"""
                 SELECT 
                     batch_id, 
-                    MAX(folder_name) as run_name, 
+                    MAX(batch_name) as batch_name,
+                    MAX(folder_path) as folder_path,
+                    MAX(folder_name) as dossier_name,
                     MAX(extraction_prompt) as prompt,
                     MIN(created_at) as started_at,
                     COUNT(lead_id) as total_leads,
@@ -253,14 +282,17 @@ def api_legal_runs():
                 GROUP BY batch_id
                 ORDER BY started_at DESC
                 LIMIT 50
-            """).fetchall()
+            """
+            runs = c.execute(query).fetchall()
 
             # If no runs found in requested scope, fallback to returning all available runs
             if not runs and where_sql:
-                runs = c.execute("""
+                query_fallback = """
                     SELECT 
                         batch_id, 
-                        MAX(folder_name) as run_name, 
+                        MAX(batch_name) as batch_name,
+                        MAX(folder_path) as folder_path,
+                        MAX(folder_name) as dossier_name,
                         MAX(extraction_prompt) as prompt,
                         MIN(created_at) as started_at,
                         COUNT(lead_id) as total_leads,
@@ -273,7 +305,8 @@ def api_legal_runs():
                     GROUP BY batch_id
                     ORDER BY started_at DESC
                     LIMIT 50
-                """).fetchall()
+                """
+                runs = c.execute(query_fallback).fetchall()
             
             # Format results
             result = []
@@ -286,12 +319,22 @@ def api_legal_runs():
                 elif (r["failed"] or 0) > 0:
                     status = "partial"
                 
+                run_name = extract_run_folder_name(
+                    batch_name=r.get("batch_name"),
+                    folder_path=r.get("folder_path"),
+                    fallback=r.get("dossier_name")
+                )
+
                 result.append({
                     "run_id": r["batch_id"],
-                    "run_name": r["run_name"] or "Untitled Run",
+                    "run_name": run_name,
                     "prompt": r["prompt"] or "",
                     "started_at": r["started_at"].isoformat() if r["started_at"] else None,
-                    "leads": r["total_leads"],
+                    "leads": r["total_leads"] or 0,
+                    "completed": r["completed"] or 0,
+                    "failed": r["failed"] or 0,
+                    "processing": r["processing"] or 0,
+                    "pending": r["pending"] or 0,
                     "status": status,
                     "is_test": bool(r["is_test"])
                 })

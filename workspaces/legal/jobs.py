@@ -167,19 +167,29 @@ def _discover_lead_directories(root_path: str) -> List[Dict[str, Any]]:
     return leads
 
 
-def scan_and_enqueue_folder(root_path: str, is_test: bool = False, extraction_prompt: str = "") -> Dict[str, Any]:
-    """Scan uploaded folder structure and enqueue leads and their documents.
-
-    Shared FCL/Foreclosure folder:
-      If the batch root contains a folder named 'FCL', 'Foreclosure', etc., its
-      documents are NOT treated as a separate lead.  Instead, they are injected as
-      documents into every LAN lead that does NOT already have its own FCL file.
-      The pipeline recognises them via metadata={'shared_fcl': True} and filters
-      extractions to only the rows/pages that match the lead's own LAN.
-    """
+def scan_and_enqueue_folder(root_path: str, is_test: bool = False, extraction_prompt: str = "", batch_name: str = "") -> Dict[str, Any]:
+    """Scan uploaded folder structure and enqueue leads and their documents."""
     init_schema()
     batch_id = f"batch-legal-{int(time.time())}"
     leads_enqueued, docs_enqueued, skipped = 0, 0, 0
+
+    if not batch_name:
+        norm = root_path.replace("\\", "/")
+        m = re.search(r'legal_batches/(?:upload_batch|demo_batch)_\d+/([^/]+)', norm)
+        if m:
+            clean = re.sub(r'\s*\(\d+\)$', '', m.group(1).strip())
+            batch_name = clean or m.group(1).strip()
+        else:
+            try:
+                subdirs = [d for d in os.listdir(root_path) if os.path.isdir(os.path.join(root_path, d)) and not d.startswith('.') and d != '__MACOSX']
+                if len(subdirs) == 1:
+                    batch_name = subdirs[0]
+                else:
+                    batch_name = os.path.basename(root_path.rstrip("/\\"))
+            except Exception:
+                batch_name = os.path.basename(root_path.rstrip("/\\"))
+    if batch_name.startswith("upload_batch_") or batch_name.startswith("demo_batch_"):
+        batch_name = "Uploaded Dossier Batch"
 
     lead_folders = _discover_lead_directories(root_path)
 
@@ -262,11 +272,12 @@ def scan_and_enqueue_folder(root_path: str, is_test: bool = False, extraction_pr
             lead_name = lead_name.strip('0123456789_- ').replace('_', ' ') or folder_name
 
             res = c.execute(
-                "INSERT INTO legal_leads(lead_id, batch_id, folder_name, lead_name, "
+                "INSERT INTO legal_leads(lead_id, batch_id, batch_name, folder_name, lead_name, "
                 "folder_path, account_lan, total_documents, status, is_test, extraction_prompt) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, 'draft', %s, %s) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'draft', %s, %s) "
                 "ON CONFLICT (lead_id) DO UPDATE SET "
                 "batch_id = EXCLUDED.batch_id, "
+                "batch_name = COALESCE(EXCLUDED.batch_name, legal_leads.batch_name), "
                 "folder_path = EXCLUDED.folder_path, "
                 "lead_name = EXCLUDED.lead_name, "
                 "account_lan = EXCLUDED.account_lan, "
@@ -275,7 +286,7 @@ def scan_and_enqueue_folder(root_path: str, is_test: bool = False, extraction_pr
                 "is_test = EXCLUDED.is_test, "
                 "extraction_prompt = EXCLUDED.extraction_prompt, "
                 "updated_at = now() RETURNING lead_id;",
-                (lead_id, batch_id, folder_name, lead_name, folder_path,
+                (lead_id, batch_id, batch_name, folder_name, lead_name, folder_path,
                  account_lan, total_doc_count, is_test, extraction_prompt)
             ).fetchone()
 
@@ -294,7 +305,7 @@ def scan_and_enqueue_folder(root_path: str, is_test: bool = False, extraction_pr
                 
             c.execute("UPDATE legal_leads SET status = 'pending' WHERE lead_id = %s", (lead_id,))
 
-    return {"batch_id": batch_id, "leads_enqueued": leads_enqueued,
+    return {"batch_id": batch_id, "batch_name": batch_name, "leads_enqueued": leads_enqueued,
             "documents_enqueued": docs_enqueued, "skipped_empty_folders": skipped,
             "shared_fcl_files_found": len(shared_fcl_files),
             "workspace": "legal"}

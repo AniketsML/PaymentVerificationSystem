@@ -23,6 +23,7 @@ LEGAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS legal_leads (
     lead_id             TEXT PRIMARY KEY,
     batch_id            TEXT NOT NULL,
+    batch_name          TEXT,
     folder_name         TEXT NOT NULL,
     lead_name           TEXT,
     folder_path         TEXT,
@@ -49,6 +50,9 @@ BEGIN
     END IF; 
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='legal_leads' AND column_name='extracted_data') THEN 
         ALTER TABLE legal_leads ADD COLUMN extracted_data JSONB; 
+    END IF; 
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='legal_leads' AND column_name='batch_name') THEN 
+        ALTER TABLE legal_leads ADD COLUMN batch_name TEXT; 
     END IF; 
 END $$;
 
