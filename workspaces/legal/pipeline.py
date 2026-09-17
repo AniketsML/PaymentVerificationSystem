@@ -669,6 +669,11 @@ def process_lead(
                 # Capture provenance metadata
                 cited_pages = extracted.pop("_cited_pages", [])
                 field_page_sources = extracted.pop("_field_page_sources", {}) or {}
+                # how each value appears on the page (handwritten / printed) — absent on
+                # runs extracted before this was asked for, which read as "unknown".
+                field_scripts = extracted.pop("_field_scripts", {}) or {}
+                if not isinstance(field_scripts, dict):
+                    field_scripts = {}
 
                 # Also capture flat keys like borrower_name_page_sources
                 for k in list(extracted.keys()):
@@ -737,6 +742,7 @@ def process_lead(
                                 "filename": filename,
                                 "page_number": p_num,
                                 "fields": p_fields,
+                                "field_scripts": field_scripts,
                                 "ocr_route": route,
                                 "telemetry": meta,
                                 "mismatches": [],
@@ -763,6 +769,7 @@ def process_lead(
                             "filename": filename,
                             "page_number": p_num,
                             "fields": norm_fields,
+                            "field_scripts": field_scripts,
                             "ocr_route": route,
                             "telemetry": meta,
                             "mismatches": [],

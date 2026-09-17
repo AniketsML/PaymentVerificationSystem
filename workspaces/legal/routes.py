@@ -436,6 +436,24 @@ def api_legal_review(lead_id):
     return jsonify(rec)
 
 
+@legal_bp.route("/api/legal/lead/<lead_id>/provenance")
+def api_legal_lead_provenance(lead_id):
+    """Typed / handwritten verdict per extracted value (see workspaces/legal/provenance.py).
+    Derived at read time from the model's own flag and the document's text layer — it never
+    changes what the pipeline extracted."""
+    from workspaces.legal import provenance
+    return jsonify(provenance.analyze(lead_id, force=request.args.get("force") == "1"))
+
+
+@legal_bp.route("/api/legal/provenance/scan", methods=["POST"])
+def api_legal_provenance_scan():
+    """Tags for a batch of leads, so the dashboard can fill its Script column progressively."""
+    from workspaces.legal import provenance
+    body = request.get_json(force=True, silent=True) or {}
+    ids = [str(x) for x in (body.get("lead_ids") or []) if x]
+    return jsonify({"tags": provenance.scan(ids)})
+
+
 @legal_bp.route("/api/legal/observability")
 def api_legal_observability():
     scope = "test" if request.args.get("scope") == "test" else "real"

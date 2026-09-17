@@ -184,6 +184,19 @@ CREATE TABLE IF NOT EXISTS legal_prompt_history (
     prompt      TEXT NOT NULL UNIQUE,
     last_used   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- typed / handwritten provenance per extracted value (see workspaces/legal/provenance.py).
+-- Derived, never authoritative: `fingerprint` ties a verdict to the extraction it was computed
+-- from, so re-extracting a lead invalidates it. Safe to delete at any time; it recomputes.
+CREATE TABLE IF NOT EXISTS legal_field_provenance (
+    lead_id     TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    tag         TEXT NOT NULL,                    -- handwritten | scanned | typed | unknown
+    fields      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    counts      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    computed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_legal_provenance_tag ON legal_field_provenance(tag);
 """
 
 

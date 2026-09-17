@@ -24,62 +24,6 @@
       wsName: "SARFAESI Recovery Console"
     };
   </script>
-  <style>
-    .runs-rail::-webkit-scrollbar {
-      height: 6px;
-    }
-    .runs-rail::-webkit-scrollbar-thumb {
-      background: var(--line-strong, #ccc);
-      border-radius: 3px;
-    }
-    .run-card {
-      min-width: 270px;
-      max-width: 300px;
-      background: var(--surface);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 12px 14px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      flex-shrink: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      user-select: none;
-    }
-    .run-card:hover {
-      border-color: var(--accent);
-      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-      transform: translateY(-1px);
-    }
-    .run-card.active {
-      border: 2px solid var(--accent);
-      background: var(--surface-2);
-      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-    }
-    .run-card-title {
-      font-weight: 600;
-      font-size: 14px;
-      color: var(--ink);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .run-card-meta {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 12px;
-      color: var(--ink-faint);
-    }
-    .run-row-clickable {
-      cursor: pointer;
-      transition: background 0.15s ease;
-    }
-    .run-row-clickable:hover {
-      background: var(--surface-2) !important;
-    }
-  </style>
 </head>
 <body>
   <div class="shell">
@@ -245,10 +189,22 @@
               <button class="chip" data-status="failed"><i class="dot n"></i>Failed</button>
             </div>
             <div style="display: flex; gap: 8px; align-items: center; margin-left: auto;">
-              <button class="cf-clear hidden" id="clearFilters" title="Remove all column filters">✕ Clear filters</button>
+              <button class="cf-clear hidden" id="clearFilters" title="Remove all filters">✕ Clear filters</button>
               <span class="count" id="tableCount">—</span>
               <button class="btn line small" id="tableExportCsvBtn" title="Download table data as CSV">📥 Download CSV</button>
               <button class="btn solid small" id="tableExportExcelBtn" title="Download table data as Excel">📊 Download Excel</button>
+            </div>
+          </div>
+
+          <!-- how the values were read, and which fields are missing -->
+          <div class="facetrow">
+            <div class="facet">
+              <span class="facet-k">Script</span>
+              <div class="chips" id="scriptFacets"></div>
+            </div>
+            <div class="facet grow">
+              <span class="facet-k">Field coverage <span class="facet-hint">click to show the dossiers missing it</span></span>
+              <div class="covstrip" id="fieldCoverage"></div>
             </div>
           </div>
 
@@ -270,123 +226,142 @@
         </section>
       </section>
 
-      <!-- ═══ RUNS HISTORY ═══ -->
-      <section class="view hidden" id="view-runs" style="position: relative; min-height: 500px;">
-        <!-- Runs Browser Header & Carousel Controls -->
-        <div class="runs-browser-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
-          <div>
-            <h3 style="margin: 0; font-size: 17px; font-weight: 600; color: var(--ink);">Batch Runs</h3>
-            <div style="font-size: 12.5px; color: var(--ink-faint); margin-top: 2px;">Select a run to view its columnwise extracted dossiers, prompt, and download results</div>
+      <!-- ═══ RUNS HISTORY ═══
+           One run per page: scroll down through its dossiers, swipe sideways
+           (trackpad, touch, shift+wheel, ← →) or use the spine to move between runs. -->
+      <section class="view hidden runs-view" id="view-runs" aria-roledescription="carousel" aria-label="Batch runs">
+        <div class="rv-bar hidden" id="rvBar">
+          <div class="rv-bar-row">
+            <div class="rv-index" aria-hidden="true">
+              <span class="rv-roll rv-now" id="rvNow"></span>
+              <span class="rv-of">/ <span id="rvTotal">00</span></span>
+            </div>
+            <div class="rv-head">
+              <div class="rv-meta" id="rvMeta"></div>
+              <h2 class="rv-roll rv-title" id="rvTitle" aria-live="polite"></h2>
+            </div>
+            <div class="rv-actions">
+              <div class="rv-nav">
+                <button type="button" id="rvPrev" aria-label="Newer run" title="Newer run (←)">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+                </button>
+                <button type="button" id="rvNext" aria-label="Older run" title="Older run (→)">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>
+                </button>
+              </div>
+              <a class="btn line small" id="rvCsv" href="#" title="Download this run as CSV">CSV</a>
+              <a class="btn line small" id="rvXlsx" href="#" title="Download this run as Excel">Excel</a>
+              <button type="button" class="btn solid small" id="rvDash" title="Filter the dashboard to this run">Open in dashboard</button>
+            </div>
           </div>
-          <div style="display: flex; gap: 8px; align-items: center;">
-            <button id="runCarouselLeft" class="btn line icon-only" style="width: 34px; height: 34px; border-radius: 6px;" title="Scroll Left">◀</button>
-            <button id="runCarouselRight" class="btn line icon-only" style="width: 34px; height: 34px; border-radius: 6px;" title="Scroll Right">▶</button>
+          <div class="rv-spine" id="rvSpine" role="tablist" aria-label="Runs, newest to oldest">
+            <span class="rv-thumb" id="rvThumb" aria-hidden="true"></span>
+          </div>
+          <div class="rv-legend" id="rvLegend" aria-hidden="true">
+            <span>Newest</span>
+            <span class="rv-hint">Swipe sideways or press ← → to change run</span>
+            <span>Oldest</span>
           </div>
         </div>
 
-        <!-- Horizontal Runs Rail / Carousel -->
-        <div id="runsRailWrap" style="position: relative; margin-bottom: 24px;">
-          <div id="runsRail" class="runs-rail" style="display: flex; gap: 14px; overflow-x: auto; padding-bottom: 8px; scrollbar-width: thin; scroll-behavior: smooth;">
-            <!-- Rendered by JS -->
+        <div class="rv-stage hidden" id="rvStage">
+          <div class="rv-slide" id="rvSlide">
+            <div class="rv-summary" id="rvSummary"></div>
+            <div class="rv-toolbar">
+              <label class="field-search rv-search">
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><line x1="16.5" y1="16.5" x2="21" y2="21" stroke="currentColor" stroke-width="2"/></svg>
+                <input id="rvSearch" placeholder="Search this run — borrower, LAN, address…" autocomplete="off" aria-label="Search dossiers in this run">
+              </label>
+              <span class="rv-count-l" id="rvCount"></span>
+            </div>
+            <div class="rv-tablecard" id="rvTablecard">
+              <div class="rv-tablepan" id="rvTablepan">
+                <table class="rv-table" id="rvTable">
+                  <thead><tr id="rvThead"></tr></thead>
+                  <tbody id="rvTbody"></tbody>
+                </table>
+              </div>
+              <span class="rv-tablefade" id="rvTableFade" aria-hidden="true"></span>
+              <div class="empty hidden" id="rvRunEmpty"></div>
+            </div>
           </div>
         </div>
 
-        <!-- Current Run View Container -->
-        <div id="runViewer" style="width: 100%; transition: opacity 0.25s ease;">
-          <!-- Run Detail Banner & Actions -->
-          <div class="panel" style="padding: 20px; margin-bottom: 20px;">
-            <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 16px;">
-              <div>
-                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-                  <h2 id="runViewName" style="margin: 0; font-size: 22px; font-weight: 700; color: var(--ink);">Run Name</h2>
-                  <span id="runViewStatusBadge"></span>
-                </div>
-                <div id="runViewMeta" style="color: var(--ink-faint); font-size: 13px; margin-top: 6px; display: flex; gap: 14px; align-items: center; flex-wrap: wrap;">
-                  <span id="runViewDate">📅 Date</span>
-                  <span id="runViewCount">📁 0 dossiers</span>
-                  <span id="runViewCompletion">✓ 0 completed</span>
-                  <span id="runViewPageMeta" style="font-weight: 600; color: var(--ink-soft);">Run 1 of 1</span>
-                </div>
-              </div>
-              <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-                <a id="runDlCsvBtn" href="#" class="btn line small" title="Export this run as CSV">📥 Download CSV</a>
-                <a id="runDlExcelBtn" href="#" class="btn solid small" title="Export this run as Excel">📊 Download Excel</a>
-                <button id="runViewDashBtn" class="btn line small" title="Filter main dashboard to this batch">🔍 View in Dashboard</button>
-              </div>
-            </div>
-
-            <!-- The Prompt Snippet -->
-            <div style="margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px;">
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--ink-faint); font-weight: 600;">Extraction Prompt Used</div>
-                <button id="runCopyPromptBtn" class="btn line small" style="padding: 2px 8px; font-size: 11px;">📋 Copy Prompt</button>
-              </div>
-              <div id="runViewPrompt" style="background: var(--surface-2); border-left: 3px solid var(--accent); padding: 12px 14px; border-radius: 0 6px 6px 0; font-family: 'JetBrains Mono', monospace; font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow-y: auto;"></div>
-            </div>
-          </div>
-
-          <!-- Columnwise Extracted Leads Table -->
-          <section class="panel tablepanel" style="margin-bottom: 30px;">
-            <div class="tabrow" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line);">
-              <div style="display: flex; align-items: center; gap: 12px; flex: 1; max-width: 500px;">
-                <input type="text" id="runTableSearch" class="input" placeholder="🔍 Search dossiers in this run (borrower, account no, status, property, amount...)" style="width: 100%; font-size: 13px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink);">
-              </div>
-              <div style="display: flex; gap: 12px; align-items: center; margin-left: auto;">
-                <span class="tag" style="background: var(--surface-2); border: 1px solid var(--line); font-size: 11.5px; padding: 4px 8px;">31 SARFAESI Attributes</span>
-                <span class="count" id="runTableCount" style="font-size: 13px; font-weight: 500; color: var(--ink-faint);">0 dossiers</span>
-              </div>
-            </div>
-
-            <div class="tablewrap" style="overflow-x: auto; max-height: 650px;">
-              <table style="width: 100%; border-collapse: collapse;">
-                <thead>
-                  <tr id="runTableTheadRow">
-                    <th>Dossier ID</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody id="runTableBody"></tbody>
-              </table>
-              <div class="empty hidden" id="runTableEmpty" style="padding: 40px; text-align: center; color: var(--ink-faint);">
-                <span>No dossiers found matching your filter in this run.</span>
-              </div>
-            </div>
-          </section>
+        <div class="rv-peek prev" id="rvPeekPrev" aria-hidden="true">
+          <span class="rv-peek-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></span>
+          <span class="rv-peek-txt"><span class="rv-peek-k">Newer run</span><span class="rv-peek-v"></span></span>
+        </div>
+        <div class="rv-peek next" id="rvPeekNext" aria-hidden="true">
+          <span class="rv-peek-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></span>
+          <span class="rv-peek-txt"><span class="rv-peek-k">Older run</span><span class="rv-peek-v"></span></span>
         </div>
 
-        <div class="empty hidden" id="runsEmpty" style="margin-top: 40px; background: var(--surface); border: 1px dashed var(--line); border-radius: 8px; padding: 60px; text-align: center;">
-          <div style="font-size: 28px; margin-bottom: 8px;">📭</div>
-          <span style="color: var(--ink-faint); font-size: 14px;">No runs recorded in this scope yet.</span>
+        <div class="empty hidden rv-empty" id="runsEmpty">
+          <div class="rv-empty-mark" aria-hidden="true"></div>
+          <div>No runs in this scope yet.</div>
+          <div class="rv-empty-sub">Start an extraction from the Extractor tab and it will appear here.</div>
         </div>
       </section>
 
-      <!-- ═══ OBSERVABILITY ═══ -->
+      <!-- ═══ OBSERVABILITY ═══
+           Cost, speed and coverage per dossier and per run, from the telemetry the
+           pipeline already records. No extra model calls are made to build this. -->
       <section class="view hidden" id="view-observability">
-        <div class="statband" id="obsKpis"></div>
+        <div class="statband obs-band" id="obsKpis"></div>
 
         <div class="panelrow even">
           <section class="panel">
-            <div class="panel-head"><h3>OCR Route Distribution</h3><span class="tag">ENGINE ROUTING</span></div>
-            <canvas id="obsOcrChart" height="210"></canvas>
-            <div class="legend" id="obsOcrLegend" style="margin-top:10px"></div>
+            <div class="panel-head"><h3>Tokens per run</h3><span class="tag">PROMPT VS COMPLETION</span></div>
+            <div class="chart-box"><canvas id="obsRunTokens"></canvas></div>
           </section>
           <section class="panel">
-            <div class="panel-head"><h3>Phase Timings</h3><span class="tag">AVG LATENCY (MS)</span></div>
-            <canvas id="obsPhaseChart" height="210"></canvas>
+            <div class="panel-head"><h3>Model time per dossier</h3><span class="tag">AVG BY RUN</span></div>
+            <div class="chart-box"><canvas id="obsRunLatency"></canvas></div>
           </section>
         </div>
 
         <div class="panelrow even">
           <section class="panel">
-            <div class="panel-head"><h3>Property Verification Status</h3><span class="tag">3-TIER HIERARCHY</span></div>
-            <canvas id="obsPropChart" height="210"></canvas>
-            <div class="legend" id="obsPropLegend" style="margin-top:10px"></div>
+            <div class="panel-head"><h3>Field coverage</h3><span class="tag">% OF DOSSIERS WITH THE VALUE</span></div>
+            <div class="chart-box tall"><canvas id="obsCoverage"></canvas></div>
           </section>
           <section class="panel">
-            <div class="panel-head"><h3>Circuit Breaker &amp; Failover Health</h3><span class="tag">VLM RESILIENCE</span></div>
-            <div id="obsBreakerBox"></div>
+            <div class="panel-head"><h3>Typed vs handwritten</h3><span class="tag">WHERE VALUES CAME FROM</span></div>
+            <div class="chart-box"><canvas id="obsScript"></canvas></div>
+            <div class="legend" id="obsScriptLegend" style="margin-top:10px"></div>
           </section>
         </div>
+
+        <div class="panelrow even">
+          <section class="panel">
+            <div class="panel-head"><h3>Dossiers processed</h3><span class="tag">LAST 14 DAYS</span></div>
+            <div class="chart-box"><canvas id="obsThroughput"></canvas></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Engine &amp; health</h3><span class="tag">MODELS IN USE</span></div>
+            <div id="obsModelMix" class="obs-models"></div>
+            <div id="obsBreakerBox" style="margin-top:14px"></div>
+          </section>
+        </div>
+
+        <section class="panel tablepanel">
+          <div class="tabrow">
+            <div><h3 style="font-size:16px">Per-dossier telemetry</h3></div>
+            <span class="count" id="obsLeadCount" style="margin-left:auto"></span>
+          </div>
+          <div class="tablewrap obs-tablewrap">
+            <table class="obs-table">
+              <thead>
+                <tr>
+                  <th>Dossier</th><th>Status</th><th class="c-num">Tokens</th><th class="c-num">Prompt</th>
+                  <th class="c-num">Completion</th><th class="c-num">Model time</th><th class="c-num">Total</th>
+                  <th class="c-num">Pages</th><th class="c-num">Fields</th><th class="c-num">Docs read</th><th>Updated</th>
+                </tr>
+              </thead>
+              <tbody id="obsLeadRows"></tbody>
+            </table>
+          </div>
+        </section>
       </section>
 
     </main>
@@ -399,7 +374,7 @@
       <div>
         <div class="dh-eyebrow">SARFAESI Lead</div>
         <div class="dh-id mono" id="dLeadId">—</div>
-        <span class="badge" id="dStatus">—</span>
+        <span class="dh-tags"><span class="badge" id="dStatus">—</span><span id="dScriptTag"></span></span>
       </div>
       <div class="dh-actions">
         <a class="btn line small" id="dRawLink" target="_blank">Raw JSON</a>

@@ -11,6 +11,15 @@ from db import pg
 from workspaces.legal.db import init_schema
 
 
+# The lead row is the live state; `legal_lead_results` keeps the verdict of the LAST finished
+# extraction and survives a re-run. Reading the result row first therefore shows a re-queued
+# dossier as "completed" while it is still waiting or being read — so the lead row always wins,
+# and the result row is only a fallback. 'draft' is the split second during enqueue: show it as
+# queued rather than as a state of its own.
+LEAD_STATUS_SQL = ("CASE WHEN l.status = 'draft' THEN 'pending' "
+                   "ELSE COALESCE(l.status, r.processing_status, 'pending') END")
+
+
 class PgLegalLeadLogger:
     """PostgreSQL-backed event logger & query store for Legal Leads."""
 
@@ -308,7 +317,7 @@ class PgLegalLeadLogger:
         elif scope == "test":
             clauses.append("l.is_test = true")
         if status and status != "all":
-            clauses.append("COALESCE(r.processing_status, l.status, 'pending') = %s")
+            clauses.append(f"{LEAD_STATUS_SQL} = %s")
             params.append(status)
         if q:
             term = f"%{q.strip()}%"
@@ -323,7 +332,7 @@ class PgLegalLeadLogger:
                     l.account_lan,
                     l.folder_name,
                     l.batch_id,
-                    COALESCE(r.processing_status, l.status, 'pending') as processing_status,
+                    {LEAD_STATUS_SQL} as processing_status,
                     l.extracted_data,
                     r.raw_extractions,
                     r.applicant_name,
@@ -332,10 +341,12 @@ class PgLegalLeadLogger:
                     l.total_documents,
                     l.processed_documents,
                     l.failed_documents,
+                    p.tag AS script_tag,
                     l.created_at,
                     l.updated_at
                 FROM legal_leads l
                 LEFT JOIN legal_lead_results r ON l.lead_id = r.lead_id
+                LEFT JOIN legal_field_provenance p ON p.lead_id = l.lead_id
                 {where}
                 ORDER BY l.updated_at DESC
                 LIMIT {limit}
@@ -409,27 +420,30 @@ class PgLegalLeadLogger:
             return ret
 
     def status_counts(self, scope: str = "real", batch_id: str = None) -> Dict[str, int]:
-        clauses = []
+        clauses, params = [], []
         if scope == "real": clauses.append("l.is_test=false")
         elif scope == "test": clauses.append("l.is_test=true")
-        if batch_id: clauses.append(f"l.batch_id='{batch_id}'")
+        if batch_id:
+            clauses.append("l.batch_id = %s")
+            params.append(batch_id)
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        params = tuple(params)
         with pg.pool().connection() as c:
             rows = c.execute(f"""
-                SELECT COALESCE(r.processing_status, l.status, 'pending') as st, count(*) as n
+                SELECT {LEAD_STATUS_SQL} as st, count(*) as n
                 FROM legal_leads l
                 LEFT JOIN legal_lead_results r ON l.lead_id = r.lead_id
                 {where}
                 GROUP BY 1
-            """).fetchall()
-            total = c.execute(f"SELECT count(*) as total FROM legal_leads l {where}").fetchone()
+            """, params).fetchall()
+            total = c.execute(f"SELECT count(*) as total FROM legal_leads l {where}", params).fetchone()
             test_cnt = c.execute("SELECT count(*) as cnt FROM legal_leads WHERE is_test=true").fetchone()
             doc_total = c.execute(f"""
                 SELECT count(*) as cnt
                 FROM legal_lead_documents d
                 JOIN legal_leads l ON d.lead_id = l.lead_id
                 {where}
-            """).fetchone()
+            """, params).fetchone()
         counts = {"completed": 0, "partial": 0, "pending": 0, "processing": 0, "failed": 0,
                   "total": total["total"] if total else 0}
         for r in rows:
@@ -440,16 +454,18 @@ class PgLegalLeadLogger:
         return counts
 
     def document_type_counts(self, scope: str = "real", batch_id: str = None) -> List[Dict[str, Any]]:
-        clauses = []
+        clauses, params = [], []
         if scope == "real": clauses.append("l.is_test=false")
         elif scope == "test": clauses.append("l.is_test=true")
-        if batch_id: clauses.append(f"l.batch_id='{batch_id}'")
+        if batch_id:
+            clauses.append("l.batch_id = %s")
+            params.append(batch_id)
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         with pg.pool().connection() as c:
             rows = c.execute(
                 f"SELECT COALESCE(NULLIF(d.document_type,''),'unclassified') as doc_type,count(*) as n "
                 f"FROM legal_lead_documents d JOIN legal_leads l ON d.lead_id=l.lead_id "
-                f"{where} GROUP BY 1 ORDER BY 2 DESC LIMIT 15").fetchall()
+                f"{where} GROUP BY 1 ORDER BY 2 DESC LIMIT 15", tuple(params)).fetchall()
         return [{"document_type": r["doc_type"], "n": r["n"]} for r in rows]
 
     def save_review(self, lead_id: str, system_status: str, decision: str, document_id: str = None,

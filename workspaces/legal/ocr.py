@@ -269,6 +269,7 @@ class LegalVLMClient:
             f"5. For numbers or monetary amounts, extract the exact figures.\n"
             f"6. STRICT HEADING CONSTRAINT: If USER EXTRACTION INSTRUCTIONS or Focus Areas specifies a target heading (e.g. 'Schedule'), you must ONLY extract fields from pages displaying or belonging to that heading. If a page does NOT belong to that heading (such as a Power of Attorney, General Terms, or boilerplate clauses), DO NOT extract borrower details from it.\n"
             f"7. If the requested information is not found in this batch of pages, return an empty JSON object {{}}.\n"
+            f"8. SCRIPT TYPE: Provide '_field_scripts': a JSON object mapping each extracted field name to how that value appears on the page — \"handwritten\" when it is written by hand (ink, filled-in blanks, endorsements) or \"printed\" when it is machine-printed/typed, e.g. {{\"borrower_name\": \"printed\", \"co_borrower_1_name\": \"handwritten\"}}. Judge each value independently; omit a field you are unsure about.\n"
             f"\nReturn ONLY the JSON object."
         )
 

@@ -37,10 +37,10 @@
     let h; return (...a) => { clearTimeout(h); h = setTimeout(() => fn(...a), ms); };
   };
 
-  let state = { status: "all", q: "", scope: null, batchId: null };
+  let state = { status: "all", q: "", scope: null, batchId: null, script: "all", missing: null };
   let charts = {};
   let allRows = [];
-  const COL_FILTERS = { lead_id: null, account_no_lan: null, applicant_name: null, property_verification_status: null };
+  const COL_FILTERS = {};        // filled from the columns the extraction actually produced
   const rowVal = (r, col) => String(r[col] ?? "") || "—";
 
   /* ── toast ─────────────────────────────── */
@@ -95,7 +95,7 @@
   const TITLES = {
     dashboard: ["Overview", "Dashboard", "SARFAESI Section 13(2) Loan Document Dossier Processing"],
     runs: ["History", "Runs History", "Review previous dossier uploads and extraction prompts"],
-    observability: ["Operations", "Observability", "OCR engine routing, phase timings & circuit breaker resilience"],
+    observability: ["Operations", "Observability", "Tokens, model time, coverage and where the extracted values came from"],
   };
 
   function switchView(name) {
@@ -111,11 +111,10 @@
       state.batchId = null;
       updateBatchFilterUI();
     }
-    if (name !== "runs" && typeof runsPollTimer !== "undefined" && runsPollTimer) {
-      clearInterval(runsPollTimer);
-      runsPollTimer = null;
-    }
-    
+    // the runs view owns sideways gestures and hides the dashboard-only header tools
+    document.documentElement.classList.toggle("runs-mode", name === "runs");
+    if (name !== "runs") stopRunsPoll();
+
     if (name === "dashboard") refreshAll();
     if (name === "runs") loadRuns();
     if (name === "observability") loadObservability();
@@ -381,7 +380,7 @@
       "_page_extractions", "page_extractions", "_cited_pages", "_telemetry", "_phase_timings",
       "borrower_details", "co_borrower_details", "details_of_borrower", "details_of_co_borrower",
       "details_of_the_borrower", "borrowers", "co_borrowers", "co_applicants",
-      "applicant_name", "applicant_address"
+      "applicant_name", "applicant_address", "script_tag"
     ]);
     const keys = new Set();
     allRows.forEach(r => {
@@ -417,6 +416,7 @@
        theadRow.innerHTML = `
           <th class="th-filter" data-col="lead_id">Lead ID<span class="th-caret" aria-hidden="true">▾</span></th>
           <th class="th-filter" data-col="processing_status">Status<span class="th-caret" aria-hidden="true">▾</span></th>
+          <th class="th-filter" data-col="script_tag" title="Typed, or read off a scan / handwriting">Script<span class="th-caret" aria-hidden="true">▾</span></th>
           ${dynamicColumns.map(c => {
             const isAddr = c.toLowerCase().includes("address");
             const style = isAddr ? 'style="min-width: 280px; max-width: 420px;"' : '';
@@ -424,298 +424,774 @@
           }).join("")}
        `;
     }
-    
+
+    syncColFilters();
+    renderFacets();
     renderLeadRows();
+    scanMissingScriptTags();
   }
+
+  /* ── dashboard filters ───────────────────────
+     Column filters follow whatever columns the extraction produced; the facet bar adds the
+     cuts that are actually useful on this data: script type and "which field is missing". */
+  function syncColFilters() {
+    const live = new Set(["lead_id", "processing_status", "script_tag", ...dynamicColumns]);
+    Object.keys(COL_FILTERS).forEach(k => { if (!live.has(k)) delete COL_FILTERS[k]; });
+    live.forEach(k => { if (!(k in COL_FILTERS)) COL_FILTERS[k] = null; });
+  }
+
+  const SCRIPT_FACETS = [
+    ["all", "All"], ["handwritten", "Handwritten"], ["scanned", "Scanned"],
+    ["typed", "Typed"], ["unknown", "Unchecked"],
+  ];
+  const scriptOf = (r) => r.script_tag || "unknown";
+  const hasValue = (r, col) => r[col] !== undefined && r[col] !== null && String(r[col]).trim() !== "" && r[col] !== "—";
+
+  function facetRows() {
+    let rows = Array.isArray(allRows) ? allRows : [];
+    if (state.script !== "all") rows = rows.filter(r => scriptOf(r) === state.script);
+    if (state.missing) rows = rows.filter(r => !hasValue(r, state.missing));
+    return rows;
+  }
+
+  function renderFacets() {
+    const host = $("#scriptFacets");
+    if (host) {
+      const counts = {};
+      (allRows || []).forEach(r => { const s = scriptOf(r); counts[s] = (counts[s] || 0) + 1; });
+      host.innerHTML = SCRIPT_FACETS
+        .filter(([k]) => k === "all" || counts[k])
+        .map(([k, label]) => `<button type="button" class="chip sm${state.script === k ? " active" : ""}" data-script="${k}">
+            ${k === "all" ? "" : `<i class="dot s-dot-${k}"></i>`}${label}
+            <span class="chip-n">${k === "all" ? (allRows || []).length : counts[k]}</span></button>`).join("");
+      $$("[data-script]", host).forEach(b => b.onclick = () => {
+        state.script = b.dataset.script;
+        renderFacets();
+        renderLeadRows();
+      });
+    }
+    const cov = $("#fieldCoverage");
+    if (cov) {
+      const rows = allRows || [];
+      const cols = dynamicColumns.slice(0, 12);
+      cov.innerHTML = !rows.length || !cols.length ? "" : cols.map(c => {
+        const filled = rows.filter(r => hasValue(r, c)).length;
+        const pct = Math.round(100 * filled / rows.length);
+        const on = state.missing === c;
+        return `<button type="button" class="cov${on ? " on" : ""}" data-missing="${esc(c)}"
+            title="${rows.length - filled} dossier(s) missing ${esc(formatColName(c))} — click to show only those">
+            <span class="cov-l">${esc(formatColName(c))}</span>
+            <span class="cov-bar"><span style="width:${pct}%"></span></span>
+            <span class="cov-n">${pct}%</span></button>`;
+      }).join("");
+      $$("[data-missing]", cov).forEach(b => b.onclick = () => {
+        state.missing = state.missing === b.dataset.missing ? null : b.dataset.missing;
+        renderFacets();
+        renderLeadRows();
+      });
+    }
+  }
+
+  // Leads whose script tag hasn't been worked out yet get one in the background.
+  async function scanMissingScriptTags() {
+    const pending = (allRows || []).filter(r => !r.script_tag).map(r => r.lead_id);
+    for (let i = 0; i < pending.length; i += 25) {
+      const chunk = pending.slice(i, i + 25);
+      try {
+        const r = await fetch("/api/legal/provenance/scan", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lead_ids: chunk }),
+        });
+        if (!r.ok) return;
+        const { tags } = await r.json();
+        let touched = false;
+        (allRows || []).forEach(row => {
+          if (tags && tags[row.lead_id]) { row.script_tag = tags[row.lead_id]; touched = true; }
+        });
+        if (touched) { renderFacets(); renderLeadRows(); }
+      } catch (e) { return; }
+    }
+  }
+
+  /* ── runs view ─────────────────────────────────────────────────────────────
+     One run per page. Scrolling down walks that run's dossiers; a sideways gesture
+     (trackpad swipe, touch swipe, shift+wheel, ← →) or the spine moves to the
+     neighbouring run with a directional slide. Runs are tracked by run_id, so a new
+     upload landing at the front of the list never changes the run being viewed. */
+  const RUN_EXCLUDE = new Set([
+    "lead_id", "batch_id", "batch_name", "folder_name", "folder_path", "dossier_type",
+    "total_documents", "processed_documents", "failed_documents", "status",
+    "processing_status", "is_test", "extraction_prompt", "created_at",
+    "updated_at", "account_lan", "lead_name", "telemetry", "_raw_ocr_text",
+    "_page_extractions", "page_extractions", "_cited_pages", "_telemetry", "_phase_timings",
+    "borrower_details", "co_borrower_details", "details_of_borrower", "details_of_co_borrower",
+    "details_of_the_borrower", "borrowers", "co_borrowers", "co_applicants",
+    "applicant_name", "applicant_address", "script_tag"
+  ]);
+  const RUN_PRIORITY = [
+    "borrower_name", "borrower_address",
+    "co_borrower_1_name", "co_borrower_1_address",
+    "co_borrower_2_name", "co_borrower_2_address",
+    "co_borrower_3_name", "co_borrower_3_address",
+    "co_borrower_4_name", "co_borrower_4_address",
+    "account_no_lan",
+    "sanction_amount", "tos"
+  ];
+  const RUN_LIVE = new Set(["processing", "pending"]);
+  const RV_COMMIT = 120;   // drag distance (px) that switches run mid-gesture
+  const RV_RELEASE = 44;   // drag distance (px) that switches run when the gesture ends
+  const EASE_OUT = "cubic-bezier(.16,1,.3,1)";
+  const EASE_IN = "cubic-bezier(.55,0,.75,.2)";
+  const EASE_SPRING = "cubic-bezier(.34,1.56,.64,1)";
+  const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const pad2 = (n) => String(n).padStart(2, "0");
 
   let runsData = [];
-  let currentRunIndex = 0;
-  let currentRunLeads = [];
-  let currentRunColumns = [];
   let runsPollTimer = null;
+  const RV = {
+    scope: null, activeId: null, index: 0, cache: new Map(),
+    leads: [], columns: [], query: "", promptOpen: false,
+    busy: false, queued: null, token: 0,
+    drag: 0, pull: 0, pan: 0, suppressClick: 0,
+  };
 
-  async function loadRuns() {
-    try {
-      const resp = await fetch("/api/legal/runs?scope=" + state.scope);
-      if (!resp.ok) return;
-      runsData = await resp.json();
-      
-      const viewer = $("#runViewer");
-      const railWrap = $("#runsRailWrap");
-      const empty = $("#runsEmpty");
-      
-      if (!runsData || runsData.length === 0) {
-        if (viewer) viewer.classList.add("hidden");
-        if (railWrap) railWrap.classList.add("hidden");
-        if (empty) empty.classList.remove("hidden");
-        if (runsPollTimer) { clearInterval(runsPollTimer); runsPollTimer = null; }
-        return;
-      }
-      
-      if (empty) empty.classList.add("hidden");
-      if (viewer) viewer.classList.remove("hidden");
-      if (railWrap) railWrap.classList.remove("hidden");
-      
-      // Default to the most recent run or maintain index
-      if (currentRunIndex >= runsData.length) currentRunIndex = 0;
-      
-      renderRunsRail();
-      renderCurrentRun();
-      
-      // Carousel scroll buttons
-      const cLeft = $("#runCarouselLeft");
-      const cRight = $("#runCarouselRight");
-      const rail = $("#runsRail");
-      if (cLeft && rail) {
-        cLeft.onclick = () => rail.scrollBy({ left: -320, behavior: "smooth" });
-      }
-      if (cRight && rail) {
-        cRight.onclick = () => rail.scrollBy({ left: 320, behavior: "smooth" });
-      }
+  const isRunsVisible = () => !$("#view-runs").classList.contains("hidden");
+  const overlayOpen = () => !!colPopup || ["#drawer", "#pageModal", "#cfgModal"].some(s => $(s)?.classList.contains("open"));
 
-      // Auto-refresh runs view if any batch is currently processing
-      const hasActive = runsData.some(r => r.status === "processing" || r.status === "pending");
-      if (hasActive && !$("#view-runs").classList.contains("hidden")) {
-        if (!runsPollTimer) {
-          runsPollTimer = setInterval(() => {
-            if ($("#view-runs").classList.contains("hidden")) {
-              clearInterval(runsPollTimer);
-              runsPollTimer = null;
-            } else {
-              loadRuns();
-            }
-          }, 3000);
-        }
-      } else if (runsPollTimer) {
-        clearInterval(runsPollTimer);
-        runsPollTimer = null;
-      }
-      
-    } catch (e) {
-      toast("Failed to load runs history", "bad");
+  function stopRunsPoll() {
+    if (runsPollTimer) { clearInterval(runsPollTimer); runsPollTimer = null; }
+  }
+
+  function ensureRunsPoll() {
+    const live = runsData.some(r => RUN_LIVE.has(r.status));
+    if (!live || !isRunsVisible()) { stopRunsPoll(); return; }
+    if (!runsPollTimer) {
+      runsPollTimer = setInterval(() => (isRunsVisible() ? loadRuns({ quiet: true }) : stopRunsPoll()), 3000);
     }
   }
 
-  function renderRunsRail() {
-    const rail = $("#runsRail");
-    if (!rail) return;
-    
-    rail.innerHTML = runsData.map((r, idx) => {
-      const isActive = idx === currentRunIndex;
-      const dateStr = r.started_at 
-        ? new Date(r.started_at).toLocaleDateString("en-IN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) 
-        : "Recent";
-      const statusHtml = badge(r.status);
-      const testPill = r.is_test 
-        ? '<span style="font-size:10px; background:var(--surface-2); border:1px solid var(--line); padding:1px 5px; border-radius:3px; color:var(--ink-faint); font-weight:600;">TEST</span>' 
-        : '';
-      
-      return `
-        <div class="run-card ${isActive ? 'active' : ''}" data-index="${idx}">
-          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
-            <div class="run-card-title" title="${esc(r.run_name)}">📁 ${esc(r.run_name)}</div>
-            ${statusHtml}
-          </div>
-          <div class="run-card-meta">
-            <span>${r.leads} dossier${r.leads === 1 ? '' : 's'} · ${r.completed || 0} done</span>
-            ${testPill}
-          </div>
-          <div style="font-size:11px; color:var(--ink-faint); margin-top:2px;">
-            🕒 ${esc(dateStr)}
-          </div>
+  async function loadRuns({ quiet = false } = {}) {
+    if (RV.scope !== state.scope) {            // new scope: start from its newest run
+      RV.scope = state.scope;
+      RV.activeId = null;
+      RV.index = 0;
+      RV.cache.clear();
+    }
+    if (quiet && (RV.busy || RV.pull)) return; // never repaint mid-transition
+    let data;
+    try {
+      const resp = await fetch("/api/legal/runs?scope=" + encodeURIComponent(state.scope));
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      data = await resp.json();
+    } catch (e) {
+      if (!quiet) toast("Failed to load runs history", "bad");
+      return;
+    }
+
+    const prevStatus = new Map(runsData.map(r => [r.run_id, r.status]));
+    runsData = Array.isArray(data) ? data : [];
+    runsData.forEach(r => {                    // a run whose status moved has stale cached rows
+      const hit = RV.cache.get(r.run_id);
+      if (hit && hit.status !== r.status) RV.cache.delete(r.run_id);
+    });
+
+    const has = runsData.length > 0;
+    $("#runsEmpty").classList.toggle("hidden", has);
+    $("#rvBar").classList.toggle("hidden", !has);
+    $("#rvStage").classList.toggle("hidden", !has);
+    if (!has) { RV.activeId = null; stopRunsPoll(); return; }
+
+    let idx = runsData.findIndex(r => r.run_id === RV.activeId);
+    const sameRun = idx !== -1;
+    if (!sameRun) {
+      idx = Math.min(RV.index, runsData.length - 1);
+      RV.promptOpen = false;
+    }
+    RV.index = idx;
+    const run = runsData[idx];
+    RV.activeId = run.run_id;
+
+    renderSpine();
+    renderRunHeader(run, 0);
+    measureRunsChrome();
+    ensureRunsPoll();
+
+    const wasLive = RUN_LIVE.has(prevStatus.get(run.run_id));
+    if (quiet && sameRun && !wasLive && !RUN_LIVE.has(run.status) && RV.cache.has(run.run_id)) return;
+    await loadActiveRun(run, { stagger: !quiet, keepQuery: quiet && sameRun });
+    prefetchNeighbours();
+  }
+
+  async function fetchRunLeads(run) {
+    const resp = await fetch(`/api/legal/leads?batch_id=${encodeURIComponent(run.run_id)}&limit=1000`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    const leads = Array.isArray(data) ? data : [];
+    RV.cache.set(run.run_id, { leads, status: run.status });
+    return leads;
+  }
+
+  function prefetchNeighbours() {
+    [RV.index - 1, RV.index + 1].forEach(i => {
+      const r = runsData[i];
+      if (r && !RV.cache.has(r.run_id)) fetchRunLeads(r).catch(() => {});
+    });
+  }
+
+  // Paints cached rows (or a skeleton) synchronously, then refreshes from the server when
+  // there is no cache yet or the run is still being processed.
+  async function loadActiveRun(run, { stagger = false, keepQuery = false } = {}) {
+    const token = ++RV.token;
+    if (!keepQuery) { RV.query = ""; $("#rvSearch").value = ""; }
+    const hit = RV.cache.get(run.run_id);
+    if (hit) renderRunBody(run, hit.leads, stagger);
+    else renderRunSkeleton(run);
+    if (hit && !RUN_LIVE.has(run.status)) return;
+    try {
+      const leads = await fetchRunLeads(run);
+      if (token !== RV.token) return;          // the user already moved to another run
+      renderRunBody(run, leads, stagger && !hit);
+    } catch (e) {
+      if (token !== RV.token || hit) return;
+      renderRunError(run, e);
+    }
+  }
+
+  function runColumns(leads) {
+    const keys = new Set();
+    leads.forEach(r => Object.keys(r).forEach(k => {
+      if (!RUN_EXCLUDE.has(k) && !k.startsWith("_") && !k.startsWith("telemetry_") && typeof r[k] !== "object") keys.add(k);
+    }));
+    return [...keys].sort((a, b) => {
+      const ia = RUN_PRIORITY.indexOf(a), ib = RUN_PRIORITY.indexOf(b);
+      if (ia !== -1 && ib !== -1) return ia - ib;
+      if (ia !== -1) return -1;
+      if (ib !== -1) return 1;
+      return a.localeCompare(b);
+    });
+  }
+
+  function colClass(col) {
+    if (isFinancialField(col)) return "c-num";
+    if (/address|_add$|property|detail|description|direction/i.test(col)) return "c-long";
+    return "";
+  }
+
+  function fmtRunDate(iso, short = false) {
+    const d = iso ? new Date(iso) : null;
+    if (!d || isNaN(d)) return "Unknown date";
+    return d.toLocaleString("en-IN", short
+      ? { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }
+      : { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+
+  /* ── header, spine ── */
+  function rollText(host, text, dir) {
+    const cur = host.lastElementChild;
+    if (cur && cur.textContent === text) return;
+    const next = document.createElement("span");
+    next.textContent = text;
+    host.appendChild(next);
+    host.title = text;
+    if (!cur) return;
+    if (!dir || reducedMotion()) { [...host.children].forEach(c => c !== next && c.remove()); return; }
+    next.animate([{ transform: `translateY(${dir * 80}%)`, opacity: 0 }, { transform: "none", opacity: 1 }],
+      { duration: 480, easing: EASE_OUT });
+    cur.animate([{ transform: "none", opacity: 1 }, { transform: `translateY(${-dir * 80}%)`, opacity: 0 }],
+      { duration: 260, easing: EASE_IN, fill: "forwards" }).finished.then(() => cur.remove(), () => cur.remove());
+  }
+
+  function renderRunHeader(run, dir) {
+    rollText($("#rvNow"), pad2(RV.index + 1), dir);
+    rollText($("#rvTitle"), run.run_name || "Untitled run", dir);
+    $("#rvTotal").textContent = pad2(runsData.length);
+    $("#rvMeta").innerHTML = `${badge(run.status)}${run.is_test ? '<span class="rv-pill">Test</span>' : ""}
+      <span>${esc(fmtRunDate(run.started_at))}</span><span class="rv-sep">·</span>
+      <span>${run.leads} dossier${run.leads === 1 ? "" : "s"}</span>`;
+    $("#rvCsv").href = `/api/legal/download/${encodeURIComponent(run.run_id)}`;
+    $("#rvXlsx").href = `/api/legal/download/${encodeURIComponent(run.run_id)}/excel`;
+    $("#rvPrev").disabled = RV.index <= 0;
+    $("#rvNext").disabled = RV.index >= runsData.length - 1;
+  }
+
+  function renderSpine() {
+    const spine = $("#rvSpine");
+    const ids = runsData.map(r => r.run_id).join("|");
+    if (spine.dataset.ids !== ids) {
+      spine.dataset.ids = ids;
+      $$(".rv-tick", spine).forEach(t => t.remove());
+      const n = runsData.length;
+      spine.insertAdjacentHTML("beforeend", runsData.map((r, i) => {
+        const edge = n > 3 && i < n * 0.25 ? " tip-l" : (n > 3 && i >= n * 0.75 ? " tip-r" : "");
+        return `<button type="button" class="rv-tick${edge}" role="tab" data-i="${i}"
+          data-tip="${esc(r.run_name || "Untitled run")} · ${esc(fmtRunDate(r.started_at, true))}"
+          aria-label="${esc(r.run_name || "Untitled run")}"></button>`;
+      }).join(""));
+      $$(".rv-tick", spine).forEach(t => { t.onclick = () => goToRun(+t.dataset.i); });
+    }
+    $$(".rv-tick", spine).forEach((t, i) => {
+      const r = runsData[i];
+      t.classList.toggle("is-live", RUN_LIVE.has(r.status));
+      t.classList.toggle("is-failed", r.status === "failed");
+      t.setAttribute("aria-selected", i === RV.index ? "true" : "false");
+      t.tabIndex = i === RV.index ? 0 : -1;
+    });
+    placeThumb(0);
+  }
+
+  // progress: -1..1, how far the thumb leans toward the neighbouring run while dragging
+  function placeThumb(progress) {
+    const ticks = $$("#rvSpine .rv-tick");
+    const t = ticks[RV.index];
+    if (!t) return;
+    const pitch = ticks.length > 1 ? ticks[1].offsetLeft - ticks[0].offsetLeft : 0;
+    const thumb = $("#rvThumb");
+    thumb.style.width = t.offsetWidth + "px";
+    thumb.style.transform = `translateX(${t.offsetLeft + progress * pitch}px)`;
+  }
+
+  function measureRunsChrome() {
+    const view = $("#view-runs");
+    const rail = $(".rail");
+    const top = window.matchMedia("(min-width: 1000px)").matches || !rail ? 0 : rail.offsetHeight;
+    view.style.setProperty("--rv-top", `${top}px`);
+    view.style.setProperty("--rv-bar-h", `${$("#rvBar").offsetHeight}px`);
+  }
+
+  /* ── body: summary + table ── */
+  function runSummaryHTML(run, leads) {
+    const count = (...keys) => leads ? leads.filter(l => keys.includes(l.processing_status || "pending")).length : null;
+    const total = leads ? leads.length : (run.leads || 0);
+    const completed = leads ? count("completed") : (run.completed || 0);
+    const attention = count("partial", "missing_documents");
+    const failed = leads ? count("failed") : (run.failed || 0);
+    const queued = leads ? count("processing", "pending", "paused") : (run.processing || 0) + (run.pending || 0);
+    const docs = leads ? leads.reduce((a, l) => a + (l.total_documents || 0), 0) : null;
+    const stat = (cls, label, v) =>
+      `<div class="rv-stat ${cls}"><div class="n${v === 0 ? " zero" : ""}">${v == null ? "—" : v}</div><div class="l">${label}</div></div>`;
+    const seg = (cls, v) => (v ? `<span class="${cls}" style="flex:${v}"></span>` : "");
+    const prompt = (run.prompt || "").trim();
+    const long = prompt.length > 200 || prompt.split("\n").length > 3;
+    const open = RV.promptOpen && long;
+    return `
+      <div class="rv-stats-wrap">
+        <div class="rv-stats">
+          ${stat("tot", "Dossiers", total)}
+          ${stat("ok", "Completed", completed)}
+          ${stat("warn", "Partial / missing", attention)}
+          ${stat("bad", "Failed", failed)}
+          ${stat("live", "In queue", queued)}
         </div>
-      `;
-    }).join("");
+        <div class="rv-mix" aria-hidden="true">${seg("ok", completed)}${seg("warn", attention)}${seg("bad", failed)}${seg("live", queued)}</div>
+        ${docs != null ? `<div class="rv-docs-l">${docs} document${docs === 1 ? "" : "s"} across ${total} dossier${total === 1 ? "" : "s"}</div>` : ""}
+      </div>
+      <div class="rv-prompt${prompt ? "" : " is-empty"}${open ? " open" : ""}">
+        <div class="rv-prompt-k"><span>Extraction prompt</span>${prompt ? '<button type="button" class="rv-link" data-act="copy">Copy</button>' : ""}</div>
+        <div class="rv-prompt-t">${prompt ? esc(prompt) : "No prompt given for this run."}</div>
+        ${long ? `<button type="button" class="rv-link" data-act="more">${open ? "Show less" : "Show full prompt"}</button>` : ""}
+      </div>`;
+  }
 
-    // Bind card clicks
-    $$(".run-card", rail).forEach(card => {
-      card.onclick = () => {
-        const idx = parseInt(card.dataset.index, 10);
-        if (idx !== currentRunIndex) {
-          currentRunIndex = idx;
-          $$(".run-card", rail).forEach(c => c.classList.remove("active"));
-          card.classList.add("active");
-          card.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
-          renderCurrentRun();
+  function renderRunSkeleton(run) {
+    RV.leads = [];
+    RV.columns = [];
+    $("#rvSummary").innerHTML = runSummaryHTML(run, null);
+    $("#rvThead").innerHTML = `<th class="c-dossier">Dossier</th><th class="c-status">Status</th><th>Extracted fields</th>`;
+    const n = Math.min(6, Math.max(3, run.leads || 3));
+    $("#rvTbody").innerHTML = Array.from({ length: n }, (_, i) => `
+      <tr class="rv-skel" aria-hidden="true">
+        <td><i style="width:${68 + (i * 13) % 26}%"></i><i style="width:42%"></i></td>
+        <td><i style="width:64%"></i></td>
+        <td><i style="width:${58 + (i * 17) % 34}%"></i><i style="width:${34 + (i * 11) % 30}%"></i></td>
+      </tr>`).join("");
+    $("#rvRunEmpty").classList.add("hidden");
+    $("#rvCount").textContent = "Loading dossiers…";
+  }
+
+  function renderRunError(run, err) {
+    $("#rvTbody").innerHTML = "";
+    const empty = $("#rvRunEmpty");
+    empty.innerHTML = `Couldn't load this run's dossiers (${esc(err.message || "error")}).
+      <button type="button" class="rv-link" id="rvRetry">Try again</button>`;
+    empty.classList.remove("hidden");
+    $("#rvCount").textContent = "";
+    $("#rvRetry").onclick = () => loadActiveRun(run, { stagger: true });
+  }
+
+  function renderRunBody(run, leads, stagger) {
+    RV.leads = leads;
+    RV.columns = runColumns(leads);
+    $("#rvSummary").innerHTML = runSummaryHTML(run, leads);
+    $("#rvThead").innerHTML = `<th class="c-dossier">Dossier</th><th class="c-status">Status</th><th class="c-script">Script</th>` +
+      RV.columns.map(c => `<th class="${colClass(c)}">${esc(formatColName(c))}</th>`).join("");
+    renderRunRows(stagger);
+  }
+
+  function runCell(col, val) {
+    const label = esc(formatColName(col));
+    const cls = colClass(col);
+    if (val == null || val === "") return `<td class="${cls} c-empty" data-label="${label}">—</td>`;
+    const shown = esc(isFinancialField(col) && typeof val === "number" ? fmtINR(val) : String(val));
+    return `<td class="${cls}" data-label="${label}">${cls === "c-long" ? `<div class="rv-long">${shown}</div>` : shown}</td>`;
+  }
+
+  function renderRunRows(stagger = false) {
+    const q = RV.query.toLowerCase();
+    const cols = RV.columns;
+    const rows = !q ? RV.leads : RV.leads.filter(r =>
+      [r.lead_id, r.folder_name, r.processing_status, ...cols.map(c => r[c])]
+        .some(v => v != null && String(v).toLowerCase().includes(q)));
+    const total = RV.leads.length;
+    $("#rvCount").textContent = q
+      ? `${rows.length} of ${total} dossier${total === 1 ? "" : "s"}`
+      : `${total} dossier${total === 1 ? "" : "s"}`;
+    const empty = $("#rvRunEmpty");
+    empty.textContent = q ? "No dossiers in this run match your search." : "This run has no dossiers.";
+    empty.classList.toggle("hidden", rows.length > 0);
+
+    const animate = stagger && !reducedMotion();
+    $("#rvTbody").innerHTML = rows.map((r, i) => {
+      const enter = animate && i < 24 ? ` class="rv-enter" style="--d:${80 + i * 28}ms"` : "";
+      const docs = r.total_documents
+        ? `<div class="rv-sub">${r.processed_documents || 0}/${r.total_documents} docs read</div>` : "";
+      return `<tr tabindex="0" data-id="${esc(r.lead_id)}"${enter}>
+        <td class="c-dossier" data-label="Dossier"><div class="rv-name">${esc(r.folder_name || r.lead_name || r.lead_id)}</div><div class="rv-id">${esc(r.lead_id)}</div></td>
+        <td class="c-status" data-label="Status">${badge(r.processing_status)}${docs}</td>
+        <td class="c-script" data-label="Script">${scriptChip(r.script_tag)}</td>
+        ${cols.map(c => runCell(c, r[c])).join("")}
+      </tr>`;
+    }).join("");
+    fitRunTable();
+  }
+
+  // Long text columns get a readable share of the width; many columns tighten the table and,
+  // past that, the card itself pans sideways rather than hiding anything.
+  function fitRunTable() {
+    const table = $("#rvTable");
+    if (window.matchMedia("(max-width: 760px)").matches) { table.classList.remove("rv-dense"); return; }
+    const longCols = RV.columns.filter(c => colClass(c) === "c-long").length;
+    const width = $("#rvStage").clientWidth;
+    const min = longCols ? Math.round(Math.max(150, Math.min(260, (width * 0.55) / longCols))) : 0;
+    table.style.setProperty("--rv-long-min", `${min}px`);
+    table.classList.toggle("rv-dense", RV.columns.length > 8);
+    setTablePan(0);
+    // when the table itself pans, say so — the carousel then lives outside it (and on ← →)
+    const pans = tablePanMax() > 1;
+    const hint = $("#rvLegend .rv-hint");
+    if (hint) {
+      hint.textContent = pans
+        ? "Swipe over the table for more columns · swipe anywhere else, or ← →, to change run"
+        : "Swipe sideways or press ← → to change run";
+      $("#rvLegend").classList.toggle("hint-done", !pans && localStorage.getItem("legal-runs-hint") === "1");
+    }
+  }
+
+  /* ── panning wide extractions ──────────────
+     The card clips instead of scrolling (so the table head can stay pinned to the page), so
+     the columns are moved with a transform. A sideways gesture over the table pans it; once
+     it reaches the end, the same gesture moves to the neighbouring run. */
+  const tablePanMax = () => Math.max(0, $("#rvTable").offsetWidth - $("#rvTablecard").clientWidth);
+
+  function setTablePan(px) {
+    const max = tablePanMax();
+    RV.pan = Math.max(0, Math.min(max, px));
+    $("#rvTablepan").style.transform = RV.pan ? `translateX(${-RV.pan}px)` : "";
+    $("#rvTablecard").classList.toggle("can-pan", RV.pan < max - 1);
+  }
+
+  // A sideways gesture over a table that can still pan belongs to the table, not the carousel.
+  function tableCanPan(target, dx) {
+    if (!(target && target.closest && target.closest(".rv-tablecard"))) return false;
+    const max = tablePanMax();
+    if (max <= 1) return false;
+    return dx > 0 ? RV.pan < max - 1 : RV.pan > 1;
+  }
+
+  /* ── moving between runs ── */
+  function scrollRunsToTop() {
+    const view = $("#view-runs");
+    const top = view.getBoundingClientRect().top + window.scrollY -
+      (parseFloat(view.style.getPropertyValue("--rv-top")) || 0) - 12;
+    if (window.scrollY > top) window.scrollTo({ top: Math.max(0, top), behavior: "instant" });
+  }
+
+  const dragOpacity = (x) => 1 - Math.min(Math.abs(x) / 480, 0.3);
+  const clearSlideInline = (slide) => { slide.style.transform = ""; slide.style.opacity = ""; };
+
+  function bumpEdge(dir) {
+    if (reducedMotion()) return;
+    $("#rvSlide").animate(
+      [{ transform: "none" }, { transform: `translateX(${-dir * 18}px)` }, { transform: "none" }],
+      { duration: 380, easing: EASE_SPRING });
+  }
+
+  async function goToRun(target) {
+    if (!runsData.length) return;
+    if (target < 0 || target >= runsData.length) {
+      if (RV.pull) springBack(); else bumpEdge(target < 0 ? -1 : 1);
+      return;
+    }
+    if (RV.busy) { RV.queued = target; return; }
+    if (target === RV.index) { springBack(); return; }
+
+    RV.busy = true;
+    const dir = target > RV.index ? 1 : -1;
+    const run = runsData[target];
+    const slide = $("#rvSlide");
+    const motion = !reducedMotion();
+    const fromX = RV.drag;
+    RV.drag = 0;
+    RV.pull = 0;
+    hidePeek();
+    $("#rvBar").classList.remove("dragging");
+    $("#rvLegend").classList.add("hint-done");
+    try { localStorage.setItem("legal-runs-hint", "1"); } catch (_) {}
+
+    RV.index = target;
+    RV.activeId = run.run_id;
+    RV.promptOpen = false;
+    renderSpine();
+    renderRunHeader(run, dir);
+
+    if (motion) {
+      const exit = slide.animate([
+        { transform: `translateX(${fromX}px)`, opacity: dragOpacity(fromX) },
+        { transform: `translateX(${-dir * 90}px) scale(.985)`, opacity: 0 },
+      ], { duration: 230, easing: EASE_IN, fill: "forwards" });
+      clearSlideInline(slide);
+      await exit.finished.catch(() => {});
+    } else {
+      clearSlideInline(slide);
+    }
+
+    scrollRunsToTop();
+    loadActiveRun(run, { stagger: motion });   // paints cached rows or a skeleton right away
+    slide.getAnimations().forEach(a => a.cancel());
+    if (motion) {
+      await slide.animate([
+        { transform: `translateX(${dir * 120}px)`, opacity: 0 },
+        { transform: "none", opacity: 1 },
+      ], { duration: 560, easing: EASE_OUT }).finished.catch(() => {});
+    }
+
+    RV.busy = false;
+    measureRunsChrome();
+    prefetchNeighbours();
+    ensureRunsPoll();
+    if (RV.queued != null) {
+      const q = RV.queued;
+      RV.queued = null;
+      goToRun(q);
+    }
+  }
+
+  function rubber(x) {
+    return Math.sign(x) * 90 * (1 - 1 / (Math.abs(x) / 180 + 1));
+  }
+
+  // raw: signed pull in px. Negative pulls content left, revealing the next (older) run.
+  function setDrag(raw) {
+    const toNext = raw < 0;
+    const atEdge = toNext ? RV.index >= runsData.length - 1 : RV.index <= 0;
+    const x = atEdge ? rubber(raw) : raw;
+    RV.pull = raw;
+    RV.drag = x;
+    const slide = $("#rvSlide");
+    slide.style.transform = x ? `translateX(${x}px)` : "";
+    slide.style.opacity = String(dragOpacity(x));
+    $("#rvBar").classList.toggle("dragging", !!x);
+    placeThumb(atEdge ? 0 : Math.max(-1, Math.min(1, -raw / RV_COMMIT)) * 0.6);
+    showPeek(toNext, Math.abs(raw) / RV_COMMIT, atEdge);
+  }
+
+  function showPeek(toNext, amount, atEdge) {
+    const el = $(toNext ? "#rvPeekNext" : "#rvPeekPrev");
+    const other = $(toNext ? "#rvPeekPrev" : "#rvPeekNext");
+    other.style.opacity = "0";
+    other.classList.remove("armed");
+    const a = Math.max(0, Math.min(1, amount));
+    const target = runsData[RV.index + (toNext ? 1 : -1)];
+    $(".rv-peek-k", el).textContent = atEdge ? (toNext ? "Oldest run" : "Newest run") : (toNext ? "Older run" : "Newer run");
+    $(".rv-peek-v", el).textContent = atEdge ? "Nothing further" : (target.run_name || "Untitled run");
+    el.classList.toggle("edge", atEdge);
+    el.classList.toggle("armed", !atEdge && a >= RV_RELEASE / RV_COMMIT);
+    el.style.opacity = String(Math.min(1, a * 1.8));
+    el.style.transform = `translateY(-50%) translateX(${(toNext ? 1 : -1) * (1 - a) * 28}px) scale(${0.9 + a * 0.1})`;
+  }
+
+  function hidePeek() {
+    ["#rvPeekPrev", "#rvPeekNext"].forEach(s => {
+      const el = $(s);
+      el.style.opacity = "0";
+      el.style.transform = "";
+      el.classList.remove("armed");
+    });
+  }
+
+  function springBack() {
+    const slide = $("#rvSlide");
+    const x = RV.drag;
+    RV.drag = 0;
+    RV.pull = 0;
+    hidePeek();
+    $("#rvBar").classList.remove("dragging");
+    placeThumb(0);
+    if (x && !reducedMotion()) {
+      slide.animate([{ transform: `translateX(${x}px)`, opacity: dragOpacity(x) }, { transform: "none", opacity: 1 }],
+        { duration: 440, easing: EASE_SPRING });
+    }
+    clearSlideInline(slide);
+  }
+
+  function releaseDrag(velocity = 0, threshold = RV_RELEASE) {
+    if (!RV.pull) return;
+    const flick = Math.abs(velocity) > 0.45;
+    const dir = (flick ? velocity : RV.pull) < 0 ? 1 : -1;
+    const target = RV.index + dir;
+    if (target >= 0 && target < runsData.length && (flick || Math.abs(RV.pull) >= threshold)) goToRun(target);
+    else springBack();
+  }
+
+  function initRunsView() {
+    const view = $("#view-runs");
+
+    // trackpad / horizontal wheel: the content follows the fingers, then commits or springs back
+    let wheelIdle = null;
+    let wheelLocked = false;
+    view.addEventListener("wheel", (e) => {
+      if (!runsData.length || overlayOpen()) return;
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? window.innerWidth : 1;
+      let dx = e.deltaX * unit, dy = e.deltaY * unit;
+      if (e.shiftKey && Math.abs(dx) < Math.abs(dy)) { dx = dy; dy = 0; }
+      if (Math.abs(dx) < 2 || Math.abs(dx) <= Math.abs(dy)) return;   // vertical intent: page scrolls as usual
+      e.preventDefault();
+      if (!RV.pull && tableCanPan(e.target, dx)) {                     // pan the columns first
+        setTablePan(RV.pan + dx);
+        clearTimeout(wheelIdle);
+        wheelIdle = setTimeout(() => { wheelLocked = false; }, 160);
+        return;
+      }
+      clearTimeout(wheelIdle);
+      wheelIdle = setTimeout(() => { wheelLocked = false; releaseDrag(); }, 160);
+      if (wheelLocked || RV.busy) return;
+      if (e.shiftKey || e.deltaMode !== 0) {   // a mouse-wheel notch is one step
+        wheelLocked = true;
+        goToRun(RV.index + (dx > 0 ? 1 : -1));
+        return;
+      }
+      setDrag(RV.pull - dx * 0.7);
+      if (Math.abs(RV.pull) >= RV_COMMIT) { wheelLocked = true; releaseDrag(); }
+    }, { passive: false });
+
+    // touch / pen: follow the finger horizontally, leave vertical panning to the browser
+    let touch = null;
+    view.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" || !runsData.length || RV.busy || overlayOpen()) return;
+      touch = { id: e.pointerId, x0: e.clientX, y0: e.clientY, axis: null, lx: e.clientX, lt: e.timeStamp, v: 0 };
+    });
+    view.addEventListener("pointermove", (e) => {
+      if (!touch || e.pointerId !== touch.id) return;
+      const dx = e.clientX - touch.x0, dy = e.clientY - touch.y0;
+      if (!touch.axis) {
+        if (Math.hypot(dx, dy) < 10) return;
+        touch.axis = Math.abs(dx) > Math.abs(dy) * 1.2 ? "x" : "y";
+        if (touch.axis === "x" && tableCanPan(e.target, -dx)) {
+          touch.axis = "pan";
+          touch.pan0 = RV.pan;
+          try { view.setPointerCapture(e.pointerId); } catch (_) {}
+        } else if (touch.axis === "x") {
+          try { view.setPointerCapture(e.pointerId); } catch (_) {}
         }
-      };
+      }
+      if (touch.axis === "pan") { setTablePan(touch.pan0 - dx); return; }
+      if (touch.axis !== "x") return;
+      const dt = Math.max(1, e.timeStamp - touch.lt);
+      touch.v = (e.clientX - touch.lx) / dt;
+      touch.lx = e.clientX;
+      touch.lt = e.timeStamp;
+      setDrag(dx);
     });
-  }
+    const endTouch = (e) => {
+      if (!touch || e.pointerId !== touch.id) return;
+      const swiped = touch.axis === "x";
+      const panned = touch.axis === "pan";
+      const v = touch.v;
+      touch = null;
+      if (panned) { RV.suppressClick = Date.now() + 350; return; }
+      if (!swiped) return;
+      RV.suppressClick = Date.now() + 350;     // the lift after a swipe must not open a lead
+      releaseDrag(v, Math.max(RV_RELEASE, $("#rvStage").clientWidth * 0.15));
+    };
+    view.addEventListener("pointerup", endTouch);
+    view.addEventListener("pointercancel", endTouch);
 
-  async function renderCurrentRun() {
-    if (!runsData || currentRunIndex >= runsData.length) return;
-    
-    const run = runsData[currentRunIndex];
-    $("#runViewName").textContent = run.run_name || "Unnamed Batch";
-    $("#runViewDate").textContent = "📅 " + (run.started_at ? new Date(run.started_at).toLocaleString() : "Unknown date");
-    $("#runViewCount").textContent = `📁 ${run.leads} dossier${run.leads === 1 ? '' : 's'}`;
-    $("#runViewCompletion").textContent = `✓ ${run.completed || 0} completed`;
-    $("#runViewStatusBadge").innerHTML = badge(run.status) + (run.is_test ? ' <span style="background:var(--surface-2);color:var(--ink-faint);border:1px solid var(--line);font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;margin-left:6px;">TEST</span>' : '');
-    $("#runViewPrompt").textContent = run.prompt || "No explicit extraction prompt provided.";
-    
-    $("#runViewPageMeta").textContent = `Run ${currentRunIndex + 1} of ${runsData.length}`;
-
-    // Download button links
-    const dlCsv = $("#runDlCsvBtn");
-    if (dlCsv) dlCsv.href = `/api/legal/download/${encodeURIComponent(run.run_id)}`;
-    const dlExcel = $("#runDlExcelBtn");
-    if (dlExcel) dlExcel.href = `/api/legal/download/${encodeURIComponent(run.run_id)}/excel`;
-
-    // Copy Prompt button
-    const copyPromptBtn = $("#runCopyPromptBtn");
-    if (copyPromptBtn) {
-      copyPromptBtn.onclick = () => {
-        navigator.clipboard.writeText(run.prompt || "");
-        toast("Extraction prompt copied to clipboard", "ok");
-      };
-    }
-
-    // View in Dashboard button
-    const dashBtn = $("#runViewDashBtn");
-    if (dashBtn) {
-      dashBtn.onclick = () => {
-        state.batchId = run.run_id;
-        updateBatchFilterUI();
-        switchView("dashboard");
-      };
-    }
-
-    // Fetch leads for this specific run
-    const tbody = $("#runTableBody");
-    const theadRow = $("#runTableTheadRow");
-    tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:30px; color:var(--ink-faint);"><span class="spinner"></span> Loading extracted dossiers...</td></tr>`;
-
-    try {
-      const url = `/api/legal/leads?batch_id=${encodeURIComponent(run.run_id)}&limit=1000`;
-      const resp = await fetch(url);
-      if (!resp.ok) {
-        tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:30px; color:var(--red);">Failed to load dossiers for this run.</td></tr>`;
-        return;
-      }
-
-      currentRunLeads = await resp.json();
-      if (!Array.isArray(currentRunLeads) || currentRunLeads.length === 0) {
-        tbody.innerHTML = "";
-        $("#runTableEmpty").classList.remove("hidden");
-        $("#runTableCount").textContent = "0 dossiers";
-        return;
-      }
-
-      $("#runTableEmpty").classList.add("hidden");
-
-      // Determine dynamic columns for this run
-      const excludeKeys = new Set([
-        "lead_id", "batch_id", "batch_name", "folder_name", "folder_path", "dossier_type",
-        "total_documents", "processed_documents", "failed_documents", "status",
-        "processing_status", "is_test", "extraction_prompt", "created_at",
-        "updated_at", "account_lan", "lead_name", "telemetry", "_raw_ocr_text",
-        "_page_extractions", "page_extractions", "_cited_pages", "_telemetry", "_phase_timings",
-        "borrower_details", "co_borrower_details", "details_of_borrower", "details_of_co_borrower",
-        "details_of_the_borrower", "borrowers", "co_borrowers", "co_applicants",
-        "applicant_name", "applicant_address"
-      ]);
-
-      const keys = new Set();
-      currentRunLeads.forEach(r => {
-        Object.keys(r).forEach(k => {
-          if (!excludeKeys.has(k) && !k.startsWith("_") && !k.startsWith("telemetry_") && typeof r[k] !== 'object') {
-            keys.add(k);
-          }
-        });
-      });
-
-      const priorityCols = [
-        "borrower_name", "borrower_address",
-        "co_borrower_1_name", "co_borrower_1_address",
-        "co_borrower_2_name", "co_borrower_2_address",
-        "co_borrower_3_name", "co_borrower_3_address",
-        "co_borrower_4_name", "co_borrower_4_address",
-        "account_no_lan",
-        "sanction_amount", "tos"
-      ];
-
-      currentRunColumns = Array.from(keys).sort((a, b) => {
-        const idxA = priorityCols.indexOf(a);
-        const idxB = priorityCols.indexOf(b);
-        if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-        if (idxA !== -1) return -1;
-        if (idxB !== -1) return 1;
-        return a.localeCompare(b);
-      });
-
-      // Build table header
-      theadRow.innerHTML = `
-        <th style="min-width: 140px;">Dossier ID</th>
-        <th style="min-width: 110px;">Status</th>
-        ${currentRunColumns.map(c => {
-          const isAddr = c.toLowerCase().includes("address");
-          const style = isAddr ? 'style="min-width: 280px; max-width: 420px;"' : 'style="min-width: 140px;"';
-          return `<th ${style}>${formatColName(c)}</th>`;
-        }).join("")}
-      `;
-
-      // Set up search filter
-      const searchInput = $("#runTableSearch");
-      if (searchInput) {
-        searchInput.value = "";
-        searchInput.oninput = debounce(() => {
-          filterAndRenderRunRows(searchInput.value.trim().toLowerCase());
-        }, 180);
-      }
-
-      filterAndRenderRunRows("");
-
-    } catch (e) {
-      console.error(e);
-      tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:30px; color:var(--red);">Error loading dossier table: ${esc(e.message)}</td></tr>`;
-    }
-  }
-
-  function filterAndRenderRunRows(query = "") {
-    const tbody = $("#runTableBody");
-    const empty = $("#runTableEmpty");
-    const countEl = $("#runTableCount");
-
-    let filtered = currentRunLeads;
-    if (query) {
-      filtered = currentRunLeads.filter(r => {
-        if (r.lead_id && r.lead_id.toLowerCase().includes(query)) return true;
-        if (r.processing_status && r.processing_status.toLowerCase().includes(query)) return true;
-        return currentRunColumns.some(col => {
-          const val = r[col];
-          return val != null && String(val).toLowerCase().includes(query);
-        });
-      });
-    }
-
-    countEl.textContent = `Showing ${filtered.length} of ${currentRunLeads.length} dossier${currentRunLeads.length === 1 ? '' : 's'}`;
-    empty.classList.toggle("hidden", filtered.length > 0);
-
-    tbody.innerHTML = filtered.map(r => {
-      let tds = `
-        <td class="lead-id mono" style="font-weight:600; color:var(--accent);">${esc(r.lead_id)}</td>
-        <td>${badge(r.processing_status)}</td>
-      `;
-      currentRunColumns.forEach(col => {
-        let val = r[col];
-        if (val === undefined || val === null || val === "") val = "—";
-        else if (isFinancialField(col) && typeof val === "number") val = fmtINR(val);
-        else if (typeof val === 'number') val = val.toString();
-        
-        const isAddr = col.toLowerCase().includes("address");
-        const cellStyle = isAddr
-          ? 'style="min-width: 280px; max-width: 420px; white-space: normal; word-break: break-word; line-height: 1.45; font-size: 12.5px;"'
-          : '';
-        tds += `<td ${cellStyle}>${esc(val)}</td>`;
-      });
-
-      return `<tr data-id="${esc(r.lead_id)}" class="run-row-clickable">${tds}</tr>`;
-    }).join("");
-
-    // Clicking any lead row opens the full Lead Details Drawer
-    $$("#runTableBody tr.run-row-clickable").forEach(tr => {
-      tr.onclick = () => openLead(tr.dataset.id);
+    document.addEventListener("keydown", (e) => {
+      if (!isRunsVisible() || !runsData.length || overlayOpen() || e.altKey || e.ctrlKey || e.metaKey) return;
+      if (e.target.closest && e.target.closest("input, textarea, select, [contenteditable]")) return;
+      if (e.key === "ArrowRight") { e.preventDefault(); goToRun(RV.index + 1); }
+      else if (e.key === "ArrowLeft") { e.preventDefault(); goToRun(RV.index - 1); }
     });
+
+    $("#rvPrev").onclick = () => goToRun(RV.index - 1);
+    $("#rvNext").onclick = () => goToRun(RV.index + 1);
+    $("#rvDash").onclick = () => {
+      const run = runsData[RV.index];
+      if (!run) return;
+      state.batchId = run.run_id;
+      updateBatchFilterUI();
+      switchView("dashboard");
+    };
+
+    const tbody = $("#rvTbody");
+    tbody.addEventListener("click", (e) => {
+      if (Date.now() < RV.suppressClick) return;
+      const tr = e.target.closest("tr[data-id]");
+      if (tr) openLead(tr.dataset.id);
+    });
+    tbody.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const tr = e.target.closest("tr[data-id]");
+      if (tr) { e.preventDefault(); openLead(tr.dataset.id); }
+    });
+
+    $("#rvSummary").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-act]");
+      if (!btn) return;
+      if (btn.dataset.act === "copy") {
+        navigator.clipboard.writeText(runsData[RV.index]?.prompt || "")
+          .then(() => toast("Extraction prompt copied", "ok"), () => toast("Copy failed", "bad"));
+      } else if (btn.dataset.act === "more") {
+        RV.promptOpen = btn.closest(".rv-prompt").classList.toggle("open");
+        btn.textContent = RV.promptOpen ? "Show less" : "Show full prompt";
+      }
+    });
+
+    $("#rvSearch").oninput = debounce(() => {
+      RV.query = $("#rvSearch").value.trim();
+      renderRunRows(false);
+    }, 150);
+
+    try { if (localStorage.getItem("legal-runs-hint")) $("#rvLegend").classList.add("hint-done"); } catch (_) {}
+
+    let stuckRaf = 0;
+    window.addEventListener("scroll", () => {
+      if (stuckRaf || !isRunsVisible()) return;
+      stuckRaf = requestAnimationFrame(() => {
+        stuckRaf = 0;
+        const top = parseFloat(view.style.getPropertyValue("--rv-top")) || 0;
+        const bar = $("#rvBar");
+        bar.classList.toggle("is-stuck", window.scrollY > 0 && bar.getBoundingClientRect().top <= top + 0.5);
+      });
+    }, { passive: true });
+
+    window.addEventListener("resize", debounce(() => {
+      if (!isRunsVisible() || !runsData.length) return;
+      measureRunsChrome();
+      placeThumb(0);
+      fitRunTable();
+      setTablePan(RV.pan);
+    }, 120));
+    if (window.ResizeObserver) new ResizeObserver(() => isRunsVisible() && measureRunsChrome()).observe($("#rvBar"));
   }
 
   function passesColFilters(r) {
@@ -723,13 +1199,14 @@
   }
 
   function renderLeadRows() {
-    const rows = (Array.isArray(allRows) ? allRows : []).filter(passesColFilters);
+    const rows = facetRows().filter(passesColFilters);
     const body = $("#leadsBody");
-    const filtered = rows.length !== allRows.length;
-    const anyFilter = Object.values(COL_FILTERS).some(s => s !== null);
+    const total = (allRows || []).length;
+    const filtered = rows.length !== total;
+    const anyFilter = Object.values(COL_FILTERS).some(s => s !== null) || state.script !== "all" || !!state.missing;
 
     $("#tableCount").textContent = `${rows.length} lead${rows.length === 1 ? "" : "s"}` +
-      (filtered ? ` of ${allRows.length}` : "");
+      (filtered ? ` of ${total}` : "");
     $("#clearFilters").classList.toggle("hidden", !anyFilter);
 
     const empty = $("#tableEmpty");
@@ -739,6 +1216,7 @@
       let tds = `
         <td class="lead-id mono">${esc(r.lead_id)}</td>
         <td>${badge(r.processing_status)}</td>
+        <td class="c-script">${scriptChip(r.script_tag)}</td>
       `;
       dynamicColumns.forEach(col => {
          let val = r[col];
@@ -767,7 +1245,10 @@
   }
   function resetColFilters() {
     for (const k in COL_FILTERS) COL_FILTERS[k] = null;
+    state.script = "all";
+    state.missing = null;
     closeColFilter();
+    renderFacets();
     renderLeadRows();
   }
   function colDocDown(e) {
@@ -1098,9 +1579,19 @@ function formatFieldValue(k, v) {
 
     const customFields = (f.extracted_data && f.extracted_data.custom_fields) ? f.extracted_data.custom_fields : {};
     const flatF = { ...f, ...customFields };
-    const allExtractKeys = Object.keys(flatF).filter(k => 
-      !k.startsWith("_") && 
-      !["lead_id", "status", "processing_status", "raw_extractions", "extracted_data", "telemetry", "phase_timings", "updated_at", "created_at"].includes(k) &&
+    // internal bookkeeping never belongs in the value table — the page sections below show
+    // the per-page extractions, and the raw model output lives in the page preview modal
+    const NOT_A_VALUE = [
+      "lead_id", "status", "processing_status", "raw_extractions", "extracted_data", "telemetry",
+      "phase_timings", "updated_at", "created_at", "page_extractions", "cited_pages",
+      "field_scripts", "ocr_routes_used", "flags", "confidence_score", "is_test", "summary",
+      "raw_response", "raw_ocr_text", "ocr_route", "ocr_confidence", "page_number", "mismatches",
+    ];
+    const allExtractKeys = Object.keys(flatF).filter(k =>
+      !k.startsWith("_") &&
+      !NOT_A_VALUE.includes(k) &&
+      !k.endsWith("_page_sources") &&
+      typeof flatF[k] !== "object" &&
       flatF[k] != null && flatF[k] !== "" && flatF[k] !== "—"
     );
 
@@ -1165,17 +1656,20 @@ function formatFieldValue(k, v) {
     });
     const docsNoPages = allDocs.filter(d => !docsWithPages.includes(d));
 
+    // Each cited page is shown as the page itself next to exactly what was read off it.
+    // The raw model output stays one click away, in the page preview modal.
     const docProvenanceSection = `
       <div class="d-section">
-        <h4>Page Extraction Provenance <span class="n">${docsWithPages.length} document${docsWithPages.length === 1 ? '' : 's'} with extracted data</span></h4>
-        <p class="lede" style="margin-bottom:14px">Exact pages where data was extracted — side-by-side visual evidence with the precise fields pulled from each page.</p>
-        ${docsWithPages.length === 0 ? `<div style="color:var(--ink-faint); font-style:italic; padding:12px; background:var(--surface); border:1px dashed var(--line); border-radius:6px;">No specific cited pages with data found.</div>` : ""}
+        <h4>Pages &amp; what was read from them
+          <span class="n" id="provSummary">${docsWithPages.length} document${docsWithPages.length === 1 ? '' : 's'} cited</span></h4>
+        <p class="lede" style="margin-bottom:14px">Every value sits beside the page it came from. Click a page to open it full size with the raw model output.</p>
+        ${docsWithPages.length === 0 ? `<div class="pg-none">No pages were cited for this dossier.</div>` : ""}
         ${docsWithPages.map(d => {
           const dPages = pageExtractions.filter(p => {
             const isDoc = p.document_id === d.document_id || p.filename === d.filename;
             return isDoc && Object.keys(getPageRealFields(p)).length > 0;
           });
-          
+
           dPages.forEach(p => {
             window.__pageData[`${d.document_id}-${p.page_number}`] = p;
           });
@@ -1184,46 +1678,62 @@ function formatFieldValue(k, v) {
             <div class="doc-provenance-box" id="doc-${esc(d.document_id)}">
               <div class="doc-prov-head">
                 <div class="doc-prov-title">
-                  <span>📄 ${esc(d.filename)}</span>
+                  <span class="dp-file">${esc(d.filename)}</span>
                   <span class="tag" style="background:var(--surface);border:1px solid var(--line-strong)">${esc(d.document_type || "document")}</span>
                 </div>
                 <div class="doc-prov-meta">
-                  <span>${formatBytes(d.file_size_bytes)}</span>
+                  <span>${dPages.length} of ${d.page_count || 1} page${(d.page_count || 1) === 1 ? "" : "s"} cited</span>
                   <span>·</span>
-                  <span>${d.page_count || 1} page${(d.page_count || 1) === 1 ? "" : "s"} total</span>
-                  <a class="btn line small" href="/api/legal/document/${encodeURIComponent(d.document_id)}/file" target="_blank" style="margin-left:6px">View File ↗</a>
+                  <span>${formatBytes(d.file_size_bytes)}</span>
+                  <a class="btn line small" href="/api/legal/document/${encodeURIComponent(d.document_id)}/file" target="_blank" style="margin-left:6px">Open file ↗</a>
                 </div>
               </div>
-              <div class="page-cards-list">
-                ${dPages.map(p => {
-                  const realFields = getPageRealFields(p);
-                  const fieldCount = Object.keys(realFields).length;
-                  return `
-                  <div class="page-card" id="page-${esc(d.document_id)}-${p.page_number}" onclick="openPageModal('${d.document_id}', '${esc(d.filename)}', ${p.page_number}, ${d.page_count || 1})" title="Click to view full-resolution page and raw extractions">
-                    <div class="page-num-badge">PAGE ${p.page_number} OF ${d.page_count || 1}</div>
-                    <div class="page-thumb-wrap">
-                      <img class="page-thumb-img" src="/api/legal/document/${encodeURIComponent(d.document_id)}/page/${encodeURIComponent(p.page_number)}" loading="lazy" alt="Page ${p.page_number}" onerror="this.onerror=null;this.src='';this.alt='Preview unavailable'">
+              ${dPages.map(p => {
+                const realFields = getPageRealFields(p);
+                const keys = Object.keys(realFields);
+                return `
+                <div class="pg-row" id="page-${esc(d.document_id)}-${p.page_number}">
+                  <button type="button" class="pg-shot" data-open-page="1" data-doc="${esc(d.document_id)}"
+                          data-page="${p.page_number}" data-pages="${d.page_count || 1}" data-file="${esc(d.filename)}"
+                          title="Open page ${p.page_number} full size with the raw extraction">
+                    <span class="pg-shot-badge">Page ${p.page_number}<span class="of"> / ${d.page_count || 1}</span></span>
+                    <img class="pg-shot-img" loading="lazy" alt="Page ${p.page_number} of ${esc(d.filename)}"
+                         src="/api/legal/document/${encodeURIComponent(d.document_id)}/page/${encodeURIComponent(p.page_number)}"
+                         onerror="this.closest('.pg-shot').classList.add('no-img')">
+                    <span class="pg-shot-hint">Open full page ↗</span>
+                  </button>
+                  <div class="pg-panel">
+                    <div class="pg-panel-head">
+                      <h5>Read from this page</h5>
+                      <span class="pg-count">${keys.length} field${keys.length === 1 ? "" : "s"}</span>
                     </div>
-                    <div style="display:flex; flex-direction:column; gap:4px; width:100%; align-items:center; text-align:center; margin-top:4px;">
-                      <a href="javascript:void(0)" onclick="event.stopPropagation(); openPageModal('${d.document_id}', '${esc(d.filename)}', ${p.page_number}, ${d.page_count || 1})" style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--accent);text-decoration:none;font-weight:600">Enlarge Page ↗</a>
-                      <span class="page-route-badge" style="width:100%;">${esc(p.ocr_route || p.phase || "Vision Model")}</span>
-                      ${fieldCount > 0 ? `<span class="tag ok" style="font-size:10px; padding:2px 6px; border-radius:3px;">${fieldCount} field${fieldCount === 1 ? '' : 's'} extracted</span>` : ''}
+                    <table class="pg-kv">
+                      <tbody>
+                        ${keys.map(fk => `
+                          <tr>
+                            <td class="pg-k">${esc(formatFieldLabel(fk))}</td>
+                            <td class="pg-v${isFinancialField(fk) ? " mono" : ""}">${formatFieldValue(fk, realFields[fk])}<span class="s-chip" data-prov="${p.page_number}|${esc(fk)}" hidden></span></td>
+                          </tr>`).join("")}
+                      </tbody>
+                    </table>
+                    <div class="pg-panel-foot">
+                      <span class="page-route-badge">${esc(p.ocr_route || p.phase || "Vision model")}</span>
+                      <span class="pg-foot-hint">Raw output in the page preview</span>
                     </div>
-                  </div>`;
-                }).join("")}
-              </div>
+                  </div>
+                </div>`;
+              }).join("")}
             </div>`;
         }).join("")}
         ${docsNoPages.length > 0 ? `
-          <div style="margin-top:14px;padding:12px 16px;border:1px solid var(--line);background:var(--surface-2);border-radius:var(--radius-sm)">
-            <div style="font-size:11px;font-weight:600;letter-spacing:.06em;color:var(--ink-faint);text-transform:uppercase;margin-bottom:8px">Ingested — No extractable data found</div>
+          <div class="pg-unread">
+            <div class="pg-unread-k">In the dossier — not cited by this extraction</div>
             ${docsNoPages.map(d => `
-              <div style="display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid var(--line)">
-                <span style="font-size:13px">📄</span>
-                <span style="font-size:12.5px;font-family:'JetBrains Mono',monospace;flex:1">${esc(d.filename)}</span>
-                <span class="tag" style="font-size:10.5px">${esc(d.document_type || "document")}</span>
-                <span style="font-size:11.5px;color:var(--ink-faint)">${formatBytes(d.file_size_bytes)}</span>
-                <a class="btn line small" href="/api/legal/document/${encodeURIComponent(d.document_id)}/file" target="_blank">View ↗</a>
+              <div class="pg-unread-row">
+                <span class="pg-unread-file">${esc(d.filename)}</span>
+                <span class="tag">${esc(d.document_type || "document")}</span>
+                <span class="pg-unread-meta">${d.page_count || 1} page${(d.page_count || 1) === 1 ? "" : "s"} · ${formatBytes(d.file_size_bytes)}</span>
+                <a class="btn line small" href="/api/legal/document/${encodeURIComponent(d.document_id)}/file" target="_blank">Open ↗</a>
               </div>`).join("")}
           </div>` : ""}
       </div>`;
@@ -1271,12 +1781,61 @@ function formatFieldValue(k, v) {
     $("#drawerBody").innerHTML = summary + telemetryBanner + metaSection + consolidatedHtml + docProvenanceSection + eventLogsHtml;
   }
 
+  /* ── typed / handwritten chips ───────────────
+     Worked out at read time from the model's own per-field flag (runs extracted since it was
+     asked for) and, failing that, the document's text layer. Loaded after the drawer paints
+     so the dossier never waits on it. */
+  const SCRIPT_LABEL = {
+    handwritten: ["Handwritten", "The model read this value as handwriting"],
+    scanned: ["Scanned", "Not in the document's text layer — read from the page image, so it may be handwritten"],
+    typed: ["Typed", "Found in the document's own text layer"],
+    printed: ["Typed", "The model read this value as machine print"],
+    unknown: ["Unchecked", "The page could not be checked"],
+  };
+
+  async function loadLeadProvenance(leadId) {
+    let data;
+    try {
+      const r = await fetch(`/api/legal/lead/${encodeURIComponent(leadId)}/provenance`);
+      if (!r.ok) return;
+      data = await r.json();
+    } catch (e) { return; }
+    if ($("#dLeadId").textContent !== leadId) return;      // the drawer moved on
+    const fields = data.fields || {};
+    $$("#drawerBody .s-chip[data-prov]").forEach(chip => {
+      const info = fields[chip.dataset.prov];
+      const key = (info && info.script) || "unknown";
+      const [label, why] = SCRIPT_LABEL[key] || SCRIPT_LABEL.unknown;
+      chip.className = `s-chip s-${key === "printed" ? "typed" : key}`;
+      chip.textContent = label;
+      chip.title = info && info.source === "model" ? `${why} (model)` : why;
+      chip.hidden = false;
+    });
+    const c = data.counts || {};
+    const parts = [];
+    if (c.handwritten) parts.push(`${c.handwritten} handwritten`);
+    if (c.scanned) parts.push(`${c.scanned} scanned`);
+    const typed = (c.typed || 0) + (c.printed || 0);
+    if (typed) parts.push(`${typed} typed`);
+    const sum = $("#provSummary");
+    if (sum && parts.length) sum.textContent = parts.join(" · ");
+    const badgeHost = $("#dScriptTag");
+    if (badgeHost) badgeHost.innerHTML = scriptChip(data.tag);
+  }
+
+  const scriptChip = (tag) => {
+    const key = tag && SCRIPT_LABEL[tag] ? tag : "unknown";
+    const [label, why] = SCRIPT_LABEL[key];
+    return `<span class="s-chip s-${key === "printed" ? "typed" : key}" title="${esc(why)}">${label}</span>`;
+  };
+
   async function openLead(id) {
     try {
       const r = await fetch("/api/legal/lead/" + encodeURIComponent(id));
       if (!r.ok) { toast("Lead not found: " + esc(id), "bad"); return; }
       renderDrawer(await r.json());
       $("#drawer").classList.add("open"); $("#scrim").classList.add("open");
+      loadLeadProvenance(id);
     } catch (e) { toast("Failed to open lead", "bad"); }
   }
   window.openLead = openLead;
@@ -1795,113 +2354,181 @@ function formatFieldValue(k, v) {
     if ($("#tableDemoBtn")) $("#tableDemoBtn").onclick = triggerDemo;
   }
 
-  /* ── observability view ─────────────────── */
+  /* ── observability view ──────────────────────────────────────────────────────
+     What a dossier costs and where the time goes: tokens per dossier and per run, VLM
+     latency, how much of each dossier was actually read, which fields the prompt is
+     landing, and how much of the data came off scans or handwriting. Everything here is
+     aggregated from telemetry the pipeline already stores — no extra model calls. */
+  const fmtInt = (n) => (n == null ? "—" : Number(n).toLocaleString("en-IN"));
+  const fmtCompact = (n) => {
+    const v = Number(n || 0);
+    if (v >= 1e7) return (v / 1e7).toFixed(2) + " Cr";
+    if (v >= 1e5) return (v / 1e5).toFixed(2) + " L";
+    if (v >= 1000) return (v / 1000).toFixed(v >= 10000 ? 0 : 1) + "k";
+    return String(Math.round(v));
+  };
+  const fmtMs = (ms) => {
+    const v = Number(ms || 0);
+    if (!v) return "—";
+    return v >= 1000 ? `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}s` : `${Math.round(v)}ms`;
+  };
+
+  function obsKpis(d) {
+    const t = d.totals || {}, lat = d.latency || {}, docs = d.documents || {};
+    const scripts = Object.fromEntries((d.script_mix || []).map(s => [s.tag, s.n]));
+    const offScan = (scripts.handwritten || 0) + (scripts.scanned || 0);
+    const scanned = (d.script_mix || []).reduce((a, s) => a + s.n, 0);
+    return [
+      ["tot", "Dossiers", fmtInt(t.leads), `${fmtInt(docs.documents)} documents · ${fmtInt(docs.pages)} pages`],
+      ["live", "Tokens used", fmtCompact(t.tokens), `${fmtInt(t.prompt_tokens)} prompt · ${fmtInt(t.completion_tokens)} completion`],
+      ["live", "Tokens / dossier", fmtCompact(t.avg_tokens), `peak ${fmtCompact(t.max_tokens)}`],
+      ["ok", "Model time / dossier", fmtMs(t.avg_vlm_ms), `p50 ${fmtMs(lat.vlm_p50)} · p95 ${fmtMs(lat.vlm_p95)}`],
+      ["ok", "Pages read", fmtInt(t.cited_pages), t.pages_read_pct != null ? `${t.pages_read_pct}% of all pages` : "of the pages cited"],
+      ["warn", "Fields / dossier", (t.avg_fields || 0).toFixed(1), `${fmtInt(t.fields)} values extracted`],
+      ["gray", "Documents read", fmtInt(docs.read), `${fmtInt((docs.documents || 0) - (docs.read || 0))} not cited · ${fmtInt(docs.mb)} MB`],
+      [offScan ? "bad" : "gray", "Off scan / handwriting", scanned ? `${Math.round(100 * offScan / scanned)}%` : "—",
+        `${fmtInt(scripts.handwritten || 0)} handwritten · ${fmtInt(scripts.scanned || 0)} scanned`],
+    ].map(([cls, label, value, sub]) => `
+      <div class="stat ${cls} obs-kpi">
+        <div class="n">${esc(String(value))}</div>
+        <div class="l">${esc(label)}</div>
+        <div class="obs-sub">${esc(sub)}</div>
+      </div>`).join("");
+  }
+
+  function obsChart(key, canvasId, config, empty) {
+    const cvs = document.getElementById(canvasId);
+    if (!cvs || !window.Chart) return;
+    if (!config) { emptyCanvas(key, canvasId, empty); return; }
+    if (charts[key]) { charts[key].destroy(); delete charts[key]; }
+    charts[key] = new Chart(cvs, config);
+  }
+
+  const gridOpts = (stacked = false) => ({
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { stacked, grid: { display: false }, border: { color: cssVar("--line-strong") },
+           ticks: { color: cssVar("--ink-faint"), font: { family: "JetBrains Mono", size: 10 }, maxRotation: 0, autoSkip: true } },
+      y: { stacked, grid: { color: cssVar("--line") }, border: { display: false },
+           ticks: { color: cssVar("--ink-faint"), font: { family: "JetBrains Mono", size: 10 } } },
+    },
+  });
+
   async function loadObservability() {
+    let d;
     try {
-      const d = await (await fetch(`/api/legal/observability?scope=${state.scope}`)).json();
-      const c = d.lead_counts || {};
-      $("#obsKpis").innerHTML = [
-        ["tot", "Total Dossiers", c.total || 0],
-        ["ok", "Completed", c.completed || 0],
-        ["warn", "Partial", c.partial || 0],
-        ["bad", "Failed", c.failed || 0],
-      ].map(([cls, lbl, n]) => `<div class="stat ${cls}"><div class="n">${n}</div><div class="l">${lbl}</div></div>`).join("");
-
-      if (!window.Chart) return;
-
-      // 1. OCR Route Distribution Chart
-      const routes = d.ocr_routes || [];
-      const ocrCvs = $("#obsOcrChart");
-      if (ocrCvs) {
-        if (!routes.length) {
-          emptyCanvas("obsOcr", "obsOcrChart", "No documents routed yet");
-          $("#obsOcrLegend").innerHTML = "";
-        } else {
-          const labels = routes.map(r => r.route || "unknown");
-          const data = routes.map(r => r.n);
-          const colors = [cssVar("--ch-ok"), cssVar("--accent"), cssVar("--ch-warn"), cssVar("--ch-neutral")];
-          $("#obsOcrLegend").innerHTML = labels.map((l, i) =>
-            `<span class="li"><span class="sw" style="background:${colors[i % colors.length]}"></span>${l} · <b>${data[i]}</b></span>`).join("");
-          if (charts.obsOcr) {
-            charts.obsOcr.data.labels = labels;
-            charts.obsOcr.data.datasets[0].data = data;
-            charts.obsOcr.update();
-          } else {
-            charts.obsOcr = new Chart(ocrCvs, {
-              type: "doughnut",
-              data: { labels, datasets: [{ data, backgroundColor: colors, borderWidth: 2, borderColor: cssVar("--surface") }] },
-              options: { cutout: "65%", plugins: { legend: { display: false } } }
-            });
-          }
-        }
-      }
-
-      // 2. Phase Timings Chart
-      const phases = d.phase_timings || [];
-      const phaseCvs = $("#obsPhaseChart");
-      if (phaseCvs) {
-        if (!phases.length) {
-          emptyCanvas("obsPhase", "obsPhaseChart", "No phase timing data yet");
-        } else {
-          const labels = phases.map(p => p.stage);
-          const data = phases.map(p => p.avg_ms);
-          if (charts.obsPhase) {
-            charts.obsPhase.data.labels = labels;
-            charts.obsPhase.data.datasets[0].data = data;
-            charts.obsPhase.update();
-          } else {
-            charts.obsPhase = new Chart(phaseCvs, {
-              type: "bar",
-              data: { labels, datasets: [{ data, backgroundColor: cssVar("--accent"), barThickness: 14 }] },
-              options: {
-                indexAxis: "y", plugins: { legend: { display: false } },
-                scales: {
-                  x: { grid: { color: cssVar("--line") }, border: { display: false }, ticks: { color: cssVar("--ink-faint"), font: { family: "JetBrains Mono", size: 11 } } },
-                  y: { grid: { display: false }, border: { color: cssVar("--line-strong") }, ticks: { color: cssVar("--ink-soft"), font: { family: "Hanken Grotesk", size: 12 } } }
-                }
-              }
-            });
-          }
-        }
-      }
-
-      // 3. Property Verification Status Chart
-      const props = d.property_verification || [];
-      const propCvs = $("#obsPropChart");
-      if (propCvs) {
-        if (!props.length) {
-          emptyCanvas("obsProp", "obsPropChart", "No property verifications yet");
-          $("#obsPropLegend").innerHTML = "";
-        } else {
-          const labels = props.map(p => (p.status || "").replace(/_/g, " "));
-          const data = props.map(p => p.n);
-          const colors = [cssVar("--ch-ok"), cssVar("--ch-warn"), cssVar("--ch-bad")];
-          $("#obsPropLegend").innerHTML = labels.map((l, i) =>
-            `<span class="li"><span class="sw" style="background:${colors[i % colors.length]}"></span>${l} · <b>${data[i]}</b></span>`).join("");
-          if (charts.obsProp) {
-            charts.obsProp.data.labels = labels;
-            charts.obsProp.data.datasets[0].data = data;
-            charts.obsProp.update();
-          } else {
-            charts.obsProp = new Chart(propCvs, {
-              type: "doughnut",
-              data: { labels, datasets: [{ data, backgroundColor: colors, borderWidth: 2, borderColor: cssVar("--surface") }] },
-              options: { cutout: "65%", plugins: { legend: { display: false } } }
-            });
-          }
-        }
-      }
-
-      // 4. Circuit Breaker & Health Box
-      const cb = d.circuit_breaker || {};
-      $("#obsBreakerBox").innerHTML = `
-        <div class="obs-kv">
-          <div class="obs-kv-cell"><div class="obs-kv-n">${badge(cb.state || "closed")}</div><div class="obs-kv-l">Breaker State</div></div>
-          <div class="obs-kv-cell"><div class="obs-kv-n">${cb.total_trips || 0}</div><div class="obs-kv-l">Total Failovers</div></div>
-          <div class="obs-kv-cell"><div class="obs-kv-n">${cb.total_successes || 0}</div><div class="obs-kv-l">Successful Calls</div></div>
-        </div>`;
+      const r = await fetch(`/api/legal/observability?scope=${state.scope}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      d = await r.json();
     } catch (e) {
       toast("Failed to load observability", "bad");
+      return;
+    }
+
+    $("#obsKpis").innerHTML = obsKpis(d);
+
+    const runs = (d.per_run || []).slice().reverse();
+    obsChart("obsRunTokens", "obsRunTokens", runs.length ? {
+      type: "bar",
+      data: {
+        labels: runs.map(r => r.run_name),
+        datasets: [
+          { label: "Prompt", data: runs.map(r => r.prompt_tokens), backgroundColor: cssVar("--accent"), barThickness: 18 },
+          { label: "Completion", data: runs.map(r => r.completion_tokens), backgroundColor: cssVar("--ch-ok"), barThickness: 18 },
+        ],
+      },
+      options: { ...gridOpts(true), plugins: { legend: { display: true, labels: { boxWidth: 10, color: cssVar("--ink-soft"), font: { size: 11 } } } } },
+    } : null, "No token telemetry yet");
+
+    obsChart("obsRunLatency", "obsRunLatency", runs.length ? {
+      type: "line",
+      data: {
+        labels: runs.map(r => r.run_name),
+        datasets: [{
+          data: runs.map(r => Math.round(r.avg_vlm_ms)),
+          borderColor: cssVar("--accent"), backgroundColor: cssVar("--accent-soft"),
+          fill: true, tension: .35, pointRadius: 3, pointBackgroundColor: cssVar("--accent"),
+        }],
+      },
+      options: gridOpts(),
+    } : null, "No latency recorded yet");
+
+    const cov = d.field_coverage || [];
+    obsChart("obsCoverage", "obsCoverage", cov.length ? {
+      type: "bar",
+      data: {
+        labels: cov.map(c => formatColName(c.field)),
+        datasets: [{ data: cov.map(c => c.pct), backgroundColor: cssVar("--accent"), barThickness: 14 }],
+      },
+      options: { ...gridOpts(), indexAxis: "y",
+        scales: { x: { ...gridOpts().scales.y, max: 100 }, y: { ...gridOpts().scales.x, ticks: { color: cssVar("--ink-soft"), font: { family: "Inter", size: 11 } } } } },
+    } : null, "No fields extracted yet");
+
+    const mix = d.script_mix || [];
+    const scriptColour = { typed: cssVar("--ch-ok"), scanned: cssVar("--ch-warn"), handwritten: cssVar("--ch-bad"), unknown: cssVar("--ch-neutral") };
+    obsChart("obsScript", "obsScript", mix.length ? {
+      type: "doughnut",
+      data: {
+        labels: mix.map(m => (SCRIPT_LABEL[m.tag] || SCRIPT_LABEL.unknown)[0]),
+        datasets: [{ data: mix.map(m => m.n), backgroundColor: mix.map(m => scriptColour[m.tag] || cssVar("--ch-neutral")), borderWidth: 2, borderColor: cssVar("--surface") }],
+      },
+      options: { responsive: true, maintainAspectRatio: false, cutout: "62%", plugins: { legend: { display: false } } },
+    } : null, "No dossiers checked yet");
+    $("#obsScriptLegend").innerHTML = mix.map(m =>
+      `<span class="li"><span class="sw" style="background:${scriptColour[m.tag] || cssVar("--ch-neutral")}"></span>${(SCRIPT_LABEL[m.tag] || SCRIPT_LABEL.unknown)[0]} · <b>${m.n}</b></span>`).join("")
+      || `<span class="li muted">Tags appear as dossiers are opened or listed.</span>`;
+
+    const tp = d.throughput || [];
+    obsChart("obsThroughput", "obsThroughput", tp.length ? {
+      type: "bar",
+      data: {
+        labels: tp.map(x => x.t),
+        datasets: [{ data: tp.map(x => x.leads), backgroundColor: cssVar("--accent"), barThickness: 16 }],
+      },
+      options: gridOpts(),
+    } : null, "No dossiers processed in this window");
+
+    const models = d.model_mix || [];
+    $("#obsModelMix").innerHTML = models.length ? models.map(m => `
+      <div class="obs-kv-row">
+        <span class="mono">${esc(m.model)}</span>
+        <span class="obs-kv-b"><b>${fmtInt(m.n)}</b> dossier${m.n === 1 ? "" : "s"}</span>
+        <span class="obs-kv-b">${fmtCompact(m.tokens)} tokens</span>
+      </div>`).join("") : `<div class="obs-empty">No model telemetry yet.</div>`;
+
+    const leads = d.per_lead || [];
+    const peak = Math.max(1, ...leads.map(l => l.tokens || 0));
+    $("#obsLeadRows").innerHTML = leads.length ? leads.map(l => `
+      <tr data-id="${esc(l.lead_id)}">
+        <td><div class="rv-name">${esc(l.name)}</div><div class="rv-id">${esc(l.lead_id)}</div></td>
+        <td>${badge(l.status)}</td>
+        <td class="c-num">
+          <div class="obs-tok"><span style="width:${Math.round(100 * (l.tokens || 0) / peak)}%"></span></div>
+          <span class="mono">${fmtInt(l.tokens)}</span>
+        </td>
+        <td class="c-num mono">${fmtInt(l.prompt_tokens)}</td>
+        <td class="c-num mono">${fmtInt(l.completion_tokens)}</td>
+        <td class="c-num mono">${fmtMs(l.vlm_ms)}</td>
+        <td class="c-num mono">${fmtMs(l.pipeline_ms)}</td>
+        <td class="c-num mono">${fmtInt(l.cited_pages)}</td>
+        <td class="c-num mono">${fmtInt(l.field_count)}</td>
+        <td class="c-num mono">${fmtInt(l.processed_documents)}/${fmtInt(l.total_documents)}</td>
+        <td class="mono obs-when">${esc(l.updated_at || "")}</td>
+      </tr>`).join("") : `<tr><td colspan="11" class="obs-empty">No dossier telemetry in this scope yet.</td></tr>`;
+    $$("#obsLeadRows tr[data-id]").forEach(tr => tr.onclick = () => openLead(tr.dataset.id));
+    $("#obsLeadCount").textContent = leads.length ? `${leads.length} dossier${leads.length === 1 ? "" : "s"} · heaviest first` : "";
+
+    const cb = d.circuit_breaker || {};
+    const box = $("#obsBreakerBox");
+    if (box) {
+      const t = d.totals || {};
+      box.innerHTML = `
+        <div class="obs-kv">
+          <div class="obs-kv-cell"><div class="obs-kv-n">${badge(cb.state === "open" ? "failed" : "completed")}</div><div class="obs-kv-l">VLM breaker</div></div>
+          <div class="obs-kv-cell"><div class="obs-kv-n mono">${fmtCompact(t.tokens_per_cited_page)}</div><div class="obs-kv-l">Tokens / page read</div></div>
+          <div class="obs-kv-cell"><div class="obs-kv-n mono">${fmtMs((d.latency || {}).pipe_p95)}</div><div class="obs-kv-l">Dossier p95</div></div>
+        </div>`;
     }
   }
 
@@ -2026,14 +2653,15 @@ function formatFieldValue(k, v) {
 
   /* ── export table data ───────────────────── */
   function exportTableData(format = 'csv') {
-    const rows = (Array.isArray(allRows) ? allRows : []).filter(passesColFilters);
+    const rows = facetRows().filter(passesColFilters);
     if (!rows.length) return toast("No leads to export", "warn");
 
-    const baseCols = ["lead_id", "processing_status"];
+    const baseCols = ["lead_id", "processing_status", "script_tag"];
     const exportCols = [...baseCols, ...dynamicColumns];
     const headerLabels = exportCols.map(c => {
       if (c === "lead_id") return "Lead ID";
       if (c === "processing_status") return "Status";
+      if (c === "script_tag") return "Script";
       return formatColName(c);
     });
 
@@ -2145,15 +2773,27 @@ function formatFieldValue(k, v) {
       };
     });
 
-    // Header column filter dropdowns
-    $$("th.th-filter").forEach(th => th.onclick = (e) => {
-      e.stopPropagation();
-      openColFilter(th.dataset.col, th);
-    });
+    // Header column filter dropdowns — delegated, because the head is rebuilt per load
+    const thead = $("#dynamicTheadRow");
+    if (thead && thead.parentElement) {
+      thead.parentElement.addEventListener("click", (e) => {
+        const th = e.target.closest("th.th-filter");
+        if (!th) return;
+        e.stopPropagation();
+        openColFilter(th.dataset.col, th);
+      });
+    }
 
     // Drawer close
     $("#drawerClose").onclick = closeDrawer;
     $("#scrim").onclick = closeDrawer;
+
+    // a page preview opens that page full size, with its raw extraction
+    $("#drawerBody").addEventListener("click", (e) => {
+      const shot = e.target.closest("[data-open-page]");
+      if (!shot) return;
+      openPageModal(shot.dataset.doc, shot.dataset.file, +shot.dataset.page, +shot.dataset.pages || 1);
+    });
 
     // Keydown escape listener
     document.addEventListener("keydown", e => {
@@ -2169,6 +2809,7 @@ function formatFieldValue(k, v) {
     // Upload & demo handlers
     initUploads();
     initModelConfig();
+    initRunsView();
 
     // Page modal close handlers
     const pmClose = $("#pageModalClose");
