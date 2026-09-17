@@ -1199,37 +1199,15 @@ function formatFieldValue(k, v) {
                   const realFields = getPageRealFields(p);
                   const fieldCount = Object.keys(realFields).length;
                   return `
-                  <div class="page-card" id="page-${esc(d.document_id)}-${p.page_number}">
-                    <!-- Left: Page Preview -->
-                    <div class="page-card-side">
-                      <div class="page-num-badge">PAGE ${p.page_number} OF ${d.page_count || 1}</div>
-                      <div class="page-thumb-wrap" onclick="openPageModal('${d.document_id}', '${esc(d.filename)}', ${p.page_number}, ${d.page_count || 1})" title="Click to view full-resolution page">
-                        <img class="page-thumb-img" src="/api/legal/document/${encodeURIComponent(d.document_id)}/page/${encodeURIComponent(p.page_number)}" loading="lazy" alt="Page ${p.page_number}" onerror="this.onerror=null;this.src='';this.alt='Preview unavailable'">
-                      </div>
-                      <a href="javascript:void(0)" onclick="openPageModal('${d.document_id}', '${esc(d.filename)}', ${p.page_number}, ${d.page_count || 1})" style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--accent);text-decoration:none;font-weight:600">Enlarge Page ↗</a>
-                      <span class="page-route-badge">${esc(p.ocr_route || p.phase || "Engine")}</span>
+                  <div class="page-card" id="page-${esc(d.document_id)}-${p.page_number}" onclick="openPageModal('${d.document_id}', '${esc(d.filename)}', ${p.page_number}, ${d.page_count || 1})" title="Click to view full-resolution page and raw extractions">
+                    <div class="page-num-badge">PAGE ${p.page_number} OF ${d.page_count || 1}</div>
+                    <div class="page-thumb-wrap">
+                      <img class="page-thumb-img" src="/api/legal/document/${encodeURIComponent(d.document_id)}/page/${encodeURIComponent(p.page_number)}" loading="lazy" alt="Page ${p.page_number}" onerror="this.onerror=null;this.src='';this.alt='Preview unavailable'">
                     </div>
-                    <!-- Right: Extracted Data from This Exact Page -->
-                    <div class="page-card-main">
-                      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                        <div class="page-sec-title" style="margin:0;">DATA EXTRACTED FROM THIS PAGE (${fieldCount} field${fieldCount === 1 ? "" : "s"})</div>
-                        ${(p.telemetry && p.telemetry.ms) ? `<span style="font-size:11px; font-family:'JetBrains Mono',monospace; color:var(--ink-faint);">${p.telemetry.ms}ms · ${(p.telemetry.total_tokens || 0)} tokens</span>` : ''}
-                      </div>
-                      <table class="page-fields-table">
-                        <tbody>
-                          ${Object.entries(realFields).map(([fk, fv]) => `
-                            <tr>
-                              <td class="pft-k" style="width:200px; vertical-align:top;">${esc(formatFieldLabel(fk))}</td>
-                              <td class="pft-v${isFinancialField(fk) ? ' mono' : ''}" style="${fk.toLowerCase().includes('address') ? 'white-space:normal; line-height:1.45;' : ''}">${formatFieldValue(fk, fv)}</td>
-                            </tr>`).join("")}
-                        </tbody>
-                      </table>
-
-                      ${p.snippet ? `
-                        <div style="margin-top:8px;">
-                          <div class="page-sec-title" style="margin-top:6px">TEXT EVIDENCE ON PAGE</div>
-                          <div class="evidence-snippet">${esc(p.snippet)}</div>
-                        </div>` : ""}
+                    <div style="display:flex; flex-direction:column; gap:4px; width:100%; align-items:center; text-align:center; margin-top:4px;">
+                      <a href="javascript:void(0)" onclick="event.stopPropagation(); openPageModal('${d.document_id}', '${esc(d.filename)}', ${p.page_number}, ${d.page_count || 1})" style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--accent);text-decoration:none;font-weight:600">Enlarge Page ↗</a>
+                      <span class="page-route-badge" style="width:100%;">${esc(p.ocr_route || p.phase || "Vision Model")}</span>
+                      ${fieldCount > 0 ? `<span class="tag ok" style="font-size:10px; padding:2px 6px; border-radius:3px;">${fieldCount} field${fieldCount === 1 ? '' : 's'} extracted</span>` : ''}
                     </div>
                   </div>`;
                 }).join("")}

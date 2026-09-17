@@ -1179,30 +1179,27 @@ img,svg,canvas,video{max-width:100%}
 
 .page-cards-list {
   display: flex;
-  flex-direction: column;
-  gap: 14px;
+  flex-wrap: wrap;
+  gap: 16px;
   padding: 16px;
 }
 .page-card {
-  display: grid;
-  grid-template-columns: 180px 1fr;
-  gap: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 175px;
   background: var(--surface);
   border: 1px solid var(--line);
-  padding: 18px;
+  padding: 12px;
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  align-items: start;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  cursor: pointer;
 }
 .page-card:hover {
   box-shadow: var(--shadow-hover);
-  border-color: var(--line-strong);
-}
-@media(max-width: 720px) {
-  .page-card {
-    grid-template-columns: 1fr;
-  }
+  border-color: var(--accent);
+  transform: translateY(-2px);
 }
 .page-card-side {
   display: flex;

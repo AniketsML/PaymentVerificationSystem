@@ -70,99 +70,106 @@ def _lead_has_fcl_doc(file_paths: List[str]) -> bool:
 
 
 def _find_shared_fcl_docs(root_path: str) -> List[str]:
-    """Return paths of all supported documents inside any shared FCL folder (at root or within subdirectories)."""
+    """Return paths of all supported documents inside any shared FCL folder (including nested subdirectories)."""
     shared: List[str] = []
     try:
         for cur_dir, dirs, files in os.walk(root_path):
             dir_name = os.path.basename(cur_dir.rstrip("/\\"))
             if _is_shared_fcl_folder(dir_name):
-                for f in sorted(files):
-                    fp = os.path.join(cur_dir, f)
-                    if os.path.isfile(fp) and os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS:
-                        shared.append(fp)
+                for sub_root, _, sub_files in os.walk(cur_dir):
+                    for f in sorted(sub_files):
+                        fp = os.path.join(sub_root, f)
+                        if os.path.isfile(fp) and os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS:
+                            shared.append(fp)
     except Exception:
         pass
-    return shared
+    return list(dict.fromkeys(shared))
 
 
 def _discover_lead_directories(root_path: str) -> List[Dict[str, Any]]:
     """Recursively discover lead directories in root_path.
     A lead directory is any directory containing supported document files.
-    Shared FCL/Foreclosure folders at the root level are excluded from leads —
-    their documents are injected into leads by scan_and_enqueue_folder instead.
+    Nested property/deed subfolders are gathered into their parent lead dossier.
+    Shared FCL/Foreclosure folders are excluded from leads.
     """
-    leads: List[Dict[str, Any]] = []
     if not os.path.isdir(root_path):
-        return leads
+        return []
 
-    immediate_subdirs = [
-        os.path.join(root_path, d) for d in sorted(os.listdir(root_path))
-        if os.path.isdir(os.path.join(root_path, d))
+    # Unwrap single wrapper parent folders
+    cur = root_path
+    while True:
+        subdirs = [
+            d for d in os.listdir(cur)
+            if os.path.isdir(os.path.join(cur, d))
+            and not d.startswith('.') and d != '__MACOSX'
+        ]
+        files = [
+            f for f in os.listdir(cur)
+            if os.path.isfile(os.path.join(cur, f))
+            and os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS
+        ]
+        if len(subdirs) == 1 and not files:
+            cur = os.path.join(cur, subdirs[0])
+        else:
+            break
+
+    children = [
+        d for d in sorted(os.listdir(cur))
+        if os.path.isdir(os.path.join(cur, d))
         and not d.startswith('.') and d != '__MACOSX'
-        and not _is_shared_fcl_folder(d)
     ]
-    immediate_files = [
-        os.path.join(root_path, f) for f in sorted(os.listdir(root_path))
-        if os.path.isfile(os.path.join(root_path, f)) and os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS
+    direct_files = [
+        os.path.join(cur, f) for f in sorted(os.listdir(cur))
+        if os.path.isfile(os.path.join(cur, f))
+        and os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS
     ]
 
-    # If root has files directly and no subdirectories:
-    if immediate_files and not immediate_subdirs:
-        leads.append({
-            "name": os.path.basename(root_path.rstrip("/\\")) or "Lead_Direct",
-            "path": root_path,
-            "files": immediate_files,
-        })
-        return leads
+    # If direct files at root and no subdirs, it's a single direct lead
+    if direct_files and not children:
+        return [{
+            "name": os.path.basename(cur.rstrip("/\\")) or "Lead_Direct",
+            "path": cur,
+            "files": direct_files,
+        }]
 
-    # If root has only 1 subdirectory and NO files (e.g. single wrapper folder), unwrap it
-    if len(immediate_subdirs) == 1 and not immediate_files:
-        child = immediate_subdirs[0]
-        child_subdirs = [
-            os.path.join(child, d) for d in sorted(os.listdir(child))
-            if os.path.isdir(os.path.join(child, d)) and not d.startswith('.') and d != '__MACOSX'
-            and not _is_shared_fcl_folder(d)
-        ]
-        child_files = [
-            os.path.join(child, f) for f in sorted(os.listdir(child))
-            if os.path.isfile(os.path.join(child, f)) and os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS
-        ]
-        if child_subdirs:
-            return _discover_lead_directories(child)
-        elif child_files:
-            leads.append({
-                "name": os.path.basename(child.rstrip("/\\")),
-                "path": child,
-                "files": child_files,
-            })
-            return leads
-
-    # Walk directories to find all folders that directly hold document files
-    for cur_dir, dirs, files in os.walk(root_path):
-        dirs[:] = [
-            d for d in dirs
-            if not d.startswith('.') and d != '__MACOSX'
-            and not _is_shared_fcl_folder(d)
-        ]
-        if cur_dir == root_path:
+    leads: List[Dict[str, Any]] = []
+    for c in children:
+        if _is_shared_fcl_folder(c):
             continue
-        valid_files = [
-            os.path.join(cur_dir, f) for f in sorted(files)
-            if os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS
+        c_path = os.path.join(cur, c)
+        c_subdirs = [
+            d for d in os.listdir(c_path)
+            if os.path.isdir(os.path.join(c_path, d))
+            and not d.startswith('.') and d != '__MACOSX'
         ]
-        if valid_files:
-            leads.append({
-                "name": os.path.basename(cur_dir.rstrip("/\\")),
-                "path": cur_dir,
-                "files": valid_files,
-            })
+        c_files = [
+            f for f in os.listdir(c_path)
+            if os.path.isfile(os.path.join(c_path, f))
+            and os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS
+        ]
 
-    if not leads and immediate_files:
-        leads.append({
-            "name": os.path.basename(root_path.rstrip("/\\")) or "Lead_Direct",
-            "path": root_path,
-            "files": immediate_files,
-        })
+        # If this child is a container of multiple lead dossiers (no files of its own, multiple subdirs)
+        if c_subdirs and not c_files and len(c_subdirs) > 1:
+            for ld in sorted(c_subdirs):
+                if _is_shared_fcl_folder(ld):
+                    continue
+                ld_path = os.path.join(c_path, ld)
+                ld_docs = []
+                for sr, _, sf in os.walk(ld_path):
+                    for f in sorted(sf):
+                        if os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS:
+                            ld_docs.append(os.path.join(sr, f))
+                if ld_docs:
+                    leads.append({"name": ld, "path": ld_path, "files": ld_docs})
+        else:
+            # It is an individual lead dossier (gather all its files recursively, e.g. including property deeds)
+            ld_docs = []
+            for sr, _, sf in os.walk(c_path):
+                for f in sorted(sf):
+                    if os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS:
+                        ld_docs.append(os.path.join(sr, f))
+            if ld_docs:
+                leads.append({"name": c, "path": c_path, "files": ld_docs})
 
     return leads
 
@@ -243,24 +250,17 @@ def scan_and_enqueue_folder(root_path: str, is_test: bool = False, extraction_pr
 
             filenames = [os.path.basename(f) for f in doc_files]
             account_lan = _discover_lan(folder_name, filenames)
-            
-            if not account_lan:
-                # User requested: only treat folders with a LAN as leads.
-                # If it doesn't have a LAN, it might be a shared folder (like FCL) that got misnamed.
-                # We'll add its documents to the shared FCL pool and skip creating a lead for it.
-                shared_fcl_files.extend(doc_files)
-                skipped += 1
-                continue
 
-            # Re-determine inject_fcl now that shared_fcl_files might have grown
-            if shared_fcl_files and not _lead_has_fcl_doc(doc_files):
+            # Attempt FCL injection only when we have a LAN to match against.
+            # Leads without a pre-discovered LAN are still enqueued — the VLM
+            # pipeline will extract the official account_no_lan from the documents.
+            inject_fcl = []
+            if account_lan and shared_fcl_files and not _lead_has_fcl_doc(doc_files):
                 matching_fcl = [
                     f for f in shared_fcl_files
-                    if account_lan and account_lan.lower() in os.path.basename(f).lower()
+                    if account_lan.lower() in os.path.basename(f).lower()
                 ]
-                inject_fcl = matching_fcl if matching_fcl else (shared_fcl_files if len(shared_fcl_files) == 1 else [])
-            else:
-                inject_fcl = []
+                inject_fcl = matching_fcl if matching_fcl else []
             total_doc_count = len(doc_files) + len(inject_fcl)
 
             lead_name = folder_name
