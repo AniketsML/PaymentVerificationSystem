@@ -70,6 +70,25 @@ def _load_document(file_path: str) -> Tuple[Optional[Image.Image], str, int]:
             return None, f"Failed to process PDF: {e}", 0
     return None, f"Unsupported file type: {ext}", 0
 
+def _is_institutional_lender(text: str) -> bool:
+    """Check if a string represents an institutional financing entity, bank, or NBFC rather than an individual borrower."""
+    if not text or not isinstance(text, str):
+        return False
+    t = text.strip().upper()
+    lender_tokens = (
+        "UGRO CAPITAL", "CHOKHANI SECURITIES", "EQUINOX BUSINESS PARK",
+        "OFF BKC", "LBS ROAD, KURLA", "LBS ROAD KURLA", "MUMBAI 400070", "MUMBAI - 400070",
+        "BANK OF BARODA", "STATE BANK OF INDIA", "HDFC BANK", "ICICI BANK", "AXIS BANK",
+        "KOTAK MAHINDRA", "PUNJAB NATIONAL BANK", "CANARA BANK", "UNION BANK",
+        "HOUSING FINANCE CORPORATION", "HOUSING FINANCE LIMITED", "HOUSING FINANCE LTD",
+        "NON-BANKING FINANCIAL", "REGISTERED OFFICE OF THE LENDER"
+    )
+    for tok in lender_tokens:
+        if tok in t:
+            return True
+    return False
+
+
 def _extract_document_batch(file_path: str, pages: List[int], dpi: int = 90) -> List[Tuple[int, Image.Image]]:
     """
     Extracts specified 0-indexed pages from a document (PDF or image) and stamps
@@ -81,7 +100,26 @@ def _extract_document_batch(file_path: str, pages: List[int], dpi: int = 90) -> 
         return results
 
     ext = os.path.splitext(file_path)[1].lower()
-    from PIL import ImageDraw
+    from PIL import ImageDraw, ImageFont
+
+    # Load high-visibility font for [PAGE X] badge
+    badge_font = None
+    try:
+        font_paths = [
+            r"C:\Windows\Fonts\arialbd.ttf",
+            r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\calibrib.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+        ]
+        for fp in font_paths:
+            if os.path.exists(fp):
+                badge_font = ImageFont.truetype(fp, 30)
+                break
+        if not badge_font:
+            badge_font = ImageFont.load_default(size=26)
+    except Exception:
+        badge_font = None
 
     if ext in ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp', '.gif'):
         try:
@@ -90,8 +128,11 @@ def _extract_document_batch(file_path: str, pages: List[int], dpi: int = 90) -> 
             if img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
             draw = ImageDraw.Draw(img)
-            draw.rectangle([(10, 10), (140, 45)], fill=(220, 30, 30))
-            draw.text((20, 18), "PAGE 1", fill=(255, 255, 255))
+            draw.rectangle([(10, 10), (220, 56)], fill=(220, 20, 20), outline=(255, 255, 255), width=2)
+            if badge_font:
+                draw.text((22, 16), "PAGE 1", fill=(255, 255, 255), font=badge_font)
+            else:
+                draw.text((20, 18), "PAGE 1", fill=(255, 255, 255))
             results.append((1, img))
         except Exception as e:
             sys.stderr.write(f"[pipeline] Image load error {file_path}: {e}\n")
@@ -107,12 +148,15 @@ def _extract_document_batch(file_path: str, pages: List[int], dpi: int = 90) -> 
                     pix = doc[p_idx].get_pixmap(matrix=fitz.Matrix(scale, scale))
                     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                     
-                    # Stamp clear [PAGE X] badge
+                    # Stamp high-contrast [PAGE X] badge with white outline and bold font
                     draw = ImageDraw.Draw(img)
-                    badge_w = min(160, max(100, int(pix.width * 0.22)))
-                    badge_h = min(40, max(28, int(pix.height * 0.045)))
-                    draw.rectangle([(10, 10), (10 + badge_w, 10 + badge_h)], fill=(220, 30, 30))
-                    draw.text((20, 16), f"PAGE {p_idx + 1}", fill=(255, 255, 255))
+                    badge_w = min(220, max(140, int(pix.width * 0.28)))
+                    badge_h = min(56, max(36, int(pix.height * 0.055)))
+                    draw.rectangle([(10, 10), (10 + badge_w, 10 + badge_h)], fill=(220, 20, 20), outline=(255, 255, 255), width=2)
+                    if badge_font:
+                        draw.text((22, 16), f"PAGE {p_idx + 1}", fill=(255, 255, 255), font=badge_font)
+                    else:
+                        draw.text((20, 16), f"PAGE {p_idx + 1}", fill=(255, 255, 255))
                     
                     results.append((p_idx + 1, img))
             doc.close()
@@ -644,6 +688,19 @@ def process_lead(
                 if not norm_fields:
                     continue
 
+                # Filter out institutional lenders/financing entities from borrower fields
+                clean_norm_fields = {}
+                for fk, fv in norm_fields.items():
+                    if isinstance(fv, str):
+                        if ("borrower" in fk or fk in ("applicant_name", "applicant_address")) and _is_institutional_lender(fv):
+                            continue
+                        if "address" in fk and _is_institutional_lender(fv):
+                            continue
+                    clean_norm_fields[fk] = fv
+                norm_fields = clean_norm_fields
+                if not norm_fields:
+                    continue
+
                 # Record page_extractions with EXACT pages where data was found
                 if isinstance(field_page_sources, dict) and field_page_sources:
                     by_page = {}
@@ -667,6 +724,10 @@ def process_lead(
                         elif not src_p_int:
                             src_p_int = chunk_page_nums[0]
 
+                        # Clamping / reconciliation: Ensure src_p_int belongs to current chunk
+                        if src_p_int not in chunk_page_nums and chunk_page_nums:
+                            src_p_int = chunk_page_nums[0]
+
                         by_page.setdefault(src_p_int, {})[fk] = fv
 
                     for p_num, p_fields in by_page.items():
@@ -688,7 +749,9 @@ def process_lead(
                     if isinstance(cited_pages, list):
                         for p in cited_pages:
                             try:
-                                target_cited.append(int(p))
+                                p_int = int(p)
+                                if p_int in chunk_page_nums:
+                                    target_cited.append(p_int)
                             except Exception:
                                 pass
                     if not target_cited:
@@ -732,16 +795,42 @@ def process_lead(
         from db import pg
         import json
 
-        # Merge page extractions into top-level raw_extractions keeping longest string
+        # Collect all cited pages accurately across page_extractions
+        cited_pages_set = set()
         for px in page_extractions:
-            for k, v in px.get("fields", {}).items():
+            p_num = px.get("page_number")
+            if p_num:
+                try:
+                    cited_pages_set.add(int(p_num))
+                except Exception:
+                    pass
+        raw_extractions["_cited_pages"] = sorted(list(cited_pages_set))
+
+        # Merge page extractions into top-level raw_extractions safely:
+        # Prevent institutional lenders from hijacking borrower fields and avoid blind string length overwrites
+        for px in page_extractions:
+            fields = px.get("fields", {})
+            for k, v in fields.items():
                 if k.startswith("_"):
                     continue
                 if v is None or v == "" or v == "null" or v == {}:
                     continue
                 if isinstance(v, str):
-                    if k not in raw_extractions or len(v.strip()) > len(str(raw_extractions[k]).strip()):
-                        raw_extractions[k] = v
+                    clean_v = v.strip()
+                    if ("borrower" in k or k in ("applicant_name", "applicant_address")) and _is_institutional_lender(clean_v):
+                        continue
+                    if "address" in k and _is_institutional_lender(clean_v):
+                        continue
+
+                    if k not in raw_extractions or not raw_extractions[k]:
+                        raw_extractions[k] = clean_v
+                    else:
+                        existing = str(raw_extractions[k]).strip()
+                        if _is_institutional_lender(existing):
+                            raw_extractions[k] = clean_v
+                        elif clean_v.lower().startswith(existing.lower()) or existing.lower() in clean_v.lower():
+                            if len(clean_v) > len(existing):
+                                raw_extractions[k] = clean_v
                 else:
                     if k not in raw_extractions:
                         raw_extractions[k] = v
