@@ -275,20 +275,27 @@ class LegalVLMClient:
 
         parsed = None
         route = ""
+        medha_error = ""      # kept so the dossier can say WHY a batch came back empty
 
         try:
             parsed, route = self._call_medha(prompt, imgs_bytes)
         except Exception as e:
+            medha_error = f"{type(e).__name__}: {e}"[:400]
             sys.stderr.write(f"[ocr] Medha VLM failed: {e}\n")
 
         if parsed is None or parsed.get("_parse_error"):
+            medha_raw = (parsed or {}).get("_raw_response", "")
+            if parsed is not None and not medha_error:
+                medha_error = "Medha returned a response that is not valid JSON"
             try:
                 parsed, route = self._call_gemini(prompt, imgs_bytes)
             except Exception as e:
                 sys.stderr.write(f"[ocr] Gemini fallback also failed: {e}\n")
-                parsed = {"_error": str(e)}
+                parsed = {"_error": str(e), "_raw_response": medha_raw}
                 route = "failed"
 
+        if medha_error:
+            parsed["_medha_error"] = medha_error
         parsed["_ocr_route"] = route
         return parsed
 

@@ -72,7 +72,12 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+    # Outside debug mode Flask compiles each template once and never looks at the file again,
+    # so an edited page keeps serving its old HTML next to the new (mtime-versioned) JS/CSS
+    # until a restart — a mismatch that breaks the page. Re-read templates when they change.
+    TEMPLATES_AUTO_RELOAD=True,
 )
+app.jinja_env.auto_reload = True
 
 # Initialize all registered workspace schemas
 workspaces.init_all_schemas()

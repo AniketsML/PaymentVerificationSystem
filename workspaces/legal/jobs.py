@@ -397,10 +397,15 @@ def batch_lead_progress(batch_id: str) -> Dict[str, Any]:
         doc_done = c.execute(
             "SELECT count(*) as cnt FROM legal_lead_documents WHERE processing_status='processed' AND lead_id IN (SELECT lead_id FROM legal_leads WHERE batch_id=%s)", (batch_id,)).fetchone()
     statuses = {r["status"]: r["n"] for r in rows}
+    finished = sum(statuses.get(s, 0) for s in ("completed", "partial", "missing_documents", "failed"))
     return {"batch_id": batch_id, "total_leads": total["cnt"] if total else 0,
-            "leads_pending": statuses.get("pending", 0), "leads_processing": statuses.get("processing", 0),
+            # 'draft' is the moment between insert and queueing — it is still waiting
+            "leads_pending": statuses.get("pending", 0) + statuses.get("draft", 0),
+            "leads_processing": statuses.get("processing", 0),
             "leads_completed": statuses.get("completed", 0), "leads_partial": statuses.get("partial", 0),
+            "leads_missing": statuses.get("missing_documents", 0),
             "leads_failed": statuses.get("failed", 0), "leads_paused": statuses.get("paused", 0),
+            "leads_finished": finished,
             "total_documents": doc_total["cnt"] if doc_total else 0,
             "documents_processed": doc_done["cnt"] if doc_done else 0}
 

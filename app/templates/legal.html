@@ -150,7 +150,7 @@
           </div>
           <div class="progress"><div class="bar" id="progBar"></div></div>
           <div class="run-meta"><span id="progText">0 / 0</span><span id="progElapsed"></span></div>
-          <div class="mini-counts" id="miniCounts"></div>
+          <div class="mini-counts legal-mini" id="miniCounts"></div>
           <div class="live-list" id="liveList"></div>
           <div class="done-banner hidden" id="doneBanner">
             <span>✓ Dossier batch complete</span>
@@ -179,32 +179,51 @@
         </div>
 
         <section class="panel tablepanel">
-          <div class="tabrow">
-            <div class="chips" id="statusChips">
-              <button class="chip active" data-status="all">All</button>
-              <button class="chip" data-status="completed"><i class="dot v"></i>Completed</button>
-              <button class="chip" data-status="missing_documents"><i class="dot u"></i>Missing Docs</button>
-              <button class="chip" data-status="partial"><i class="dot u"></i>Partial</button>
-              <button class="chip" data-status="processing"><i class="dot d"></i>Processing</button>
-              <button class="chip" data-status="failed"><i class="dot n"></i>Failed</button>
+          <!-- filters: status · typed/handwritten · field coverage — detail lives in popovers,
+               what's active shows as removable chips -->
+          <div class="fbar">
+            <div class="fbar-top">
+              <div class="seg" id="statusChips" role="tablist" aria-label="Status">
+                <button type="button" class="chip seg-b active" data-status="all">All<span class="seg-n" data-count="total"></span></button>
+                <button type="button" class="chip seg-b" data-status="completed"><i class="sdot d-ok"></i>Completed<span class="seg-n" data-count="completed"></span></button>
+                <button type="button" class="chip seg-b" data-status="missing_documents"><i class="sdot d-warn"></i>Missing docs<span class="seg-n" data-count="missing_documents"></span></button>
+                <button type="button" class="chip seg-b" data-status="partial"><i class="sdot d-serious"></i>Partial<span class="seg-n" data-count="partial"></span></button>
+                <button type="button" class="chip seg-b" data-status="pending"><i class="sdot d-neutral"></i>Queued<span class="seg-n" data-count="pending"></span></button>
+                <button type="button" class="chip seg-b" data-status="processing"><i class="sdot d-accent"></i>Processing<span class="seg-n" data-count="processing"></span></button>
+                <button type="button" class="chip seg-b" data-status="failed"><i class="sdot d-bad"></i>Failed<span class="seg-n" data-count="failed"></span></button>
+              </div>
+              <div class="fbar-end">
+                <span class="count" id="tableCount">—</span>
+                <div class="fmenu" id="exportMenu">
+                  <button type="button" class="btn line small" id="exportMenuBtn" aria-haspopup="menu" aria-expanded="false">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+                    Export
+                  </button>
+                  <div class="fpop fpop-menu hidden" role="menu">
+                    <button type="button" role="menuitem" id="tableExportCsvBtn">CSV<span>.csv</span></button>
+                    <button type="button" role="menuitem" id="tableExportExcelBtn">Excel<span>.xls</span></button>
+                  </div>
+                </div>
+              </div>
             </div>
-            <div style="display: flex; gap: 8px; align-items: center; margin-left: auto;">
-              <button class="cf-clear hidden" id="clearFilters" title="Remove all filters">✕ Clear filters</button>
-              <span class="count" id="tableCount">—</span>
-              <button class="btn line small" id="tableExportCsvBtn" title="Download table data as CSV">📥 Download CSV</button>
-              <button class="btn solid small" id="tableExportExcelBtn" title="Download table data as Excel">📊 Download Excel</button>
-            </div>
-          </div>
-
-          <!-- how the values were read, and which fields are missing -->
-          <div class="facetrow">
-            <div class="facet">
-              <span class="facet-k">Script</span>
-              <div class="chips" id="scriptFacets"></div>
-            </div>
-            <div class="facet grow">
-              <span class="facet-k">Field coverage <span class="facet-hint">click to show the dossiers missing it</span></span>
-              <div class="covstrip" id="fieldCoverage"></div>
+            <div class="fbar-sub">
+              <div class="fgroup">
+                <span class="fgroup-k">Typed / Handwritten</span>
+                <div class="seg sm" id="scriptFacets" role="radiogroup" aria-label="Typed or handwritten"></div>
+              </div>
+              <div class="fmenu" id="coverageMenu">
+                <button type="button" class="fpill" id="coverageBtn" aria-haspopup="dialog" aria-expanded="false">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h6"/></svg>
+                  Field coverage<span class="fpill-n" id="coverageSummary"></span>
+                  <svg class="fpill-caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+                <div class="fpop fpop-cov hidden" id="coveragePop" role="dialog" aria-label="Field coverage">
+                  <div class="fpop-head"><b>Field coverage</b><span>Share of these dossiers where each field was found. Pick one to see the dossiers missing it.</span></div>
+                  <div class="covlist" id="fieldCoverage"></div>
+                </div>
+              </div>
+              <div class="factive" id="activeFilters"></div>
+              <button type="button" class="cf-clear hidden" id="clearFilters" title="Remove all filters">Clear all</button>
             </div>
           </div>
 
@@ -304,64 +323,76 @@
       </section>
 
       <!-- ═══ OBSERVABILITY ═══
-           Cost, speed and coverage per dossier and per run, from the telemetry the
-           pipeline already records. No extra model calls are made to build this. -->
-      <section class="view hidden" id="view-observability">
-        <div class="statband obs-band" id="obsKpis"></div>
-
-        <div class="panelrow even">
-          <section class="panel">
-            <div class="panel-head"><h3>Tokens per run</h3><span class="tag">PROMPT VS COMPLETION</span></div>
-            <div class="chart-box"><canvas id="obsRunTokens"></canvas></div>
-          </section>
-          <section class="panel">
-            <div class="panel-head"><h3>Model time per dossier</h3><span class="tag">AVG BY RUN</span></div>
-            <div class="chart-box"><canvas id="obsRunLatency"></canvas></div>
-          </section>
-        </div>
-
-        <div class="panelrow even">
-          <section class="panel">
-            <div class="panel-head"><h3>Field coverage</h3><span class="tag">% OF DOSSIERS WITH THE VALUE</span></div>
-            <div class="chart-box tall"><canvas id="obsCoverage"></canvas></div>
-          </section>
-          <section class="panel">
-            <div class="panel-head"><h3>Typed vs handwritten</h3><span class="tag">WHERE VALUES CAME FROM</span></div>
-            <div class="chart-box"><canvas id="obsScript"></canvas></div>
-            <div class="legend" id="obsScriptLegend" style="margin-top:10px"></div>
-          </section>
-        </div>
-
-        <div class="panelrow even">
-          <section class="panel">
-            <div class="panel-head"><h3>Dossiers processed</h3><span class="tag">LAST 14 DAYS</span></div>
-            <div class="chart-box"><canvas id="obsThroughput"></canvas></div>
-          </section>
-          <section class="panel">
-            <div class="panel-head"><h3>Engine &amp; health</h3><span class="tag">MODELS IN USE</span></div>
-            <div id="obsModelMix" class="obs-models"></div>
-            <div id="obsBreakerBox" style="margin-top:14px"></div>
-          </section>
-        </div>
-
-        <section class="panel tablepanel">
-          <div class="tabrow">
-            <div><h3 style="font-size:16px">Per-dossier telemetry</h3></div>
-            <span class="count" id="obsLeadCount" style="margin-left:auto"></span>
+           Five questions, in the order someone running extractions asks them: is it running,
+           is the output usable, where did the values come from, what does it cost, how long
+           does it take. One filter row scopes everything below it; the table at the end is the
+           table view behind every chart. Built from telemetry the pipeline already stores. -->
+      <section class="view hidden ob" id="view-observability">
+        <div class="ob-filters" role="group" aria-label="Observability filters">
+          <label class="ob-select">
+            <span>Run</span>
+            <select id="obRun" aria-label="Run"><option value="">All runs</option></select>
+          </label>
+          <div class="ob-seg" id="obPeriod" role="radiogroup" aria-label="Period">
+            <button type="button" role="radio" data-days="1">24 h</button>
+            <button type="button" role="radio" data-days="7">7 days</button>
+            <button type="button" role="radio" data-days="30">30 days</button>
+            <button type="button" role="radio" data-days="0">All time</button>
           </div>
-          <div class="tablewrap obs-tablewrap">
-            <table class="obs-table">
-              <thead>
-                <tr>
-                  <th>Dossier</th><th>Status</th><th class="c-num">Tokens</th><th class="c-num">Prompt</th>
-                  <th class="c-num">Completion</th><th class="c-num">Model time</th><th class="c-num">Total</th>
-                  <th class="c-num">Pages</th><th class="c-num">Fields</th><th class="c-num">Docs read</th><th>Updated</th>
-                </tr>
-              </thead>
-              <tbody id="obsLeadRows"></tbody>
+          <span class="ob-updated" id="obUpdated" aria-live="polite"></span>
+        </div>
+
+        <div class="ob-live" id="obLive"></div>
+        <div class="ob-kpis" id="obKpis"></div>
+
+        <div class="ob-sec"><span class="ob-sec-n">01</span><div><h2>Is the output complete and usable?</h2>
+          <p>How dossiers finished, what was found in them, and which ones came back empty.</p></div></div>
+        <div class="ob-grid">
+          <section class="panel ob-card" id="obOutcomes"></section>
+          <section class="panel ob-card" id="obValues"></section>
+          <section class="panel ob-card ob-wide" id="obCoverage"></section>
+        </div>
+
+        <div class="ob-sec"><span class="ob-sec-n">02</span><div><h2>Where did the values come from?</h2>
+          <p>Typed text, a scan, or handwriting — per extracted value and per dossier.</p></div></div>
+        <div class="ob-grid">
+          <section class="panel ob-card ob-wide" id="obScript"></section>
+        </div>
+
+        <div class="ob-sec"><span class="ob-sec-n">03</span><div><h2>What does it cost?</h2>
+          <p>Model tokens per dossier, per page read and per run.</p></div></div>
+        <div class="ob-grid">
+          <section class="panel ob-card" id="obTokens"></section>
+          <section class="panel ob-card" id="obRunTokens"></section>
+        </div>
+
+        <div class="ob-sec"><span class="ob-sec-n">04</span><div><h2>How long does it take — and how much is read?</h2>
+          <p>Time per dossier, daily volume, and how much of each dossier the model actually looked at.</p></div></div>
+        <div class="ob-grid">
+          <section class="panel ob-card" id="obTiming"></section>
+          <section class="panel ob-card" id="obPerDay"></section>
+          <section class="panel ob-card ob-wide" id="obReading"></section>
+        </div>
+
+        <div class="ob-sec"><span class="ob-sec-n">05</span><div><h2>Every dossier</h2>
+          <p>The numbers behind every chart above. Click a column to sort, a row to open the dossier.</p></div></div>
+        <section class="panel tablepanel ob-tablecard">
+          <div class="tabrow">
+            <label class="field-search ob-search">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><line x1="16.5" y1="16.5" x2="21" y2="21" stroke="currentColor" stroke-width="2"/></svg>
+              <input id="obSearch" placeholder="Search dossier, run, status…" autocomplete="off" aria-label="Search dossiers">
+            </label>
+            <span class="ob-tablefilter hidden" id="obTableFilter"></span>
+            <span class="count" id="obCount" style="margin-left:auto"></span>
+          </div>
+          <div class="tablewrap ob-tablewrap">
+            <table class="ob-table">
+              <thead><tr id="obHead"></tr></thead>
+              <tbody id="obRows"></tbody>
             </table>
           </div>
         </section>
+        <div class="ob-tip" id="obTip" role="tooltip" hidden></div>
       </section>
 
     </main>

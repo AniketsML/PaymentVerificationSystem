@@ -1,227 +1,325 @@
 """
-Observability & metrics for the SARFAESI Legal workspace.
+Observability for the SARFAESI Legal workspace.
 
-Everything here is a read-only aggregate over what the pipeline already stored:
+The page answers five questions, in the order someone running extractions asks them:
 
-  legal_leads.extracted_data → `_telemetry`        model, tokens, VLM + pipeline latency
-                             → `_page_extractions` which pages were cited, and their fields
-  legal_lead_documents                             files, pages, sizes, what was read
-  legal_field_provenance                           typed / handwritten verdicts
+  1. Is it running right now?          live queue, stuck dossiers, last finish, daily throughput
+  2. Is the output complete & usable?  outcome mix, dossiers that finished with nothing cited,
+                                       field coverage, values per dossier
+  3. Where did the values come from?   typed / scanned / handwritten, per value and per dossier
+  4. What does it cost?                tokens per dossier, per page read, per run, prompt share
+  5. How long does it take?            model + total time percentiles, and how much of each
+                                       dossier was actually read (documents & pages funnel)
 
-The numbers answer the operational questions for this use case: what does a dossier cost in
-tokens, where does the time go, how much of each dossier was actually read, how much of the
-data came off handwriting, and which runs behaved differently from the rest.
+Every number is a read-only aggregate over what the pipeline already stores — no extra model
+calls. All sections honour the same slice (scope + run + period) except the live queue, which
+is always "now". The per-dossier table is the table view behind every chart.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from db import pg
 from workspaces.legal.db import init_schema
-from workspaces.legal.logger import PgLegalLeadLogger
 from workspaces.legal.ocr import get_breaker_status
-from workspaces.legal import provenance
 
-_logger = PgLegalLeadLogger()
+FINISHED = ("completed", "partial", "missing_documents", "failed")
+STUCK_AFTER_MIN = 20       # a dossier "processing" with no progress for this long is stuck
 
-# per-lead telemetry, unpacked from JSONB once and reused by every query below
-_LEAD_TELEMETRY = """
+# one row per dossier in the slice, telemetry unpacked from JSONB once
+_BASE = """
     WITH lead AS (
-        SELECT l.lead_id, l.batch_id, l.lead_name, l.folder_name, l.account_lan,
-               l.status, l.created_at, l.updated_at, l.batch_name,
-               COALESCE(l.extracted_data->'_telemetry', '{{}}'::jsonb) AS t,
-               COALESCE(jsonb_array_length(l.extracted_data->'_page_extractions'), 0) AS cited_pages,
-               (SELECT count(*) FROM jsonb_object_keys(
-                    COALESCE(l.extracted_data, '{{}}'::jsonb)) k WHERE left(k, 1) <> '_'
-                    AND k NOT IN ('page_extractions','telemetry')) AS field_count,
-               l.total_documents, l.processed_documents, l.failed_documents
+        SELECT l.lead_id, l.batch_id, l.batch_name, l.folder_path, l.lead_name, l.folder_name,
+               CASE WHEN l.status = 'draft' THEN 'pending' ELSE l.status END AS status,
+               l.created_at, l.updated_at,
+               l.total_documents, l.processed_documents, l.failed_documents,
+               COALESCE(l.extracted_data->'_telemetry', '{{}}'::jsonb)          AS t,
+               COALESCE(l.extracted_data->'_page_extractions', '[]'::jsonb)     AS pxs,
+               (SELECT count(*) FROM jsonb_object_keys(COALESCE(l.extracted_data, '{{}}'::jsonb)) k
+                 WHERE left(k, 1) <> '_' AND k NOT IN ('page_extractions', 'telemetry'))  AS values_n
         FROM legal_leads l
-        WHERE {scope}
+        WHERE {where}
     ), tel AS (
         SELECT lead.*,
-               NULLIF(t->>'total_tokens','')::numeric       AS total_tokens,
-               NULLIF(t->>'prompt_tokens','')::numeric      AS prompt_tokens,
-               NULLIF(t->>'completion_tokens','')::numeric  AS completion_tokens,
-               NULLIF(t->>'vlm_latency_ms','')::numeric     AS vlm_ms,
-               NULLIF(t->>'pipeline_latency_ms','')::numeric AS pipeline_ms,
-               NULLIF(t->>'model','')                        AS model
+               jsonb_array_length(pxs)                              AS cited_pages,
+               NULLIF(t->>'total_tokens', '')::numeric              AS tokens,
+               NULLIF(t->>'prompt_tokens', '')::numeric             AS prompt_tokens,
+               NULLIF(t->>'completion_tokens', '')::numeric         AS completion_tokens,
+               NULLIF(t->>'vlm_latency_ms', '')::numeric            AS vlm_ms,
+               NULLIF(t->>'pipeline_latency_ms', '')::numeric       AS pipeline_ms,
+               NULLIF(t->>'model', '')                              AS model
         FROM lead
     )
 """
 
 
-def _scope_sql(scope: str, alias: str = "l") -> str:
-    if scope == "test":
-        return f"{alias}.is_test = true"
-    if scope == "all":
-        return "TRUE"
-    return f"{alias}.is_test = false"
+class Slice:
+    """scope + optional run + optional period, as a WHERE clause over legal_leads `l`."""
+
+    def __init__(self, scope: str = "real", batch_id: Optional[str] = None, days: Optional[int] = None):
+        self.scope, self.batch_id, self.days = scope, batch_id, days
+        clauses: List[str] = []
+        self.params: List[Any] = []
+        if scope == "test":
+            clauses.append("l.is_test = true")
+        elif scope != "all":
+            clauses.append("l.is_test = false")
+        if batch_id:
+            clauses.append("l.batch_id = %s")
+            self.params.append(batch_id)
+        if days:
+            clauses.append("l.updated_at > now() - make_interval(days => %s)")
+            self.params.append(int(days))
+        self.where = " AND ".join(clauses) or "TRUE"
+
+    def rows(self, sql: str, extra: Tuple = ()) -> List[dict]:
+        with pg.pool().connection() as c:
+            return c.execute(_BASE.format(where=self.where) + sql, tuple(self.params) + tuple(extra)).fetchall()
+
+    def one(self, sql: str, extra: Tuple = ()) -> dict:
+        r = self.rows(sql, extra)
+        return r[0] if r else {}
 
 
-def _rows(sql: str, scope: str, params: tuple = ()) -> List[dict]:
+def _num(v, digits: int = 1):
+    if v is None:
+        return None
+    f = float(v)
+    return int(f) if f.is_integer() else round(f, digits)
+
+
+def _run_name(batch_name, folder_path, fallback) -> str:
+    from workspaces.legal.routes import extract_run_folder_name   # routes imports this module
+    return extract_run_folder_name(batch_name=batch_name, folder_path=folder_path, fallback=fallback)
+
+
+# ── 1. is it running right now? ───────────────────────────────────────────────
+def live(scope: str) -> Dict[str, Any]:
+    where = "l.is_test = true" if scope == "test" else ("TRUE" if scope == "all" else "l.is_test = false")
     with pg.pool().connection() as c:
-        return c.execute(_LEAD_TELEMETRY.format(scope=_scope_sql(scope)) + sql, params).fetchall()
+        r = c.execute(f"""
+            SELECT count(*) FILTER (WHERE l.status IN ('pending','draft'))::int AS queued,
+                   count(*) FILTER (WHERE l.status = 'processing')::int       AS processing,
+                   count(*) FILTER (WHERE l.status = 'processing'
+                                    AND l.updated_at < now() - make_interval(mins => %s))::int AS stuck,
+                   count(*) FILTER (WHERE l.status = 'paused')::int           AS paused,
+                   max(l.updated_at) FILTER (WHERE l.status IN ('completed','partial','missing_documents','failed'))
+                                                                              AS last_finished
+            FROM legal_leads l WHERE {where}
+        """, (STUCK_AFTER_MIN,)).fetchone() or {}
+    r["last_finished"] = r["last_finished"].isoformat() if r.get("last_finished") else None
+    r["stuck_after_min"] = STUCK_AFTER_MIN
+    return r
 
 
-def _one(sql: str, scope: str, params: tuple = ()) -> dict:
-    rows = _rows(sql, scope, params)
-    return rows[0] if rows else {}
+def per_day(s: Slice, days: int) -> List[dict]:
+    return [{"day": r["day"], "n": r["n"]} for r in s.rows("""
+        SELECT to_char(d, 'YYYY-MM-DD') AS day,
+               (SELECT count(*) FROM tel WHERE status IN ('completed','partial','missing_documents','failed')
+                                           AND date_trunc('day', updated_at) = d)::int AS n
+        FROM generate_series(date_trunc('day', now()) - make_interval(days => %s), date_trunc('day', now()),
+                             interval '1 day') d
+        ORDER BY d
+    """, (max(1, days - 1),))]
 
 
-def _f(v) -> float:
-    return round(float(v), 1) if v is not None else 0.0
-
-
-def totals(scope: str) -> Dict[str, Any]:
-    """The headline numbers: volume, spend, speed, coverage."""
-    r = _one("""
-        SELECT count(*)::int                                   AS leads,
-               count(*) FILTER (WHERE total_tokens > 0)::int    AS leads_with_telemetry,
-               COALESCE(sum(total_tokens), 0)::bigint           AS tokens,
-               COALESCE(sum(prompt_tokens), 0)::bigint          AS prompt_tokens,
-               COALESCE(sum(completion_tokens), 0)::bigint      AS completion_tokens,
-               COALESCE(avg(total_tokens), 0)::numeric          AS avg_tokens,
-               COALESCE(max(total_tokens), 0)::numeric          AS max_tokens,
-               COALESCE(sum(vlm_ms), 0)::numeric                AS vlm_ms,
-               COALESCE(avg(vlm_ms), 0)::numeric                AS avg_vlm_ms,
-               COALESCE(avg(pipeline_ms), 0)::numeric           AS avg_pipeline_ms,
-               COALESCE(sum(cited_pages), 0)::int               AS cited_pages,
-               COALESCE(avg(cited_pages), 0)::numeric           AS avg_cited_pages,
-               COALESCE(avg(field_count), 0)::numeric           AS avg_fields,
-               COALESCE(sum(field_count), 0)::int               AS fields,
-               COALESCE(sum(total_documents), 0)::int           AS documents,
-               COALESCE(sum(processed_documents), 0)::int       AS documents_read
+# ── 2. is the output complete & usable? ───────────────────────────────────────
+def outcomes(s: Slice) -> Dict[str, Any]:
+    r = s.one("""
+        SELECT count(*) FILTER (WHERE status = 'completed')::int         AS completed,
+               count(*) FILTER (WHERE status = 'partial')::int           AS partial,
+               count(*) FILTER (WHERE status = 'missing_documents')::int AS missing_documents,
+               count(*) FILTER (WHERE status = 'failed')::int            AS failed,
+               count(*) FILTER (WHERE status = 'completed' AND cited_pages = 0)::int AS completed_empty,
+               count(*)::int                                             AS dossiers
         FROM tel
-    """, scope)
-    pages = _one("""
-        SELECT COALESCE(sum(d.page_count), 0)::int AS pages
-        FROM legal_lead_documents d JOIN tel ON tel.lead_id = d.lead_id
-    """, scope)
-    out = {k: (int(v) if isinstance(v, int) else _f(v)) for k, v in (r or {}).items()}
-    out["pages_in_dossiers"] = int(pages.get("pages") or 0)
-    out["tokens_per_cited_page"] = round(out["tokens"] / out["cited_pages"], 1) if out.get("cited_pages") else 0.0
-    out["pages_read_pct"] = (round(100.0 * out["cited_pages"] / out["pages_in_dossiers"], 1)
-                             if out["pages_in_dossiers"] else None)
+    """)
+    r["finished"] = sum(r.get(k, 0) for k in FINISHED)
+    empty_ids = s.rows("SELECT lead_id FROM tel WHERE status = 'completed' AND cited_pages = 0 ORDER BY updated_at DESC LIMIT 200")
+    r["completed_empty_ids"] = [x["lead_id"] for x in empty_ids]
+    return r
+
+
+def field_coverage(s: Slice, limit: int = 16) -> List[dict]:
+    """How often each extracted field was actually found, among dossiers that finished."""
+    rows = s.rows("""
+        , fin AS (SELECT * FROM tel WHERE status IN ('completed','partial','missing_documents','failed'))
+        SELECT k AS field, count(*)::int AS n,
+               round(100.0 * count(*) / NULLIF((SELECT count(*) FROM fin), 0), 1)::float AS pct
+        FROM fin, LATERAL jsonb_object_keys(
+            COALESCE((SELECT l2.extracted_data FROM legal_leads l2 WHERE l2.lead_id = fin.lead_id), '{}'::jsonb)) k
+        WHERE left(k, 1) <> '_' AND k NOT IN ('page_extractions', 'telemetry')
+        GROUP BY k ORDER BY n DESC, k LIMIT %s
+    """, (limit,))
+    return rows
+
+
+def values_histogram(s: Slice) -> List[dict]:
+    bins = [("0", 0, 0), ("1–3", 1, 3), ("4–6", 4, 6), ("7–9", 7, 9), ("10–14", 10, 14), ("15+", 15, 10 ** 6)]
+    r = s.one("SELECT " + ", ".join(
+        f"count(*) FILTER (WHERE status IN ('completed','partial','missing_documents','failed') "
+        f"AND values_n BETWEEN {lo} AND {hi})::int AS b{i}" for i, (_, lo, hi) in enumerate(bins)) + " FROM tel")
+    return [{"bin": label, "n": r.get(f"b{i}", 0)} for i, (label, _, _) in enumerate(bins)]
+
+
+# ── 3. where did the values come from? ────────────────────────────────────────
+def script_mix(s: Slice) -> Dict[str, Any]:
+    """Value-level and dossier-level typed / scanned / handwritten, from the provenance cache.
+    Dossiers not yet analysed are reported as such, never guessed."""
+    rows = s.rows("""
+        SELECT p.tag, p.counts
+        FROM tel LEFT JOIN legal_field_provenance p ON p.lead_id = tel.lead_id
+        WHERE tel.status IN ('completed','partial','missing_documents','failed')
+    """)
+    values = {"typed": 0, "scanned": 0, "handwritten": 0, "unknown": 0}
+    dossiers = {"typed": 0, "scanned": 0, "handwritten": 0, "unknown": 0, "none": 0, "not_checked": 0}
+    for r in rows:
+        if not r.get("tag"):
+            dossiers["not_checked"] += 1
+            continue
+        dossiers[r["tag"] if r["tag"] in dossiers else "unknown"] += 1
+        for k, n in (r.get("counts") or {}).items():
+            key = "typed" if k == "printed" else k
+            values[key if key in values else "unknown"] += int(n or 0)
+    return {"values": values, "dossiers": dossiers}
+
+
+# ── 4. what does it cost? ─────────────────────────────────────────────────────
+def tokens(s: Slice) -> Dict[str, Any]:
+    r = s.one("""
+        SELECT COALESCE(sum(tokens), 0)::bigint             AS total,
+               COALESCE(sum(prompt_tokens), 0)::bigint      AS prompt,
+               COALESCE(sum(completion_tokens), 0)::bigint  AS completion,
+               percentile_cont(0.5)  WITHIN GROUP (ORDER BY tokens) AS p50,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY tokens) AS p95,
+               max(tokens)                                  AS max,
+               count(*) FILTER (WHERE tokens > 0)::int      AS measured,
+               COALESCE(sum(cited_pages) FILTER (WHERE tokens > 0), 0)::int AS pages_cited
+        FROM tel
+    """)
+    return {
+        "total": int(r.get("total") or 0), "prompt": int(r.get("prompt") or 0),
+        "completion": int(r.get("completion") or 0),
+        "p50": _num(r.get("p50"), 0), "p95": _num(r.get("p95"), 0), "max": _num(r.get("max"), 0),
+        "measured": r.get("measured", 0),
+        "per_page": round(int(r["total"]) / r["pages_cited"], 0) if r.get("pages_cited") else None,
+        "prompt_share": round(100.0 * int(r["prompt"]) / int(r["total"]), 1) if r.get("total") else None,
+    }
+
+
+def per_run(s: Slice, limit: int = 10) -> List[dict]:
+    rows = s.rows("""
+        SELECT batch_id, max(batch_name) AS batch_name, max(folder_path) AS folder_path,
+               max(folder_name) AS any_folder, min(created_at) AS started_at,
+               count(*)::int                              AS dossiers,
+               COALESCE(sum(prompt_tokens), 0)::bigint     AS prompt,
+               COALESCE(sum(completion_tokens), 0)::bigint AS completion,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY pipeline_ms) AS p50_ms,
+               count(*) FILTER (WHERE status = 'completed')::int AS completed
+        FROM tel GROUP BY batch_id ORDER BY started_at DESC LIMIT %s
+    """, (limit,))
+    return [{
+        "batch_id": r["batch_id"],
+        "name": _run_name(r["batch_name"], r["folder_path"], r["any_folder"]),
+        "started_at": r["started_at"].isoformat() if r.get("started_at") else None,
+        "dossiers": r["dossiers"], "completed": r["completed"],
+        "prompt": int(r["prompt"]), "completion": int(r["completion"]),
+        "p50_ms": _num(r.get("p50_ms"), 0),
+    } for r in rows]
+
+
+# ── 5. how long does it take, and how much is read? ───────────────────────────
+def timing(s: Slice) -> Dict[str, Any]:
+    r = s.one("""
+        SELECT min(vlm_ms) AS vlm_min, percentile_cont(0.5) WITHIN GROUP (ORDER BY vlm_ms) AS vlm_p50,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY vlm_ms) AS vlm_p95, max(vlm_ms) AS vlm_max,
+               min(pipeline_ms) AS all_min, percentile_cont(0.5) WITHIN GROUP (ORDER BY pipeline_ms) AS all_p50,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY pipeline_ms) AS all_p95, max(pipeline_ms) AS all_max,
+               count(*) FILTER (WHERE pipeline_ms > 0)::int AS measured
+        FROM tel WHERE pipeline_ms > 0
+    """)
+    return {k: (_num(v, 0) if k != "measured" else v) for k, v in r.items()}
+
+
+def reading(s: Slice) -> Dict[str, Any]:
+    """Documents & pages: in the dossiers → in documents that were read → actually cited."""
+    d = s.one("""
+        , docs AS (SELECT d.* FROM legal_lead_documents d JOIN tel ON tel.lead_id = d.lead_id)
+        , cited AS (SELECT DISTINCT tel.lead_id, px->>'document_id' AS doc, px->>'page_number' AS page
+                    FROM tel, jsonb_array_elements(tel.pxs) px)
+        SELECT (SELECT count(*) FROM docs)::int                                         AS docs_total,
+               (SELECT count(*) FROM docs WHERE processing_status = 'processed')::int  AS docs_read,
+               (SELECT count(DISTINCT doc) FROM cited)::int                             AS docs_cited,
+               (SELECT COALESCE(sum(page_count), 0) FROM docs)::int                     AS pages_total,
+               (SELECT COALESCE(sum(page_count), 0) FROM docs WHERE processing_status = 'processed')::int AS pages_read,
+               (SELECT count(*) FROM cited)::int                                        AS pages_cited,
+               (SELECT COALESCE(round(sum(file_size_bytes) / 1048576.0, 1), 0) FROM docs)::float AS mb
+    """)
+    return d
+
+
+# ── the table view behind every chart ─────────────────────────────────────────
+def per_dossier(s: Slice, limit: int = 500) -> List[dict]:
+    rows = s.rows("""
+        SELECT tel.lead_id, COALESCE(NULLIF(tel.folder_name, ''), tel.lead_name, tel.lead_id) AS name,
+               tel.batch_id, tel.batch_name, tel.folder_path, tel.status,
+               tel.values_n, tel.cited_pages, tel.total_documents, tel.processed_documents,
+               COALESCE(tel.tokens, 0)::int            AS tokens,
+               COALESCE(tel.prompt_tokens, 0)::int     AS prompt_tokens,
+               COALESCE(tel.completion_tokens, 0)::int AS completion_tokens,
+               tel.vlm_ms, tel.pipeline_ms, p.tag AS script_tag, tel.updated_at
+        FROM tel LEFT JOIN legal_field_provenance p ON p.lead_id = tel.lead_id
+        ORDER BY tel.updated_at DESC LIMIT %s
+    """, (limit,))
+    names: Dict[str, str] = {}
+    out = []
+    for r in rows:
+        if r["batch_id"] not in names:
+            names[r["batch_id"]] = _run_name(r["batch_name"], r["folder_path"], None)
+        out.append({
+            "lead_id": r["lead_id"], "name": r["name"], "run": names[r["batch_id"]],
+            "status": r["status"], "values": r["values_n"], "cited_pages": r["cited_pages"],
+            "documents": r["total_documents"], "documents_read": r["processed_documents"],
+            "tokens": r["tokens"], "prompt_tokens": r["prompt_tokens"],
+            "completion_tokens": r["completion_tokens"],
+            "vlm_ms": _num(r["vlm_ms"], 0), "pipeline_ms": _num(r["pipeline_ms"], 0),
+            "script_tag": r["script_tag"],
+            "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
+        })
     return out
 
 
-def latency(scope: str) -> Dict[str, Any]:
-    r = _one("""
-        SELECT count(*) FILTER (WHERE vlm_ms > 0)::int AS n,
-               percentile_cont(0.5)  WITHIN GROUP (ORDER BY vlm_ms)::numeric      AS vlm_p50,
-               percentile_cont(0.95) WITHIN GROUP (ORDER BY vlm_ms)::numeric      AS vlm_p95,
-               max(vlm_ms)::numeric                                               AS vlm_max,
-               percentile_cont(0.5)  WITHIN GROUP (ORDER BY pipeline_ms)::numeric AS pipe_p50,
-               percentile_cont(0.95) WITHIN GROUP (ORDER BY pipeline_ms)::numeric AS pipe_p95
-        FROM tel WHERE vlm_ms IS NOT NULL
-    """, scope)
-    return {k: (int(v) if k == "n" else _f(v)) for k, v in (r or {}).items()}
+def runs_for_filter(scope: str) -> List[dict]:
+    where = "is_test = true" if scope == "test" else ("TRUE" if scope == "all" else "is_test = false")
+    with pg.pool().connection() as c:
+        rows = c.execute(f"""
+            SELECT batch_id, max(batch_name) AS batch_name, max(folder_path) AS folder_path,
+                   max(folder_name) AS any_folder, min(created_at) AS started_at, count(*)::int AS n
+            FROM legal_leads WHERE {where} GROUP BY batch_id ORDER BY started_at DESC LIMIT 50
+        """).fetchall()
+    return [{"batch_id": r["batch_id"], "name": _run_name(r["batch_name"], r["folder_path"], r["any_folder"]),
+             "dossiers": r["n"], "started_at": r["started_at"].isoformat() if r.get("started_at") else None}
+            for r in rows]
 
 
-def per_lead(scope: str, limit: int = 60) -> List[dict]:
-    """The per-dossier table: tokens, latency, pages cited, fields — heaviest first."""
-    rows = _rows("""
-        SELECT lead_id, COALESCE(NULLIF(folder_name,''), lead_name, lead_id) AS name,
-               batch_id, COALESCE(batch_name,'') AS batch_name, status, model,
-               COALESCE(total_tokens,0)::int      AS tokens,
-               COALESCE(prompt_tokens,0)::int     AS prompt_tokens,
-               COALESCE(completion_tokens,0)::int AS completion_tokens,
-               COALESCE(vlm_ms,0)::numeric        AS vlm_ms,
-               COALESCE(pipeline_ms,0)::numeric   AS pipeline_ms,
-               cited_pages, field_count, total_documents, processed_documents,
-               to_char(updated_at, 'DD Mon HH24:MI') AS updated_at
-        FROM tel ORDER BY COALESCE(total_tokens,0) DESC, updated_at DESC LIMIT %s
-    """, scope, (limit,))
-    for r in rows:
-        r["vlm_ms"] = _f(r["vlm_ms"])
-        r["pipeline_ms"] = _f(r["pipeline_ms"])
-    return rows
-
-
-def per_run(scope: str, limit: int = 12) -> List[dict]:
-    """Cost and speed per run — the unit the team actually compares."""
-    rows = _rows("""
-        SELECT batch_id,
-               COALESCE(NULLIF(max(batch_name),''), 'Untitled run') AS run_name,
-               count(*)::int                              AS leads,
-               COALESCE(sum(total_tokens),0)::bigint      AS tokens,
-               COALESCE(sum(prompt_tokens),0)::bigint     AS prompt_tokens,
-               COALESCE(sum(completion_tokens),0)::bigint AS completion_tokens,
-               COALESCE(avg(total_tokens),0)::numeric     AS avg_tokens,
-               COALESCE(avg(vlm_ms),0)::numeric           AS avg_vlm_ms,
-               COALESCE(sum(cited_pages),0)::int          AS cited_pages,
-               COALESCE(avg(field_count),0)::numeric      AS avg_fields,
-               min(created_at)                            AS started_at
-        FROM tel GROUP BY batch_id ORDER BY started_at DESC LIMIT %s
-    """, scope, (limit,))
-    for r in rows:
-        r["avg_tokens"] = _f(r["avg_tokens"])
-        r["avg_vlm_ms"] = _f(r["avg_vlm_ms"])
-        r["avg_fields"] = _f(r["avg_fields"])
-        r["started_at"] = r["started_at"].isoformat() if r.get("started_at") else None
-    return rows
-
-
-def field_coverage(scope: str, limit: int = 14) -> List[dict]:
-    """How often each extracted field was actually found — the drift / prompt-quality signal."""
-    rows = _rows("""
-        SELECT k AS field, count(*)::int AS n,
-               round(100.0 * count(*) / NULLIF((SELECT count(*) FROM tel), 0), 1)::float AS pct
-        FROM tel, LATERAL jsonb_object_keys(
-            COALESCE((SELECT l2.extracted_data FROM legal_leads l2 WHERE l2.lead_id = tel.lead_id), '{}'::jsonb)) k
-        WHERE left(k, 1) <> '_' AND k NOT IN ('page_extractions','telemetry')
-        GROUP BY k ORDER BY n DESC LIMIT %s
-    """, scope, (limit,))
-    return rows
-
-
-def model_mix(scope: str) -> List[dict]:
-    return _rows("""
-        SELECT COALESCE(NULLIF(model,''), 'unknown') AS model, count(*)::int AS n,
-               COALESCE(sum(total_tokens),0)::bigint AS tokens
-        FROM tel GROUP BY 1 ORDER BY n DESC
-    """, scope)
-
-
-def throughput(scope: str, days: int = 14) -> List[dict]:
-    rows = _rows("""
-        SELECT to_char(date_trunc('day', updated_at), 'DD Mon') AS t,
-               count(*)::int                         AS leads,
-               COALESCE(sum(total_tokens),0)::bigint AS tokens
-        FROM tel WHERE updated_at > now() - make_interval(days => %s)
-        GROUP BY date_trunc('day', updated_at) ORDER BY date_trunc('day', updated_at)
-    """, scope, (days,))
-    return rows
-
-
-def document_read_rate(scope: str) -> Dict[str, Any]:
-    """Documents ingested vs actually read — with prompt scoping, most are deliberately skipped."""
-    r = _one("""
-        SELECT count(*)::int AS documents,
-               count(*) FILTER (WHERE d.processing_status = 'processed')::int AS read,
-               count(*) FILTER (WHERE d.processing_status = 'failed')::int    AS failed,
-               COALESCE(sum(d.page_count), 0)::int                            AS pages,
-               COALESCE(round(sum(d.file_size_bytes) / 1048576.0, 1), 0)::float AS mb
-        FROM legal_lead_documents d JOIN tel ON tel.lead_id = d.lead_id
-    """, scope)
-    return r or {}
-
-
-def snapshot(scope: str = "real") -> Dict[str, Any]:
+def snapshot(scope: str = "real", batch_id: Optional[str] = None, days: Optional[int] = None) -> Dict[str, Any]:
     init_schema()
+    s = Slice(scope, batch_id, days)
+    window = days if days else 14
     return {
         "workspace": "legal",
-        "scope": scope,
-        "lead_counts": _logger.status_counts(scope=scope),
-        "document_types": _logger.document_type_counts(scope=scope),
-        "totals": totals(scope),
-        "latency": latency(scope),
-        "per_lead": per_lead(scope),
-        "per_run": per_run(scope),
-        "field_coverage": field_coverage(scope),
-        "model_mix": model_mix(scope),
-        "throughput": throughput(scope),
-        "documents": document_read_rate(scope),
-        "script_mix": provenance.tag_counts(scope),
+        "slice": {"scope": scope, "batch_id": batch_id, "days": days},
+        "live": live(scope),
+        "per_day": per_day(Slice(scope, batch_id, None), min(window, 60)),
+        "outcomes": outcomes(s),
+        "field_coverage": field_coverage(s),
+        "values_histogram": values_histogram(s),
+        "script_mix": script_mix(s),
+        "tokens": tokens(s),
+        "per_run": per_run(s),
+        "timing": timing(s),
+        "reading": reading(s),
+        "per_dossier": per_dossier(s),
+        "runs": runs_for_filter(scope),
         "circuit_breaker": get_breaker_status(),
     }

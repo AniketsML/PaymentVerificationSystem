@@ -575,6 +575,28 @@ def process_lead(
         raw_extractions["account_no_lan"] = folder_lan
 
     page_extractions: List[Dict[str, Any]] = []
+    # one entry per model call, whatever it returned — so an empty dossier can say why,
+    # and tokens / model time count every call (not only the ones that yielded values)
+    vlm_calls: List[Dict[str, Any]] = []
+
+    def record_batch(batch: Dict[str, Any], outcome: str, status: str, meta: Dict[str, Any] = None,
+                     values: int = 0, error: str = "", raw: str = "") -> None:
+        meta = meta or {}
+        entry = dict(batch, outcome=outcome, status=status, values=values,
+                     model=meta.get("model", ""), route=meta.get("route", ""),
+                     prompt_tokens=meta.get("prompt_tokens") or 0,
+                     completion_tokens=meta.get("completion_tokens") or 0,
+                     error=error[:400])
+        vlm_calls.append(entry)
+        p0, p1 = batch["pages"]
+        logger.log(lead_id, "vlm_batch", status, document_id=batch["document_id"],
+                   reason=f"{batch['filename']} · pages {p0}–{p1}: {outcome}",
+                   ms=batch["ms"],
+                   metrics={"prompt_tokens": entry["prompt_tokens"],
+                            "completion_tokens": entry["completion_tokens"], "values": values},
+                   data={"pages": batch["pages"], "route": entry["route"], "error": entry["error"],
+                         "raw_response": (raw or "")[:1500]},
+                   is_test=is_test)
 
     t_ocr = time.perf_counter()
     for doc in docs_sorted:
@@ -636,6 +658,8 @@ def process_lead(
             BATCH_SIZE = 20
             page_chunks = [pages_to_process[i:i + BATCH_SIZE] for i in range(0, len(pages_to_process), BATCH_SIZE)]
 
+            doc_ok = doc_empty = doc_err = 0
+            last_err = ""
             for chunk in page_chunks:
                 # 1. Render and stamp pages with [PAGE X]
                 page_items = _extract_document_batch(fp, chunk, dpi=90)
@@ -646,6 +670,7 @@ def process_lead(
                 chunk_images = [item[1] for item in page_items]
 
                 # 2. Directly call VLM on the entire batch in a single API call!
+                t_call = time.perf_counter()
                 extracted = ocr.extract_from_images(
                     images=chunk_images,
                     document_type=f"{filename} ({doc_type_hint})",
@@ -656,8 +681,13 @@ def process_lead(
                     keywords=extraction_plan.get("keywords", []),
                     total_pages=page_count
                 )
+                batch = {"document_id": doc_id, "filename": filename,
+                         "pages": [chunk_page_nums[0], chunk_page_nums[-1]],
+                         "ms": round((time.perf_counter() - t_call) * 1000, 1)}
 
                 if not extracted or extracted.get("_status") in ("blank_discarded", "duplicate_discarded"):
+                    record_batch(batch, "model returned nothing", "EMPTY")
+                    doc_empty += 1
                     continue
 
                 meta = extracted.pop("_meta", {})
@@ -665,6 +695,16 @@ def process_lead(
                 raw_resp = extracted.pop("_raw_response", "")
                 if route not in ocr_routes_used:
                     ocr_routes_used.append(route)
+
+                # a failed model call is recorded as such, never mistaken for "found nothing"
+                call_error = extracted.pop("_medha_error", "") or ""
+                fallback_error = extracted.pop("_error", "") or ""
+                if fallback_error or extracted.get("_parse_error"):
+                    last_err = call_error or fallback_error or "unreadable model response"
+                    record_batch(batch, f"model error — {last_err}", "FAIL", meta,
+                                 error=last_err, raw=raw_resp or extracted.get("_raw_text", ""))
+                    doc_err += 1
+                    continue
 
                 # Capture provenance metadata
                 cited_pages = extracted.pop("_cited_pages", [])
@@ -691,6 +731,8 @@ def process_lead(
                 # Normalize extracted fields
                 norm_fields = _normalize_extracted_fields(extracted)
                 if not norm_fields:
+                    record_batch(batch, "model returned no values", "EMPTY", meta, raw=raw_resp)
+                    doc_empty += 1
                     continue
 
                 # Filter out institutional lenders/financing entities from borrower fields
@@ -704,6 +746,8 @@ def process_lead(
                     clean_norm_fields[fk] = fv
                 norm_fields = clean_norm_fields
                 if not norm_fields:
+                    record_batch(batch, "only lender / bank details found — filtered out", "EMPTY", meta, raw=raw_resp)
+                    doc_empty += 1
                     continue
 
                 # Record page_extractions with EXACT pages where data was found
@@ -778,6 +822,20 @@ def process_lead(
                             "ocr_confidence": 1.0
                         })
 
+                record_batch(batch, f"{len(norm_fields)} value{'s' if len(norm_fields) != 1 else ''} found", "PASS",
+                             meta, values=len(norm_fields))
+                doc_ok += 1
+
+            if doc_err and not doc_ok and not doc_empty:
+                # every model call for this document failed — it was never actually read
+                logger.log(lead_id, "doc_ocr", "FAIL", document_id=doc_id,
+                           reason=f"{filename}: every model call failed — {last_err}", is_test=is_test)
+                update_document_status(doc_id, "failed", document_type=doc_type_hint,
+                                       error_message=last_err[:500], file_size_bytes=fsize, page_count=page_count)
+                failed_docs += 1
+                update_lead_doc_counts(lead_id)
+                continue
+
             processed_docs += 1
             update_document_status(doc_id, "processed", document_type=doc_type_hint, file_size_bytes=fsize, page_count=page_count)
             update_lead_doc_counts(lead_id)
@@ -794,7 +852,9 @@ def process_lead(
 
     final_status = "completed"
     if processed_docs == 0:
-        final_status = "missing_documents"
+        # nothing was read: because the model failed on every document, or because no
+        # document matched the prompt / existed at all
+        final_status = "failed" if failed_docs > 0 else "missing_documents"
     elif failed_docs > 0:
         final_status = "partial"
 
@@ -846,11 +906,13 @@ def process_lead(
         clean_top_level = _normalize_extracted_fields(raw_extractions)
         raw_extractions.update(clean_top_level)
 
-        # Lead-level aggregated model and token telemetry
-        total_prompt_tokens = sum(px.get("telemetry", {}).get("prompt_tokens", 0) for px in page_extractions)
-        total_completion_tokens = sum(px.get("telemetry", {}).get("completion_tokens", 0) for px in page_extractions)
-        total_vlm_ms = sum(px.get("telemetry", {}).get("ms", 0) for px in page_extractions)
-        models_used = list(set(px.get("telemetry", {}).get("model") for px in page_extractions if px.get("telemetry", {}).get("model")))
+        # Lead-level aggregated model and token telemetry — summed over every model call
+        # (a call that returned nothing still cost tokens and time; and one call citing two
+        # pages is counted once, not per page)
+        total_prompt_tokens = sum(c.get("prompt_tokens") or 0 for c in vlm_calls)
+        total_completion_tokens = sum(c.get("completion_tokens") or 0 for c in vlm_calls)
+        total_vlm_ms = sum(c.get("ms") or 0 for c in vlm_calls)
+        models_used = sorted({c.get("model") for c in vlm_calls if c.get("model")})
         model_name = ", ".join(models_used) if models_used else "Medha VLM"
 
         lead_telemetry = {
@@ -861,7 +923,11 @@ def process_lead(
             "completion_tokens": total_completion_tokens,
             "total_tokens": total_prompt_tokens + total_completion_tokens,
             "cited_page_count": len(page_extractions),
+            "vlm_calls": len(vlm_calls),
+            "vlm_errors": sum(1 for c in vlm_calls if c.get("status") == "FAIL"),
+            "empty_batches": sum(1 for c in vlm_calls if c.get("status") == "EMPTY"),
         }
+        raw_extractions["_vlm_calls"] = vlm_calls
 
         raw_extractions["_telemetry"] = lead_telemetry
         raw_extractions["telemetry"] = lead_telemetry

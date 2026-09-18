@@ -19,6 +19,9 @@ So a field ends up as one of:
     scanned      value only in the image (scan/photo — possibly handwritten)
     unknown      no page/document to check (nothing is guessed)
 
+A dossier with no extracted values at all is tagged `none` ("No values") — there is nothing
+to judge, and saying "unchecked" would hide that the extraction came back empty.
+
 Nothing here writes to the extraction pipeline: it reads `legal_leads.extracted_data`
 (the page extractions the pipeline already stored) plus the source documents, and caches the
 verdict per lead in `legal_field_provenance`, keyed by a fingerprint of the extraction it was
@@ -39,7 +42,8 @@ from db import pg
 
 # display order: the strongest claim about a lead wins
 TAG_RANK = {"handwritten": 4, "scanned": 3, "printed": 2, "typed": 1, "unknown": 0}
-LEAD_TAGS = ("handwritten", "scanned", "typed", "unknown")
+LEAD_TAGS = ("handwritten", "scanned", "typed", "unknown", "none")
+_VERSION = "2"                # bump when the tagging rules change, so cached verdicts recompute
 
 _MIN_PAGE_CHARS = 40          # below this a page carries no usable text layer (it is an image)
 _TOKEN_HIT_RATIO = 0.75       # share of a value's words that must appear to count as "typed"
@@ -54,7 +58,7 @@ def _fingerprint(page_extractions: List[dict], updated_at) -> str:
     seed = json.dumps(
         [[p.get("document_id"), p.get("page_number"), sorted((p.get("fields") or {}).keys()),
           sorted((p.get("field_scripts") or {}).items())] for p in page_extractions],
-        sort_keys=True, default=str) + str(updated_at)
+        sort_keys=True, default=str) + str(updated_at) + _VERSION
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
 
 
@@ -197,7 +201,7 @@ def analyze(lead_id: str, force: bool = False) -> Dict[str, Any]:
     counts: Dict[str, int] = {}
     for info in fields.values():
         counts[info["script"]] = counts.get(info["script"], 0) + 1
-    tag = _lead_tag(fields)
+    tag = _lead_tag(fields) if fields else "none"
 
     try:
         with pg.pool().connection() as c:

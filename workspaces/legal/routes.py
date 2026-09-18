@@ -261,86 +261,75 @@ def api_legal_runs():
     elif scope == "real":
         where_sql = "WHERE is_test = false"
 
+    runs_sql = """
+        SELECT
+            batch_id,
+            MAX(batch_name) as batch_name,
+            MAX(folder_path) as folder_path,
+            MAX(folder_name) as dossier_name,
+            MAX(extraction_prompt) as prompt,
+            MIN(created_at) as started_at,
+            COUNT(lead_id) as total_leads,
+            BOOL_OR(is_test) as is_test,
+            COUNT(*) FILTER (WHERE status = 'completed')         as completed,
+            COUNT(*) FILTER (WHERE status = 'partial')           as partial,
+            COUNT(*) FILTER (WHERE status = 'missing_documents') as missing,
+            COUNT(*) FILTER (WHERE status = 'failed')            as failed,
+            COUNT(*) FILTER (WHERE status = 'processing')        as processing,
+            COUNT(*) FILTER (WHERE status IN ('pending','draft')) as pending,
+            COUNT(*) FILTER (WHERE status = 'paused')            as paused
+        FROM legal_leads
+        {where}
+        GROUP BY batch_id
+        ORDER BY started_at DESC
+        LIMIT 50
+    """
     try:
         with pg.pool().connection() as c:
-            query = f"""
-                SELECT 
-                    batch_id, 
-                    MAX(batch_name) as batch_name,
-                    MAX(folder_path) as folder_path,
-                    MAX(folder_name) as dossier_name,
-                    MAX(extraction_prompt) as prompt,
-                    MIN(created_at) as started_at,
-                    COUNT(lead_id) as total_leads,
-                    BOOL_OR(is_test) as is_test,
-                    SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
-                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
-                    SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) as processing,
-                    SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending
-                FROM legal_leads
-                {where_sql}
-                GROUP BY batch_id
-                ORDER BY started_at DESC
-                LIMIT 50
-            """
-            runs = c.execute(query).fetchall()
-
+            runs = c.execute(runs_sql.format(where=where_sql)).fetchall()
             # If no runs found in requested scope, fallback to returning all available runs
             if not runs and where_sql:
-                query_fallback = """
-                    SELECT 
-                        batch_id, 
-                        MAX(batch_name) as batch_name,
-                        MAX(folder_path) as folder_path,
-                        MAX(folder_name) as dossier_name,
-                        MAX(extraction_prompt) as prompt,
-                        MIN(created_at) as started_at,
-                        COUNT(lead_id) as total_leads,
-                        BOOL_OR(is_test) as is_test,
-                        SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
-                        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed,
-                        SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) as processing,
-                        SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending
-                    FROM legal_leads
-                    GROUP BY batch_id
-                    ORDER BY started_at DESC
-                    LIMIT 50
-                """
-                runs = c.execute(query_fallback).fetchall()
-            
-            # Format results
+                runs = c.execute(runs_sql.format(where="")).fetchall()
+
             result = []
             for r in runs:
-                status = "completed"
-                if (r["processing"] or 0) > 0 or (r["pending"] or 0) > 0:
-                    status = "processing"
-                elif (r["failed"] or 0) > 0 and (r["completed"] or 0) == 0:
-                    status = "failed"
-                elif (r["failed"] or 0) > 0:
-                    status = "partial"
-                
+                counts = {k: int(r[k] or 0) for k in
+                          ("completed", "partial", "missing", "failed", "processing", "pending", "paused")}
                 run_name = extract_run_folder_name(
                     batch_name=r.get("batch_name"),
                     folder_path=r.get("folder_path"),
                     fallback=r.get("dossier_name")
                 )
-
                 result.append({
                     "run_id": r["batch_id"],
                     "run_name": run_name,
                     "prompt": r["prompt"] or "",
                     "started_at": r["started_at"].isoformat() if r["started_at"] else None,
                     "leads": r["total_leads"] or 0,
-                    "completed": r["completed"] or 0,
-                    "failed": r["failed"] or 0,
-                    "processing": r["processing"] or 0,
-                    "pending": r["pending"] or 0,
-                    "status": status,
+                    **counts,
+                    "status": run_status(counts, r["total_leads"] or 0),
                     "is_test": bool(r["is_test"])
                 })
             return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def run_status(c: Dict[str, int], total: int) -> str:
+    """A run is only 'completed' once EVERY dossier in it has finished cleanly.
+
+    Anything still queued or being read keeps the run 'processing'; a paused run says so;
+    a run where every dossier failed is 'failed'; any failed / partial / missing-document
+    dossier among finished ones makes it 'partial'."""
+    if c["processing"] or c["pending"]:
+        return "processing"
+    if c["paused"]:
+        return "paused"
+    if total and c["failed"] == total:
+        return "failed"
+    if c["failed"] or c["partial"] or c["missing"]:
+        return "partial"
+    return "completed"
 
 
 @legal_bp.route("/api/legal/prompt_history")
@@ -456,8 +445,14 @@ def api_legal_provenance_scan():
 
 @legal_bp.route("/api/legal/observability")
 def api_legal_observability():
+    """Observability snapshot for one slice: scope (live/test) + optional run + optional period."""
     scope = "test" if request.args.get("scope") == "test" else "real"
-    return jsonify(legal_metrics_snapshot(scope=scope))
+    days = request.args.get("days", type=int)
+    return jsonify(legal_metrics_snapshot(
+        scope=scope,
+        batch_id=(request.args.get("batch_id") or None),
+        days=days if days and days > 0 else None,
+    ))
 
 
 @legal_bp.route("/api/legal/clear_test", methods=["POST"])
@@ -474,7 +469,8 @@ def api_legal_download(batch_id):
     for r in leads:
         row = {f: r.get(f, "") for f in fields}
         row["lead_id"] = r.get("lead_id", "")
-        row["status"] = r.get("result_status") or r.get("status", "")
+        # the lead row is the live state; the result row may be left over from a previous run
+        row["status"] = r.get("status") or r.get("result_status") or ""
         rows.append(row)
     buf = io.BytesIO(pd.DataFrame(rows).to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"))
     return send_file(buf, mimetype="text/csv", as_attachment=True,
