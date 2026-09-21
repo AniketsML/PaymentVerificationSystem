@@ -174,10 +174,13 @@ def _discover_lead_directories(root_path: str) -> List[Dict[str, Any]]:
     return leads
 
 
-def scan_and_enqueue_folder(root_path: str, is_test: bool = False, extraction_prompt: str = "", batch_name: str = "") -> Dict[str, Any]:
-    """Scan uploaded folder structure and enqueue leads and their documents."""
+def scan_and_enqueue_folder(root_path: str, is_test: bool = False, extraction_prompt: str = "",
+                            batch_name: str = "", batch_id: str = None) -> Dict[str, Any]:
+    """Scan uploaded folder structure and enqueue leads and their documents.
+    `batch_id` lets a caller add dossiers to a batch it already created — the CSV manifest
+    intake queues each LAN as its documents land, all under one run."""
     init_schema()
-    batch_id = f"batch-legal-{int(time.time())}"
+    batch_id = batch_id or f"batch-legal-{int(time.time())}"
     leads_enqueued, docs_enqueued, skipped = 0, 0, 0
 
     if not batch_name:

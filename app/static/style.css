@@ -1391,8 +1391,14 @@ img,svg,canvas,video{max-width:100%}
 .s-handwritten{color:var(--bad);background:var(--bad-bg)}
 .s-unknown{color:var(--neutral);background:var(--neutral-bg)}
 .s-none{color:var(--bad);background:transparent;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--bad) 45%,transparent)}
+/* blur rides on top of a script verdict rather than replacing it, so it reads as a marker
+   next to the chip (.s-mini) or as an outline around it (.s-soft), never as its own colour */
+.s-blurred{color:#b45309;background:color-mix(in srgb,#ec835a 16%,transparent)}
+[data-theme="dark"] .s-blurred{color:#f0a67f;background:color-mix(in srgb,#ec835a 24%,transparent)}
+.s-mini{margin-left:5px;padding:2px 7px}
+.s-soft{box-shadow:inset 0 0 0 1px color-mix(in srgb,#ec835a 55%,transparent)}
 td.c-script{white-space:nowrap}
-td.c-script .s-chip{margin-left:0}
+td.c-script .s-chip:first-child{margin-left:0}
 
 /* dashboard filter bar: status · typed/handwritten · field coverage — popovers hold the detail */
 .fbar{border-bottom:1px solid var(--line);background:var(--surface)}
@@ -1416,7 +1422,7 @@ td.c-script .s-chip{margin-left:0}
 .seg .seg-b.active .seg-n{color:var(--accent)}
 .sdot{width:7px;height:7px;border-radius:50%;flex:none}
 .d-ok,.d-typed{background:var(--ch-ok)} .d-warn,.d-scanned{background:var(--ch-warn)}
-.d-serious{background:#ec835a} .d-bad,.d-handwritten{background:var(--ch-bad)}
+.d-serious,.d-blurred{background:#ec835a} .d-bad,.d-handwritten{background:var(--ch-bad)}
 .d-accent{background:var(--accent)} .d-neutral,.d-unknown{background:var(--ch-neutral)}
 .d-none{background:transparent;box-shadow:inset 0 0 0 1.5px var(--bad)}
 .fgroup{display:flex;align-items:center;gap:10px}
@@ -1477,6 +1483,27 @@ td.c-script .s-chip{margin-left:0}
   .fpop-cov{left:0;right:auto;width:100%}
   .covrow{grid-template-columns:minmax(0,1fr) 64px 38px;gap:10px}
 }
+
+/* CSV list of document links: what was picked, and the download phase */
+.dz-preview{margin-top:14px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);
+  background:var(--surface);text-align:left}
+.dz-preview b{display:block;font:600 12.5px "JetBrains Mono",monospace;color:var(--ink);word-break:break-all}
+.dz-preview span{display:block;margin-top:2px;font-size:12px;color:var(--ink-faint)}
+.dz-preview span.warn{color:var(--warn)}
+.fetch-phase{margin:0 0 14px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface-2)}
+.fetch-head{display:flex;align-items:center;gap:10px}
+.fetch-k{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint)}
+.fetch-n{margin-left:auto;font-size:12.5px;font-weight:600;color:var(--ink)}
+.fetch-head .spinner{border-color:color-mix(in srgb,var(--accent) 35%,transparent);border-top-color:var(--accent);width:13px;height:13px}
+.fetch-bar{height:4px;margin:9px 0 8px;border-radius:2px;background:var(--neutral-bg);overflow:hidden}
+.fetch-bar span{display:block;height:100%;background:var(--accent);transition:width .4s ease}
+.fetch-meta{display:flex;align-items:center;gap:14px;font-size:12px;color:var(--ink-faint)}
+.fetch-fails{margin-top:10px;max-height:190px;overflow:auto;border-top:1px solid var(--line);padding-top:8px}
+.fetch-fail{display:grid;grid-template-columns:minmax(0,150px) minmax(0,1fr) minmax(0,220px);gap:12px;padding:5px 0;
+  font-size:11.5px;color:var(--ink-soft);border-bottom:1px solid var(--line)}
+.fetch-fail:last-child{border-bottom:0}
+.fetch-fail em{font-style:normal;color:var(--bad)}
+.fetch-fail span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* "why no values?" panel in the lead drawer */
 .why{border:1px solid color-mix(in srgb,var(--warn) 40%,var(--line));border-radius:var(--radius);background:var(--surface);overflow:hidden}

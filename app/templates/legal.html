@@ -107,12 +107,14 @@
                   <line x1="12" y1="3" x2="12" y2="15"></line>
                 </svg>
               </div>
-              <div class="dz-main" id="zipName">Drag & Drop Batch Folder</div>
-              <div class="dz-sub" id="zipSub">Drop a root folder containing multiple LAN folders, or a single ZIP file.</div>
-              <div style="margin-top: 16px; display: flex; gap: 8px; justify-content: center;">
-                <button class="btn line small" id="btnPickFolder">Select Folder</button>
-                <button class="btn line small" id="btnPickZip">Select ZIP</button>
+              <div class="dz-main" id="zipName">Drag & drop a batch</div>
+              <div class="dz-sub" id="zipSub">A folder of LAN sub-folders, a ZIP, or a CSV list of document links — dropped or picked below.</div>
+              <div style="margin-top: 16px; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;">
+                <button class="btn line small" id="btnPickFolder">Folder</button>
+                <button class="btn line small" id="btnPickZip">ZIP</button>
+                <button class="btn line small" id="btnPickCsv">CSV list</button>
               </div>
+              <div class="dz-preview hidden" id="dzPreview"></div>
             </div>
             <div style="position: relative;">
               <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;">
@@ -134,6 +136,7 @@
           </div>
           <input type="file" id="folderInput" webkitdirectory directory multiple hidden>
           <input type="file" id="zipFile" accept=".zip" hidden>
+          <input type="file" id="csvFile" accept=".csv,.xlsx,.xls" hidden>
         </div>
 
         <!-- Full-width run progress panel -->
@@ -148,6 +151,7 @@
               <button class="btn bad small" id="btnBatchCancel">Cancel</button>
             </div>
           </div>
+          <div class="fetch-phase hidden" id="fetchPhase"></div>
           <div class="progress"><div class="bar" id="progBar"></div></div>
           <div class="run-meta"><span id="progText">0 / 0</span><span id="progElapsed"></span></div>
           <div class="mini-counts legal-mini" id="miniCounts"></div>
@@ -208,7 +212,7 @@
             </div>
             <div class="fbar-sub">
               <div class="fgroup">
-                <span class="fgroup-k">Typed / Handwritten</span>
+                <span class="fgroup-k">Source &amp; quality</span>
                 <div class="seg sm" id="scriptFacets" role="radiogroup" aria-label="Typed or handwritten"></div>
               </div>
               <div class="fmenu" id="coverageMenu">

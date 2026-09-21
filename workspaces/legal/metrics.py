@@ -173,15 +173,23 @@ def script_mix(s: Slice) -> Dict[str, Any]:
     """)
     values = {"typed": 0, "scanned": 0, "handwritten": 0, "unknown": 0}
     dossiers = {"typed": 0, "scanned": 0, "handwritten": 0, "unknown": 0, "none": 0, "not_checked": 0}
+    # blur cuts across the mix above (a value can be handwritten AND on a blurry page), so it
+    # is reported on its own and deliberately left out of the two totals.
+    blur = {"values": 0, "dossiers": 0}
     for r in rows:
         if not r.get("tag"):
             dossiers["not_checked"] += 1
             continue
         dossiers[r["tag"] if r["tag"] in dossiers else "unknown"] += 1
         for k, n in (r.get("counts") or {}).items():
+            n = int(n or 0)
+            if k == "blurred":
+                blur["values"] += n
+                blur["dossiers"] += 1 if n else 0
+                continue
             key = "typed" if k == "printed" else k
-            values[key if key in values else "unknown"] += int(n or 0)
-    return {"values": values, "dossiers": dossiers}
+            values[key if key in values else "unknown"] += n
+    return {"values": values, "dossiers": dossiers, "blur": blur}
 
 
 # ── 4. what does it cost? ─────────────────────────────────────────────────────
@@ -267,7 +275,8 @@ def per_dossier(s: Slice, limit: int = 500) -> List[dict]:
                COALESCE(tel.tokens, 0)::int            AS tokens,
                COALESCE(tel.prompt_tokens, 0)::int     AS prompt_tokens,
                COALESCE(tel.completion_tokens, 0)::int AS completion_tokens,
-               tel.vlm_ms, tel.pipeline_ms, p.tag AS script_tag, tel.updated_at
+               tel.vlm_ms, tel.pipeline_ms, p.tag AS script_tag, tel.updated_at,
+               COALESCE((p.counts->>'blurred')::int, 0) > 0 AS has_blur
         FROM tel LEFT JOIN legal_field_provenance p ON p.lead_id = tel.lead_id
         ORDER BY tel.updated_at DESC LIMIT %s
     """, (limit,))
@@ -283,7 +292,7 @@ def per_dossier(s: Slice, limit: int = 500) -> List[dict]:
             "tokens": r["tokens"], "prompt_tokens": r["prompt_tokens"],
             "completion_tokens": r["completion_tokens"],
             "vlm_ms": _num(r["vlm_ms"], 0), "pipeline_ms": _num(r["pipeline_ms"], 0),
-            "script_tag": r["script_tag"],
+            "script_tag": r["script_tag"], "has_blur": bool(r["has_blur"]),
             "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
         })
     return out

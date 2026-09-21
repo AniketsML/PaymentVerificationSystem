@@ -428,7 +428,7 @@
        theadRow.innerHTML = `
           <th class="th-filter" data-col="lead_id">Lead ID<span class="th-caret" aria-hidden="true">▾</span></th>
           <th class="th-filter" data-col="processing_status">Status<span class="th-caret" aria-hidden="true">▾</span></th>
-          <th class="th-filter" data-col="script_tag" title="Whether values were typed, read off a scan, or handwritten">Typed / Handwritten<span class="th-caret" aria-hidden="true">▾</span></th>
+          <th class="th-filter" data-col="script_tag" title="Whether values were typed, read off a scan or handwritten — and whether the page was sharp enough to read">Source &amp; quality<span class="th-caret" aria-hidden="true">▾</span></th>
           ${dynamicColumns.map(c => {
             const isAddr = c.toLowerCase().includes("address");
             const style = isAddr ? 'style="min-width: 280px; max-width: 420px;"' : '';
@@ -452,16 +452,23 @@
     live.forEach(k => { if (!(k in COL_FILTERS)) COL_FILTERS[k] = null; });
   }
 
+  // "blurred" is not a script verdict but a flag that can sit on any of them, so it filters on
+  // its own column — a blurry handwritten dossier answers to both "Handwritten" and "Blurry".
   const SCRIPT_FACETS = [
     ["all", "All"], ["handwritten", "Handwritten"], ["scanned", "Scanned"],
-    ["typed", "Typed"], ["none", "No values"], ["unknown", "Unchecked"],
+    ["typed", "Typed"], ["blurred", "Blurry"], ["none", "No values"], ["unknown", "Unchecked"],
   ];
   const scriptOf = (r) => r.script_tag || "unknown";
+  const facetCount = (rows, k) =>
+    k === "all" ? rows.length
+      : k === "blurred" ? rows.filter(r => r.has_blur).length
+        : rows.filter(r => scriptOf(r) === k).length;
   const hasValue = (r, col) => r[col] !== undefined && r[col] !== null && String(r[col]).trim() !== "" && r[col] !== "—";
 
   function facetRows() {
     let rows = Array.isArray(allRows) ? allRows : [];
-    if (state.script !== "all") rows = rows.filter(r => scriptOf(r) === state.script);
+    if (state.script === "blurred") rows = rows.filter(r => r.has_blur);
+    else if (state.script !== "all") rows = rows.filter(r => scriptOf(r) === state.script);
     if (state.missing) rows = rows.filter(r => !hasValue(r, state.missing));
     return rows;
   }
@@ -475,13 +482,14 @@
     // typed / handwritten — a compact segmented control, only the tags present (plus the active one)
     const host = $("#scriptFacets");
     if (host) {
+      const rows0 = allRows || [];
       const counts = {};
-      (allRows || []).forEach(r => { const s = scriptOf(r); counts[s] = (counts[s] || 0) + 1; });
+      SCRIPT_FACETS.forEach(([k]) => { counts[k] = facetCount(rows0, k); });
       host.innerHTML = SCRIPT_FACETS
         .filter(([k]) => k === "all" || counts[k] || state.script === k)
         .map(([k, label]) => {
           const on = state.script === k;
-          const n = k === "all" ? (allRows || []).length : (counts[k] || 0);
+          const n = counts[k] || 0;
           return `<button type="button" class="chip seg-b${on ? " active" : ""}" role="radio" aria-checked="${on}"
               data-script="${k}" title="${esc(k === "all" ? "Every dossier" : (SCRIPT_LABEL[k] || SCRIPT_LABEL.unknown)[1])}">
               ${k === "all" ? "" : `<i class="sdot d-${k}"></i>`}${label}<span class="seg-n">${n}</span></button>`;
@@ -525,7 +533,7 @@
     const chips = [];
     if (state.script !== "all") {
       const label = (SCRIPT_FACETS.find(([k]) => k === state.script) || [, state.script])[1];
-      chips.push(["script", `Typed / Handwritten: ${label}`]);
+      chips.push(["script", `Source: ${label}`]);
     }
     if (state.missing) chips.push(["missing", `Missing: ${formatColName(state.missing)}`]);
     const colN = Object.values(COL_FILTERS).filter(s => s !== null).length;
@@ -901,7 +909,7 @@
     RV.leads = leads;
     RV.columns = runColumns(leads);
     $("#rvSummary").innerHTML = runSummaryHTML(run, leads);
-    $("#rvThead").innerHTML = `<th class="c-dossier">Dossier</th><th class="c-status">Status</th><th class="c-script">Typed / Handwritten</th>` +
+    $("#rvThead").innerHTML = `<th class="c-dossier">Dossier</th><th class="c-status">Status</th><th class="c-script">Source &amp; quality</th>` +
       RV.columns.map(c => `<th class="${colClass(c)}">${esc(formatColName(c))}</th>`).join("");
     renderRunRows(stagger);
   }
@@ -936,7 +944,7 @@
       return `<tr tabindex="0" data-id="${esc(r.lead_id)}"${enter}>
         <td class="c-dossier" data-label="Dossier"><div class="rv-name">${esc(r.folder_name || r.lead_name || r.lead_id)}</div><div class="rv-id">${esc(r.lead_id)}</div></td>
         <td class="c-status" data-label="Status">${badge(r.processing_status)}${docs}</td>
-        <td class="c-script" data-label="Typed / Handwritten">${scriptChip(r.script_tag)}</td>
+        <td class="c-script" data-label="Source &amp; quality">${scriptChip(r.script_tag, r.has_blur)}</td>
         ${cols.map(c => runCell(c, r[c])).join("")}
       </tr>`;
     }).join("");
@@ -1296,7 +1304,7 @@
       let tds = `
         <td class="lead-id mono nowrap">${esc(r.lead_id)}</td>
         <td>${badge(r.processing_status)}</td>
-        <td class="c-script">${scriptChip(r.script_tag)}</td>
+        <td class="c-script">${scriptChip(r.script_tag, r.has_blur)}</td>
       `;
       dynamicColumns.forEach(col => {
          let val = r[col];
@@ -1927,6 +1935,7 @@ function formatFieldValue(k, v) {
     scanned: ["Scanned", "Not in the document's text layer — read from the page image, so it may be handwritten"],
     typed: ["Typed", "Found in the document's own text layer"],
     printed: ["Typed", "The model read this value as machine print"],
+    blurred: ["Blurry", "The page image is soft or low-contrast — values read from it are less certain"],
     unknown: ["Unchecked", "The page could not be checked"],
     none: ["No values", "The extraction returned no values for this dossier — open it to see why"],
   };
@@ -1944,9 +1953,11 @@ function formatFieldValue(k, v) {
       const info = fields[chip.dataset.prov];
       const key = (info && info.script) || "unknown";
       const [label, why] = SCRIPT_LABEL[key] || SCRIPT_LABEL.unknown;
-      chip.className = `s-chip s-${key === "printed" ? "typed" : key}`;
-      chip.textContent = label;
-      chip.title = info && info.source === "model" ? `${why} (model)` : why;
+      const blurry = !!(info && info.blurred);
+      chip.className = `s-chip s-${key === "printed" ? "typed" : key}${blurry ? " s-soft" : ""}`;
+      chip.textContent = blurry ? `${label} · blurry` : label;
+      const why2 = info && info.source === "model" ? `${why} (model)` : why;
+      chip.title = blurry ? `${why2}\n${SCRIPT_LABEL.blurred[1]}` : why2;
       chip.hidden = false;
     });
     const c = data.counts || {};
@@ -1955,16 +1966,21 @@ function formatFieldValue(k, v) {
     if (c.scanned) parts.push(`${c.scanned} scanned`);
     const typed = (c.typed || 0) + (c.printed || 0);
     if (typed) parts.push(`${typed} typed`);
+    if (c.blurred) parts.push(`${c.blurred} on blurry pages`);
     const sum = $("#provSummary");
     if (sum && parts.length) sum.textContent = parts.join(" · ");
     const badgeHost = $("#dScriptTag");
-    if (badgeHost) badgeHost.innerHTML = scriptChip(data.tag);
+    if (badgeHost) badgeHost.innerHTML = scriptChip(data.tag, c.blurred > 0);
   }
 
-  const scriptChip = (tag) => {
+  /* Blur sits beside the script verdict rather than replacing it, so a dossier that is both
+     handwritten and softly scanned still reads "Handwritten" — with a blur marker next to it. */
+  const scriptChip = (tag, blurry) => {
     const key = tag && SCRIPT_LABEL[tag] ? tag : "unknown";
     const [label, why] = SCRIPT_LABEL[key];
-    return `<span class="s-chip s-${key === "printed" ? "typed" : key}" title="${esc(why)}">${label}</span>`;
+    const main = `<span class="s-chip s-${key === "printed" ? "typed" : key}" title="${esc(why)}">${label}</span>`;
+    if (!blurry || key === "blurred" || key === "none") return main;
+    return `${main}<span class="s-chip s-blurred s-mini" title="${esc(SCRIPT_LABEL.blurred[1])}">Blurry</span>`;
   };
 
   async function openLead(id) {
@@ -2001,6 +2017,77 @@ function formatFieldValue(k, v) {
         onPick(f);
       }
     });
+  }
+
+  /* ── CSV list of document links ─────────────
+     One row per document with its LAN; the server groups rows by LAN, downloads each
+     dossier's documents and queues it as soon as its files land. This panel shows that
+     download phase, then the normal batch progress takes over. */
+  function renderFetchPhase(fetch) {
+    const host = $("#fetchPhase");
+    if (!host) return;
+    if (!fetch) { host.classList.add("hidden"); host.innerHTML = ""; return; }
+    const done = (fetch.fetched || 0) + (fetch.failed || 0);
+    const total = fetch.total_rows || 0;
+    const pct = total ? Math.round((100 * done) / total) : 0;
+    const failures = Array.isArray(fetch.failures) ? fetch.failures : [];
+    host.classList.remove("hidden");
+    host.innerHTML = `
+      <div class="fetch-head">
+        <span class="fetch-k">${fetch.finished_at ? "Documents downloaded" : "Downloading documents"}</span>
+        <span class="fetch-n mono">${fmtInt(done)} / ${fmtInt(total)}</span>
+        ${fetch.finished_at ? "" : `<span class="spinner" aria-hidden="true"></span>`}
+      </div>
+      <div class="fetch-bar"><span style="width:${pct}%"></span></div>
+      <div class="fetch-meta">
+        <span>${fmtInt(fetch.leads || 0)} of ${fmtInt(fetch.total_lans || 0)} dossiers queued</span>
+        ${fetch.failed ? `<button type="button" class="rv-link" id="fetchFailBtn">${fmtInt(fetch.failed)} link${fetch.failed === 1 ? "" : "s"} failed</button>` : ""}
+      </div>
+      ${failures.length ? `<div class="fetch-fails hidden" id="fetchFails">
+        ${failures.slice(0, 50).map(f => `<div class="fetch-fail">
+            <span class="mono">${esc(f.lan || "")}</span>
+            <span>${esc(f.file || f.url || "")}</span>
+            <em>${esc(f.reason || "")}</em></div>`).join("")}
+      </div>` : ""}`;
+    const btn = $("#fetchFailBtn");
+    if (btn) btn.onclick = () => {
+      const list = $("#fetchFails");
+      if (list) list.classList.toggle("hidden");
+    };
+  }
+
+  // quick client-side read of the picked sheet, so the count is known before uploading
+  function previewManifest(file) {
+    const box = $("#dzPreview");
+    if (!box) return;
+    box.classList.remove("hidden");
+    if (!/\.csv$/i.test(file.name)) {
+      box.innerHTML = `<b>${esc(file.name)}</b><span>Excel list — the server will read it on upload</span>`;
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const lines = String(reader.result || "").split(/\r?\n/).filter(l => l.trim());
+      if (!lines.length) { box.innerHTML = `<b>${esc(file.name)}</b><span>the file looks empty</span>`; return; }
+      const head = lines[0].split(",").map(h => h.trim().toLowerCase());
+      const lanI = head.findIndex(h => h.includes("lan") || h.includes("account") || h.includes("loan"));
+      const urlI = head.findIndex(h => h.includes("link") || h.includes("url") || h.includes("drive"));
+      if (lanI < 0 || urlI < 0) {
+        box.innerHTML = `<b>${esc(file.name)}</b><span class="warn">needs a LAN column and a document link column</span>`;
+        return;
+      }
+      const lans = new Set();
+      let docs = 0;
+      for (const line of lines.slice(1)) {
+        const cells = line.split(",");
+        const lan = (cells[lanI] || "").trim();
+        const url = (cells[urlI] || "").trim();
+        if (lan && /^https?:/i.test(url)) { lans.add(lan); docs++; }
+      }
+      box.innerHTML = `<b>${esc(file.name)}</b><span>${docs.toLocaleString("en-IN")} document${docs === 1 ? "" : "s"} · ${lans.size} dossier${lans.size === 1 ? "" : "s"} by LAN</span>`;
+    };
+    reader.onerror = () => { box.innerHTML = `<b>${esc(file.name)}</b><span>could not read the file</span>`; };
+    reader.readAsText(file.slice(0, 2_000_000));
   }
 
   /* ── batch polling & ingestion ──────────── */
@@ -2071,6 +2158,7 @@ function formatFieldValue(k, v) {
         
         $("#progText").textContent = `${done} / ${total} dossiers · ${progStatus}${avgText}`;
         $("#progElapsed").textContent = p.leads_failed ? `${p.leads_failed} failed` : "";
+        renderFetchPhase(p.fetch);
 
         const newMiniCountsHTML = `
           <div class="mini ok"><div class="mn">${p.leads_completed || 0}</div><div class="ml">completed</div></div>
@@ -2156,7 +2244,9 @@ function formatFieldValue(k, v) {
             lastCompleted = done;
         }
 
-        if (total > 0 && p.leads_pending === 0 && p.leads_processing === 0 && (p.leads_paused || 0) === 0) {
+        // a CSV batch keeps growing while its documents download — don't call it finished yet
+        const stillFetching = p.fetch && !p.fetch.finished_at;
+        if (!stillFetching && total > 0 && p.leads_pending === 0 && p.leads_processing === 0 && (p.leads_paused || 0) === 0) {
           clearInterval(pollTimer); pollTimer = null;
           lastCompleted = -1;
           $("#progBar").style.width = "100%";
@@ -2274,9 +2364,24 @@ function formatFieldValue(k, v) {
   }
 
   function initUploads() {
-    let selectedBatchType = null; // "zip" | "folder"
+    let selectedBatchType = null; // "zip" | "folder" | "csv"
     let selectedZipFile = null;
+    let selectedCsvFile = null;
     let selectedFolderFiles = []; // array of { file, path }
+
+    const isSheet = (name) => /\.(csv|xlsx|xls)$/i.test(name || "");
+    const pickCsv = (f) => {
+      selectedCsvFile = f;
+      selectedZipFile = null;
+      selectedFolderFiles = [];
+      selectedBatchType = "csv";
+      if ($("#zipName")) $("#zipName").textContent = `CSV list: ${f.name}`;
+      if ($("#zipSub")) $("#zipSub").textContent = "Documents will be downloaded and grouped into a dossier per LAN";
+      previewManifest(f);
+      const run = $("#runZip");
+      if (run) { run.disabled = false; run.textContent = "Fetch & extract"; }
+    };
+    const clearPreview = () => { const b = $("#dzPreview"); if (b) { b.classList.add("hidden"); b.innerHTML = ""; } };
 
     const zipDrop = $("#zipDrop");
     const zipInput = $("#zipFile");
@@ -2294,7 +2399,9 @@ function formatFieldValue(k, v) {
           path: f.webkitRelativePath || f.name
         }));
         selectedZipFile = null;
+        selectedCsvFile = null;
         selectedBatchType = "folder";
+        clearPreview();
         const leadFolders = new Set(selectedFolderFiles.map(x => x.path.split('/')[0]).filter(Boolean));
         if ($("#zipName")) $("#zipName").textContent = `📁 Folder: ${selectedFolderFiles.length} file(s) selected`;
         if ($("#zipSub")) $("#zipSub").textContent = `Spans ${leadFolders.size || 1} directory folder(s)`;
@@ -2311,10 +2418,23 @@ function formatFieldValue(k, v) {
         if (!f) return;
         selectedZipFile = f;
         selectedFolderFiles = [];
+        selectedCsvFile = null;
         selectedBatchType = "zip";
+        clearPreview();
         if ($("#zipName")) $("#zipName").textContent = `🗜️ ZIP: ${f.name} (${(f.size / 1024 / 1024).toFixed(2)} MB)`;
         if ($("#zipSub")) $("#zipSub").textContent = "Archive selected — ready to extract and process";
         if (runZip) { runZip.disabled = false; runZip.textContent = "Process Ingest"; }
+      };
+    }
+
+    // 2b. Pick a CSV / Excel list of document links
+    const btnPickCsv = $("#btnPickCsv");
+    const csvInput = $("#csvFile");
+    if (btnPickCsv && csvInput) {
+      btnPickCsv.onclick = () => csvInput.click();
+      csvInput.onchange = () => {
+        const f = csvInput.files && csvInput.files[0];
+        if (f) pickCsv(f);
       };
     }
 
@@ -2336,6 +2456,10 @@ function formatFieldValue(k, v) {
         try {
           const items = await getFilesFromDataTransfer(e.dataTransfer);
           if (!items || !items.length) return;
+          if (items.length === 1 && isSheet(items[0].file.name)) {
+            pickCsv(items[0].file);
+            return;
+          }
           if (items.length === 1 && items[0].file.name.toLowerCase().endsWith(".zip")) {
             selectedZipFile = items[0].file;
             selectedFolderFiles = [];
@@ -2345,7 +2469,9 @@ function formatFieldValue(k, v) {
           } else {
             selectedFolderFiles = items;
             selectedZipFile = null;
+            selectedCsvFile = null;
             selectedBatchType = "folder";
+            clearPreview();
             const leadFolders = new Set(selectedFolderFiles.map(x => x.path.split('/')[0]).filter(Boolean));
           if ($("#zipName")) $("#zipName").textContent = `📁 Dropped Folder: ${selectedFolderFiles.length} file(s)`;
           if ($("#zipSub")) $("#zipSub").textContent = `Spans ${leadFolders.size || 1} directory folder(s)`;
@@ -2362,7 +2488,10 @@ function formatFieldValue(k, v) {
       runZip.onclick = async () => {
         if (!selectedBatchType) return;
         const fd = new FormData();
-        if (selectedBatchType === "zip" && selectedZipFile) {
+        if (selectedBatchType === "csv" && selectedCsvFile) {
+          fd.append("manifest", selectedCsvFile);
+          fd.append("batch_name", selectedCsvFile.name.replace(/\.(csv|xlsx|xls)$/i, ""));
+        } else if (selectedBatchType === "zip" && selectedZipFile) {
           fd.append("zip_file", selectedZipFile);
           const zipBase = selectedZipFile.name.replace(/\.zip$/i, "");
           fd.append("batch_name", zipBase);
@@ -2402,7 +2531,12 @@ function formatFieldValue(k, v) {
             runZip.textContent = "Process Ingest";
             return;
           }
-          toast(`Enqueued ${r.leads_enqueued} lead(s) with ${r.documents_enqueued || 0} document(s)`, "ok");
+          if (r.mode === "manifest") {
+            toast(`Downloading ${r.documents} document${r.documents === 1 ? "" : "s"} for ${r.leads_expected} dossier${r.leads_expected === 1 ? "" : "s"}` +
+                  (r.skipped_rows ? ` · ${r.skipped_rows} row${r.skipped_rows === 1 ? "" : "s"} skipped` : ""), "ok", 6000);
+          } else {
+            toast(`Enqueued ${r.leads_enqueued} lead(s) with ${r.documents_enqueued || 0} document(s)`, "ok");
+          }
           startBatchPoll(r.batch_id);
         } catch (e) {
           console.error("Upload error:", e);
@@ -2690,15 +2824,26 @@ function formatFieldValue(k, v) {
     const vTotal = vParts.reduce((a, p) => a + p.n, 0);
     const dTotal = dParts.reduce((a, p) => a + p.n, 0);
     const pending = ds.not_checked || 0;
+    // blur is a property of the page, not of the script, so it gets its own bar rather than a
+    // segment inside the two above — a value can be handwritten AND on a blurry page.
+    const blur = m.blur || { values: 0, dossiers: 0 };
+    const bParts = [
+      { label: "On a blurry page", color: "var(--viz-serious)", n: blur.values || 0 },
+      { label: "Page sharp enough", color: "var(--ch-neutral)", n: Math.max(0, vTotal - (blur.values || 0)) },
+    ];
     $("#obScript").innerHTML = cardHead("Typed, scanned or handwritten",
       "A dossier takes the strongest tag among its values: handwritten › scanned › typed",
       pending ? `<button type="button" class="btn line small" id="obCheckScripts">Check ${fmtInt(pending)} dossier${pending === 1 ? "" : "s"}</button>` : "") +
       `<div class="ob-script">
         <div class="ob-script-row"><span class="ob-script-k">Values<b>${fmtInt(vTotal)}</b></span>${stackedBar(vParts, vTotal)}</div>
         <div class="ob-script-row"><span class="ob-script-k">Dossiers<b>${fmtInt(dTotal)}</b></span>${stackedBar(dParts, dTotal)}</div>
-      </div>` + legend(vParts, vTotal) +
+        <div class="ob-script-row"><span class="ob-script-k">Page quality<b>${fmtInt(blur.values || 0)}</b></span>${stackedBar(bParts, vTotal)}</div>
+      </div>` + legend(vParts.concat(bParts.slice(0, 1)), vTotal) +
       `<div class="ob-note">Handwriting is flagged by the model on runs extracted since this was added. Older runs can only show
-        whether a value appears in the PDF's own text (Typed) or was read off the page image (Scanned — which may be handwriting).</div>`;
+        whether a value appears in the PDF's own text (Typed) or was read off the page image (Scanned — which may be handwriting).
+        ${blur.values ? `<b>${fmtInt(blur.values)}</b> value${blur.values === 1 ? "" : "s"} across
+        <b>${fmtInt(blur.dossiers)}</b> dossier${blur.dossiers === 1 ? "" : "s"} sit on pages soft or low-contrast enough to be
+        worth a second look; that count cuts across the rows above rather than adding to them.` : ""}</div>`;
     const chk = $("#obCheckScripts");
     if (chk) chk.onclick = async () => {
       chk.disabled = true; chk.textContent = "Checking…";
@@ -2834,7 +2979,7 @@ function formatFieldValue(k, v) {
   /* ── 05 the table ── */
   const OB_COLS = [
     ["name", "Dossier", false], ["run", "Run", false], ["status", "Status", false],
-    ["script_tag", "Typed / Handwritten", false], ["values", "Values", true], ["cited_pages", "Pages cited", true],
+    ["script_tag", "Source & quality", false], ["values", "Values", true], ["cited_pages", "Pages cited", true],
     ["documents_read", "Docs read", true], ["tokens", "Tokens", true], ["vlm_ms", "Model time", true],
     ["pipeline_ms", "Total time", true], ["updated_at", "Finished", false],
   ];
@@ -2861,7 +3006,7 @@ function formatFieldValue(k, v) {
         <td><div class="rv-name">${esc(r.name)}</div><div class="rv-id">${esc(r.lead_id)}</div></td>
         <td class="ob-run" title="${esc(r.run)}">${esc(r.run)}</td>
         <td>${badge(r.status)}</td>
-        <td>${scriptChip(r.script_tag)}</td>
+        <td>${scriptChip(r.script_tag, r.has_blur)}</td>
         <td class="c-num">${r.values ? fmtInt(r.values) : '<span class="ob-zero">0</span>'}</td>
         <td class="c-num">${fmtInt(r.cited_pages)}</td>
         <td class="c-num">${fmtInt(r.documents_read)}/${fmtInt(r.documents)}</td>
@@ -3111,7 +3256,7 @@ function formatFieldValue(k, v) {
     const headerLabels = exportCols.map(c => {
       if (c === "lead_id") return "Lead ID";
       if (c === "processing_status") return "Status";
-      if (c === "script_tag") return "Typed / Handwritten";
+      if (c === "script_tag") return "Source & quality";
       return formatColName(c);
     });
 

@@ -19,6 +19,14 @@ So a field ends up as one of:
     scanned      value only in the image (scan/photo — possibly handwritten)
     unknown      no page/document to check (nothing is guessed)
 
+BLUR is measured separately and sits ALONGSIDE that verdict rather than replacing it, so a
+value can be "handwritten, on a blurry page". A page with no text layer is rendered and scored
+by the average strength of its sharpest 1% of edges — which, unlike a plain Laplacian variance,
+does not collapse just because a page is mostly white space. Every page is normalised to the
+same pixel height first, so the score means the same thing for a digital PDF, a 200-DPI scan
+and a phone photo. Only pages carrying enough ink are judged, and only the first few per
+dossier, because rendering is by far the slowest thing here (~100 ms a page).
+
 A dossier with no extracted values at all is tagged `none` ("No values") — there is nothing
 to judge, and saying "unchecked" would hide that the extraction came back empty.
 
@@ -40,11 +48,21 @@ from psycopg.types.json import Jsonb
 
 from db import pg
 
-# display order: the strongest claim about a lead wins
+# display order: the strongest claim about a lead wins. Blur is NOT in here — it never
+# replaces a dossier's script verdict, it rides alongside it as counts["blurred"], so a soft
+# scan of a handwritten form still reads "Handwritten" and is still findable under "Scanned".
 TAG_RANK = {"handwritten": 4, "scanned": 3, "printed": 2, "typed": 1, "unknown": 0}
 LEAD_TAGS = ("handwritten", "scanned", "typed", "unknown", "none")
-_VERSION = "2"                # bump when the tagging rules change, so cached verdicts recompute
+_VERSION = "3"                # bump when the tagging rules change, so cached verdicts recompute
 
+# a page whose sharpest edges are softer than this reads as blurry. Calibrated on 42 real
+# image-only pages: crisp scans score ~240, ordinary ones ~157, the softest phone scans ~97.
+BLUR_EDGE_MAX = float(os.environ.get("LEGAL_BLUR_EDGE_MAX", "120"))
+_MIN_INK = 0.005              # below this the page is too empty to judge sharpness at all
+_BLUR_TARGET_PX = 1200        # every page is rendered to this height, so scores compare
+_MAX_BLUR_PAGES = 4           # enough to tell whether a dossier is soft; caps the render cost
+
+_IMAGE_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp", ".gif")
 _MIN_PAGE_CHARS = 40          # below this a page carries no usable text layer (it is an image)
 _TOKEN_HIT_RATIO = 0.75       # share of a value's words that must appear to count as "typed"
 _WS = re.compile(r"[^a-z0-9]+")
@@ -55,6 +73,8 @@ def _norm(s: Any) -> str:
 
 
 def _fingerprint(page_extractions: List[dict], updated_at) -> str:
+    """Keyed on the extraction, not on the document bytes: swapping a source file for a
+    different scan of the same pages without re-extracting keeps the cached verdict."""
     seed = json.dumps(
         [[p.get("document_id"), p.get("page_number"), sorted((p.get("fields") or {}).keys()),
           sorted((p.get("field_scripts") or {}).items())] for p in page_extractions],
@@ -62,23 +82,69 @@ def _fingerprint(page_extractions: List[dict], updated_at) -> str:
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
 
 
-def _page_text(path: str, page_number: int) -> Optional[str]:
-    """The embedded text of one 1-indexed page, or None when it can't be read."""
-    if not path or not os.path.exists(path):
-        return None
-    ext = os.path.splitext(path)[1].lower()
-    if ext != ".pdf":
-        return "" if ext in (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp", ".gif") else None
+def _sharpness(page) -> Optional[Tuple[float, float]]:
+    """(edge strength, ink fraction) for one open page, or None when it can't be measured.
+
+    The page is first rendered to a fixed pixel height. Without that the score would depend on
+    the file's own resolution — the same page scores 143 as a PDF but 95 as a 200-DPI JPEG if
+    each is measured at its native size."""
     try:
         import fitz
-        with fitz.open(path) as doc:
-            idx = int(page_number) - 1
-            if idx < 0 or idx >= doc.page_count:
-                return None
-            return doc[idx].get_text("text") or ""
-    except Exception as e:  # noqa: BLE001 — a damaged file must not break the dossier view
-        sys.stderr.write(f"[provenance] text layer read failed for {path} p{page_number}: {e}\n")
+        import numpy as np
+        zoom = _BLUR_TARGET_PX / max(1.0, page.rect.height)
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csGRAY)
+        a = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width).astype(np.float32)
+        if a.size < 16:
+            return None
+        ink = float((a < (np.percentile(a, 90) - 40)).mean())      # marks, against the paper white
+        g = np.maximum(np.abs(np.diff(a, axis=1))[:-1, :], np.abs(np.diff(a, axis=0))[:, :-1])
+        if g.size == 0:
+            return None
+        strong = g > np.percentile(g, 99)                          # the page's own sharpest edges
+        return (float(g[strong].mean()) if strong.any() else 0.0), ink
+    except Exception as e:  # noqa: BLE001 — a page we cannot render simply goes unjudged
+        sys.stderr.write(f"[provenance] sharpness failed: {e}\n")
         return None
+
+
+def _read_pages(doc_paths: Dict[str, str], wanted: Dict[str, List[int]]) -> Dict[Tuple[str, int], dict]:
+    """Text layer — and, for pages that have none, sharpness — for every cited page.
+
+    Each document is opened once. Only image-only pages are rendered (a page with a text layer
+    was born digital), and only the first `_MAX_BLUR_PAGES` of a dossier, so a big scanned
+    dossier costs a few hundred milliseconds rather than tens of seconds."""
+    facts: Dict[Tuple[str, int], dict] = {}
+    budget = _MAX_BLUR_PAGES
+    for doc_id, page_numbers in wanted.items():
+        path = doc_paths.get(doc_id, "")
+        ext = os.path.splitext(path)[1].lower() if path else ""
+        if not path or not os.path.exists(path) or (ext != ".pdf" and ext not in _IMAGE_EXT):
+            for pn in page_numbers:
+                facts[(doc_id, pn)] = {"text": None}
+            continue
+        try:
+            import fitz
+            with fitz.open(path) as doc:
+                for pn in page_numbers:
+                    idx = pn - 1
+                    if idx < 0 or idx >= doc.page_count:
+                        facts[(doc_id, pn)] = {"text": None}
+                        continue
+                    page = doc[idx]
+                    text = page.get_text("text") or ""
+                    fact: Dict[str, Any] = {"text": text}
+                    if len(text.strip()) < _MIN_PAGE_CHARS and budget > 0:
+                        budget -= 1
+                        m = _sharpness(page)
+                        if m and m[1] >= _MIN_INK:      # too little ink => no verdict, not "blurry"
+                            fact["edge"] = round(m[0], 1)
+                            fact["blurred"] = m[0] < BLUR_EDGE_MAX
+                    facts[(doc_id, pn)] = fact
+        except Exception as e:  # noqa: BLE001 — a damaged file must not break the dossier view
+            sys.stderr.write(f"[provenance] page read failed for {path}: {e}\n")
+            for pn in page_numbers:
+                facts.setdefault((doc_id, pn), {"text": None})
+    return facts
 
 
 def _value_in_text(value: Any, page_norm: str) -> bool:
@@ -164,22 +230,31 @@ def analyze(lead_id: str, force: bool = False) -> Dict[str, Any]:
 
     fields: Dict[str, dict] = {}
     pages: List[dict] = []
-    text_cache: Dict[Tuple[str, int], Optional[str]] = {}
+
+    wanted: Dict[str, List[int]] = {}
+    for px in pxs:
+        doc_id = px.get("document_id") or ""
+        page_no = px.get("page_number")
+        pn = int(page_no) if str(page_no).isdigit() else -1
+        if pn not in wanted.setdefault(doc_id, []):
+            wanted[doc_id].append(pn)
+    facts = _read_pages(doc_paths, wanted)
 
     for px in pxs:
         doc_id = px.get("document_id") or ""
         page_no = px.get("page_number")
         scripts = px.get("field_scripts") or {}
         key = (doc_id, int(page_no) if str(page_no).isdigit() else -1)
-        if key not in text_cache:
-            text_cache[key] = _page_text(doc_paths.get(doc_id, ""), key[1])
-        raw_text = text_cache[key]
+        fact = facts.get(key) or {"text": None}
+        raw_text = fact.get("text")
+        blurred = bool(fact.get("blurred"))
         page_norm = _norm(raw_text) if raw_text else ""
         has_layer = bool(raw_text) and len(raw_text.strip()) >= _MIN_PAGE_CHARS
         pages.append({"document_id": doc_id, "page_number": key[1],
                       "has_text_layer": has_layer,
                       "chars": len(raw_text.strip()) if raw_text else 0,
-                      "readable": raw_text is not None})
+                      "readable": raw_text is not None,
+                      "blurred": blurred, "sharpness": fact.get("edge")})
 
         for field, value in (px.get("fields") or {}).items():
             if field.startswith("_") or value in (None, "", "—"):
@@ -195,12 +270,16 @@ def analyze(lead_id: str, force: bool = False) -> Dict[str, Any]:
                 script, source = "scanned", "text_layer"
             fields[f"{key[1]}|{field}"] = {
                 "field": field, "page_number": key[1], "document_id": doc_id,
-                "script": script, "source": source,
+                "script": script, "source": source, "blurred": blurred,
             }
 
+    # `blurred` cuts across the script counts rather than adding to them: a value can be both
+    # handwritten and on a blurry page, so these must not be summed into a single total.
     counts: Dict[str, int] = {}
     for info in fields.values():
         counts[info["script"]] = counts.get(info["script"], 0) + 1
+        if info.get("blurred"):
+            counts["blurred"] = counts.get("blurred", 0) + 1
     tag = _lead_tag(fields) if fields else "none"
 
     try:

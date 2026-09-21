@@ -197,6 +197,23 @@ CREATE TABLE IF NOT EXISTS legal_field_provenance (
     computed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_legal_provenance_tag ON legal_field_provenance(tag);
+
+-- CSV manifest intake: one row per upload of a link sheet, so the fetch phase is visible
+-- (and a link that could not be downloaded is never silently missing).
+CREATE TABLE IF NOT EXISTS legal_manifest_runs (
+    batch_id    TEXT PRIMARY KEY,
+    batch_name  TEXT,
+    total_rows  INT NOT NULL DEFAULT 0,
+    total_lans  INT NOT NULL DEFAULT 0,
+    fetched     INT NOT NULL DEFAULT 0,
+    failed      INT NOT NULL DEFAULT 0,
+    leads       INT NOT NULL DEFAULT 0,
+    failures    JSONB NOT NULL DEFAULT '[]'::jsonb,
+    error       TEXT,
+    is_test     BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at TIMESTAMPTZ
+);
 """
 
 

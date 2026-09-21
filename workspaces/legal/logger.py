@@ -342,6 +342,7 @@ class PgLegalLeadLogger:
                     l.processed_documents,
                     l.failed_documents,
                     p.tag AS script_tag,
+                    COALESCE((p.counts->>'blurred')::int, 0) > 0 AS has_blur,
                     l.created_at,
                     l.updated_at
                 FROM legal_leads l

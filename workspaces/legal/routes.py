@@ -90,6 +90,36 @@ def api_legal_upload_folder():
             import worker; worker.start_pool()
             return jsonify(result)
 
+        # ── a CSV / Excel list of document links ────────────────────────────────
+        # One row per document, LAN repeated. Rows are grouped by LAN, each group is
+        # downloaded into a folder named after the LAN, and then this is an ordinary
+        # folder upload. Fetching runs in the background so the page returns at once.
+        sheet = request.files.get("manifest") or request.files.get("csv_file")
+        for cand in (request.files.get("file"), request.files.get("zip_file")):
+            if cand and (cand.filename or "").lower().endswith((".csv", ".xlsx", ".xls")):
+                sheet = cand
+                break
+        if sheet and sheet.filename:
+            from workspaces.legal import csv_intake
+            rows, info = csv_intake.parse_manifest(sheet, sheet.filename)
+            if not rows:
+                return jsonify({"error": info.get("error", "no usable rows in the sheet"), **info}), 400
+            if not batch_name:
+                batch_name = os.path.splitext(os.path.basename(sheet.filename))[0]
+            batch_id = f"batch-legal-{int(time.time())}"
+            csv_intake.start_run(batch_id, batch_name, info["rows"], info["lans"], is_test)
+            import threading
+            threading.Thread(
+                target=csv_intake.run_manifest,
+                args=(rows, target_extract_dir, batch_id, batch_name),
+                kwargs={"is_test": is_test, "extraction_prompt": extraction_prompt},
+                daemon=True, name=f"manifest-{batch_id}").start()
+            import worker; worker.start_pool()
+            return jsonify({"batch_id": batch_id, "batch_name": batch_name, "mode": "manifest",
+                            "documents": info["rows"], "leads_expected": info["lans"],
+                            "skipped_rows": info.get("skipped", 0),
+                            "leads_enqueued": info["lans"], "workspace": "legal"})
+
         zip_file = request.files.get("zip_file") or request.files.get("file")
         if zip_file and zip_file.filename and zip_file.filename.lower().endswith(".zip"):
             if not batch_name:
@@ -206,7 +236,22 @@ def api_legal_batch(batch_id):
     leads = batch_leads(batch_id, limit=800)
     prog["leads"] = leads
     prog["open_work"] = open_legal_work_count()
+    # a CSV-manifest batch is still downloading its documents for a while
+    from workspaces.legal import csv_intake
+    fetch = csv_intake.status(batch_id)
+    if fetch:
+        prog["fetch"] = fetch
     return jsonify(prog)
+
+
+@legal_bp.route("/api/legal/manifest/<batch_id>")
+def api_legal_manifest(batch_id):
+    """Fetch-phase progress for a CSV manifest upload (documents downloaded / failed)."""
+    from workspaces.legal import csv_intake
+    st = csv_intake.status(batch_id)
+    if not st:
+        abort(404)
+    return jsonify(st)
 
 
 @legal_bp.route("/api/legal/stats")
