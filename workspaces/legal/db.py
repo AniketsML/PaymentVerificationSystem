@@ -269,6 +269,24 @@ def init_schema() -> None:
                 ALTER TABLE legal_lead_documents ADD COLUMN IF NOT EXISTS page_count INT DEFAULT 0;
 
                 ALTER TABLE legal_field_provenance ADD COLUMN IF NOT EXISTS version TEXT NOT NULL DEFAULT '';
+
+                CREATE INDEX IF NOT EXISTS idx_legal_docs_lead_status
+                    ON legal_lead_documents(lead_id, processing_status);
+            """)
+
+            # Documents left 'pending' under a dossier that has already finished were skipped by
+            # the old shortlist and will never be picked up again — recording that is what stops
+            # them reading as "still queued" forever. Idempotent, and it never touches a dossier
+            # that is still being worked on.
+            conn.execute("""
+                UPDATE legal_lead_documents d SET processing_status = 'skipped',
+                       error_message = COALESCE(NULLIF(d.error_message, ''),
+                                                'not read — the dossier finished without it'),
+                       updated_at = now()
+                  FROM legal_leads l
+                 WHERE l.lead_id = d.lead_id
+                   AND d.processing_status = 'pending'
+                   AND l.status IN ('completed', 'partial', 'missing_documents', 'failed');
             """)
         _schema_ready = True
 

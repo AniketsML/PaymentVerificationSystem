@@ -381,14 +381,21 @@ def update_document_status(document_id: str, status: str, document_type: str = N
         c.execute(f"UPDATE legal_lead_documents SET {', '.join(sets)} WHERE document_id=%s", params)
 
 
+# A document is "settled" once the pipeline has decided about it — read, deliberately skipped,
+# or failed. Only 'pending' means still to do. The dashboard, the drawer and the run panel all
+# measure progress against this one definition, so they cannot disagree about what is finished.
+DOC_SETTLED = ("processed", "completed", "skipped", "failed")
+DOC_READ = ("processed", "completed")
+
+
 def update_lead_doc_counts(lead_id: str) -> None:
     with pg.pool().connection() as c:
         c.execute(
             "UPDATE legal_leads SET "
-            "processed_documents = (SELECT count(*) FROM legal_lead_documents WHERE lead_id=%s AND processing_status IN ('processed', 'completed')), "
+            "processed_documents = (SELECT count(*) FROM legal_lead_documents WHERE lead_id=%s AND processing_status = ANY(%s)), "
             "failed_documents = (SELECT count(*) FROM legal_lead_documents WHERE lead_id=%s AND processing_status='failed'), "
             "updated_at = now() WHERE lead_id=%s",
-            (lead_id, lead_id, lead_id))
+            (lead_id, list(DOC_READ), lead_id, lead_id))
 
 
 def batch_lead_progress(batch_id: str) -> Dict[str, Any]:
@@ -397,8 +404,20 @@ def batch_lead_progress(batch_id: str) -> Dict[str, Any]:
         total = c.execute("SELECT count(*) as cnt FROM legal_leads WHERE batch_id=%s", (batch_id,)).fetchone()
         doc_total = c.execute(
             "SELECT count(*) as cnt FROM legal_lead_documents WHERE lead_id IN (SELECT lead_id FROM legal_leads WHERE batch_id=%s)", (batch_id,)).fetchone()
+        # progress counts every document the pipeline has DECIDED about, not only the ones it
+        # read: a skipped document is finished work, and counting it as outstanding left the
+        # bar stuck at 22/465 on a run that had actually finished.
         doc_done = c.execute(
-            "SELECT count(*) as cnt FROM legal_lead_documents WHERE processing_status='processed' AND lead_id IN (SELECT lead_id FROM legal_leads WHERE batch_id=%s)", (batch_id,)).fetchone()
+            "SELECT count(*) as cnt FROM legal_lead_documents WHERE processing_status = ANY(%s) "
+            "AND lead_id IN (SELECT lead_id FROM legal_leads WHERE batch_id=%s)",
+            (list(DOC_SETTLED), batch_id)).fetchone()
+        doc_read = c.execute(
+            "SELECT count(*) as cnt FROM legal_lead_documents WHERE processing_status = ANY(%s) "
+            "AND lead_id IN (SELECT lead_id FROM legal_leads WHERE batch_id=%s)",
+            (list(DOC_READ), batch_id)).fetchone()
+        doc_skipped = c.execute(
+            "SELECT count(*) as cnt FROM legal_lead_documents WHERE processing_status='skipped' "
+            "AND lead_id IN (SELECT lead_id FROM legal_leads WHERE batch_id=%s)", (batch_id,)).fetchone()
     statuses = {r["status"]: r["n"] for r in rows}
     finished = sum(statuses.get(s, 0) for s in ("completed", "partial", "missing_documents", "failed"))
     return {"batch_id": batch_id, "total_leads": total["cnt"] if total else 0,
@@ -410,7 +429,9 @@ def batch_lead_progress(batch_id: str) -> Dict[str, Any]:
             "leads_failed": statuses.get("failed", 0), "leads_paused": statuses.get("paused", 0),
             "leads_finished": finished,
             "total_documents": doc_total["cnt"] if doc_total else 0,
-            "documents_processed": doc_done["cnt"] if doc_done else 0}
+            "documents_processed": doc_done["cnt"] if doc_done else 0,
+            "documents_read": doc_read["cnt"] if doc_read else 0,
+            "documents_skipped": doc_skipped["cnt"] if doc_skipped else 0}
 
 
 def batch_leads(batch_id: str, limit: int = 800) -> List[Dict[str, Any]]:

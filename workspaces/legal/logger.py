@@ -16,8 +16,17 @@ from workspaces.legal.db import init_schema
 # dossier as "completed" while it is still waiting or being read — so the lead row always wins,
 # and the result row is only a fallback. 'draft' is the split second during enqueue: show it as
 # queued rather than as a state of its own.
-LEAD_STATUS_SQL = ("CASE WHEN l.status = 'draft' THEN 'pending' "
-                   "ELSE COALESCE(l.status, r.processing_status, 'pending') END")
+# A finished verdict is also not shown while the dossier still has documents nobody has decided
+# about: a lead that reads "completed" over unread work is the single most misleading thing this
+# table can say. Every document ends up processed, skipped or failed, so this only catches work
+# genuinely still in flight.
+LEAD_STATUS_SQL = (
+    "CASE WHEN l.status = 'draft' THEN 'pending' "
+    "     WHEN l.status IN ('completed','partial','missing_documents') "
+    "          AND EXISTS (SELECT 1 FROM legal_lead_documents d "
+    "                       WHERE d.lead_id = l.lead_id AND d.processing_status = 'pending') "
+    "       THEN 'processing' "
+    "     ELSE COALESCE(l.status, r.processing_status, 'pending') END")
 
 
 class PgLegalLeadLogger:

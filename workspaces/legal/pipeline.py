@@ -176,6 +176,38 @@ def _classify_by_filename(filename: str) -> str:
     dt = classify_doc_by_filename(filename)
     return "" if dt == "document" else dt
 
+# Names that describe a bundle rather than a document type. A file called "ENTIRE FILE" or
+# "LEGAL DOCUMENTS" may hold the loan agreement, the sale deed and the KYC all at once, so its
+# name is no evidence that it lacks what the prompt asks for — it is never shortlisted out.
+_BUNDLE_NAMES = ("entire file", "enter file", "entier file", "enter scan file", "whole file",
+                 "all documents", "legal documents", "loan documents", "misc documents",
+                 "property documents", "document", "documents", "scan", "file")
+
+
+def _is_bundle_name(filename: str) -> bool:
+    from workspaces.legal.doc_filter import _normalise
+    spaced, _ = _normalise(filename)
+    return any(f" {b} " in spaced or spaced.strip().endswith(b) for b in _BUNDLE_NAMES)
+
+
+def _doc_matches_targets(doc: dict, target_docs: List[str]) -> bool:
+    """Could this document hold what the prompt asks for? Deliberately generous: a wrong `False`
+    silently drops evidence, while a wrong `True` only costs one extra model call."""
+    filename = doc.get("filename", "") or ""
+    if _is_bundle_name(filename):
+        return True
+    hint = _classify_by_filename(filename) or (
+        "foreclosure_notice" if (doc.get("metadata") or {}).get("shared_fcl") else "document")
+    fn_lower = filename.lower()
+    for td in target_docs:
+        td_clean = str(td).lower().replace("_", " ")
+        if hint == td or td in hint:
+            return True
+        if td_clean in fn_lower or any(p in fn_lower for p in td_clean.split() if len(p) > 3):
+            return True
+    return False
+
+
 def _get_priority_pages_for_type(doc_type: str, page_count: int) -> List[int]:
     if page_count <= 1: return [0]
     dt = doc_type.lower()
@@ -562,7 +594,7 @@ def process_lead(
         sys.stderr.write(f"[pipeline] Planner failed: {e}\n")
         extraction_plan = {}
 
-    processed_docs, failed_docs = 0, 0
+    processed_docs, failed_docs, skipped_docs = 0, 0, 0
     raw_extractions: Dict[str, Any] = {}
     if folder_lan:
         raw_extractions["account_no_lan"] = folder_lan
@@ -591,6 +623,19 @@ def process_lead(
                          "raw_response": (raw or "")[:1500]},
                    is_test=is_test)
 
+    # Which documents does the prompt actually ask for? Worked out for the WHOLE dossier before
+    # reading any of it, because the answer "none of them" must not mean "read nothing" — a
+    # dossier whose files are named LAN_ENTIRE_FILE.pdf or LAN_LEGAL_DOCUMENTS.pdf says nothing
+    # about its contents, and skipping it reported 154 dossiers as "missing documents" when
+    # every document was present. Shortlisting is an optimisation; it never empties a dossier.
+    target_docs = extraction_plan.get("target_docs", []) or []
+    shortlist = {d.get("document_id", "") for d in docs_sorted
+                 if _doc_matches_targets(d, target_docs)} if target_docs else set()
+    if target_docs and not shortlist:
+        logger.log(lead_id, "shortlist", "INFO",
+                   reason=f"no filename matches {', '.join(target_docs)} — reading all "
+                          f"{len(docs_sorted)} document(s) rather than none", is_test=is_test)
+
     t_ocr = time.perf_counter()
     for doc in docs_sorted:
         fp = doc.get("file_path", "")
@@ -599,23 +644,23 @@ def process_lead(
         is_shared_fcl = bool((doc.get("metadata") or {}).get("shared_fcl"))
         doc_type_hint = _classify_by_filename(filename) or ("foreclosure_notice" if is_shared_fcl else "document")
 
-        # Shortlist doc if mentioned in prompt
-        target_docs = extraction_plan.get("target_docs", [])
-        if target_docs:
-            fn_lower = filename.lower()
-            matches_target = False
-            for td in target_docs:
-                td_clean = td.lower().replace("_", " ")
-                if doc_type_hint == td or td in doc_type_hint:
-                    matches_target = True
-                    break
-                if td_clean in fn_lower or any(part in fn_lower for part in td_clean.split() if len(part) > 3):
-                    matches_target = True
-                    break
-            if not matches_target:
-                continue
+        if shortlist and doc_id not in shortlist:
+            # deliberately not read — recorded as such, so the dossier does not sit there
+            # looking like it is still queued once it has finished
+            update_document_status(doc_id, "skipped", document_type=doc_type_hint,
+                                   error_message=f"not among the document types the prompt asks for "
+                                                 f"({', '.join(target_docs)})")
+            skipped_docs += 1
+            update_lead_doc_counts(lead_id)
+            continue
 
         if not fp or not os.path.exists(fp):
+            logger.log(lead_id, "doc_load", "FAIL", document_id=doc_id,
+                       reason=f"{filename}: file is missing from disk", is_test=is_test)
+            update_document_status(doc_id, "failed", document_type=doc_type_hint,
+                                   error_message="file is missing from disk")
+            failed_docs += 1
+            update_lead_doc_counts(lead_id)
             continue
 
         fsize = os.path.getsize(fp)
@@ -635,7 +680,10 @@ def process_lead(
 
             if page_count == 0:
                 logger.log(lead_id, "doc_load", "FAIL", document_id=doc_id, reason="PDF has no pages", is_test=is_test)
+                update_document_status(doc_id, "failed", document_type=doc_type_hint,
+                                       error_message="PDF has no pages", file_size_bytes=fsize)
                 failed_docs += 1
+                update_lead_doc_counts(lead_id)
                 continue
 
             # Stage 1.6: Scope Pages for this document
@@ -841,6 +889,28 @@ def process_lead(
             continue
 
     phase_timings["document_extraction_ms"] = round((time.perf_counter() - t_ocr) * 1000, 1)
+
+    # File every value under the page the DOCUMENT says it is on, not the page the model claimed.
+    # See page_attribution.py: the model's citation was right 42% of the time on a real run.
+    # Values are untouched; only the page they are filed under can change.
+    if page_extractions:
+        t_attr = time.perf_counter()
+        try:
+            from workspaces.legal.page_attribution import reattribute
+            doc_paths = {d.get("document_id", ""): d.get("file_path", "") for d in docs_sorted}
+            page_extractions, attr_stats = reattribute(page_extractions, doc_paths)
+            phase_timings["page_attribution_ms"] = round((time.perf_counter() - t_attr) * 1000, 1)
+            logger.log(lead_id, "page_attribution", "PASS",
+                       reason=f"{attr_stats['verified']} of {attr_stats['values']} values confirmed "
+                              f"against the document text ({attr_stats['moved']} moved to the right page); "
+                              f"{attr_stats['unverified']} had no text layer to check",
+                       ms=phase_timings["page_attribution_ms"],
+                       metrics={"values": attr_stats["values"], "verified": attr_stats["verified"],
+                                "moved": attr_stats["moved"], "unverified": attr_stats["unverified"]},
+                       is_test=is_test)
+        except Exception as e:  # noqa: BLE001 — never lose an extraction over page bookkeeping
+            sys.stderr.write(f"[pipeline] page re-attribution failed for {lead_id}: {e}\n")
+
     phase_timings["total_pipeline_ms"] = round((time.perf_counter() - t_start) * 1000, 1)
 
     final_status = "completed"

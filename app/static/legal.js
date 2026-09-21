@@ -70,6 +70,7 @@
       failed: "b-unverified",
       processing: "b-manual_review",
       pending: "b-manual_review",
+      skipped: "b-non_document",      // decided about, not read — never "still queued"
       paused: "b-non_document"
     };
     return `<span class="badge ${map[st] || "b-non_document"}">${esc(s || "pending")}</span>`;
@@ -343,6 +344,17 @@
   }
 
   let dynamicColumns = [];
+  // the order a reviewer reads a dossier in — shared by the table and the export so a column
+  // does not sit in one place on screen and somewhere else in the file
+  const priorityExportCols = [
+    "borrower_name", "borrower_address",
+    "co_borrower_1_name", "co_borrower_1_address",
+    "co_borrower_2_name", "co_borrower_2_address",
+    "co_borrower_3_name", "co_borrower_3_address",
+    "co_borrower_4_name", "co_borrower_4_address",
+    "account_no_lan",
+    "sanction_amount", "tos",
+  ];
 
   function formatColName(c) {
     const customMap = {
@@ -392,7 +404,8 @@
       "_page_extractions", "page_extractions", "_cited_pages", "_telemetry", "_phase_timings",
       "borrower_details", "co_borrower_details", "details_of_borrower", "details_of_co_borrower",
       "details_of_the_borrower", "borrowers", "co_borrowers", "co_applicants",
-      "applicant_name", "applicant_address", "script_tag"
+      // the blur flag is drawn inside the Source & quality chip, not as a column of its own
+      "applicant_name", "applicant_address", "script_tag", "has_blur"
     ]);
     const keys = new Set();
     allRows.forEach(r => {
@@ -403,19 +416,9 @@
        });
     });
 
-    const priorityCols = [
-      "borrower_name", "borrower_address",
-      "co_borrower_1_name", "co_borrower_1_address",
-      "co_borrower_2_name", "co_borrower_2_address",
-      "co_borrower_3_name", "co_borrower_3_address",
-      "co_borrower_4_name", "co_borrower_4_address",
-      "account_no_lan",
-      "sanction_amount", "tos"
-    ];
-
     dynamicColumns = Array.from(keys).sort((a, b) => {
-      const idxA = priorityCols.indexOf(a);
-      const idxB = priorityCols.indexOf(b);
+      const idxA = priorityExportCols.indexOf(a);
+      const idxB = priorityExportCols.indexOf(b);
       if (idxA !== -1 && idxB !== -1) return idxA - idxB;
       if (idxA !== -1) return -1;
       if (idxB !== -1) return 1;
@@ -1578,7 +1581,7 @@ function formatFieldValue(k, v) {
      inferred — and that re-running the dossier will record the model's reply. */
   function emptyDiagnosis(j, docs, f) {
     const batches = (j.journey || []).filter(e => e.stage === "vlm_batch");
-    const read = docs.filter(d => ["processed", "failed"].includes(d.processing_status));
+    const read = docs.filter(d => ["processed", "failed", "skipped"].includes(d.processing_status));
     const prompt = ((j.lead || {}).extraction_prompt || "").trim();
     const heading = (prompt.match(/under\s+(?:the\s+)?heading\s+["“']?([\w\s-]{2,40}?)["”']?(?:[.,;]|$)/i) || [])[1];
     const pt = f.phase_timings || {};
@@ -1733,8 +1736,9 @@ function formatFieldValue(k, v) {
     const NOT_A_VALUE = [
       "lead_id", "status", "processing_status", "raw_extractions", "extracted_data", "telemetry",
       "phase_timings", "updated_at", "created_at", "page_extractions", "cited_pages",
-      "field_scripts", "ocr_routes_used", "flags", "confidence_score", "is_test", "summary",
-      "raw_response", "raw_ocr_text", "ocr_route", "ocr_confidence", "page_number", "mismatches",
+      "field_scripts", "field_sources", "ocr_routes_used", "flags", "confidence_score", "is_test",
+      "summary", "raw_response", "raw_ocr_text", "ocr_route", "ocr_confidence", "page_number",
+      "mismatches",
     ];
     const allExtractKeys = Object.keys(flatF).filter(k =>
       !k.startsWith("_") &&
@@ -1840,8 +1844,12 @@ function formatFieldValue(k, v) {
               ${dPages.map(p => {
                 const realFields = getPageRealFields(p);
                 const keys = Object.keys(realFields);
+                // which values were proved to be on this page, and which are the model's word for it
+                const src = p.field_sources || {};
+                const confirmed = keys.filter(k => src[k] === "text_layer").length;
+                const pageSure = keys.length > 0 && confirmed === keys.length;
                 return `
-                <div class="pg-row" id="page-${esc(d.document_id)}-${p.page_number}">
+                <div class="pg-row${pageSure ? "" : " pg-unsure"}" id="page-${esc(d.document_id)}-${p.page_number}">
                   <button type="button" class="pg-shot" data-open-page="1" data-doc="${esc(d.document_id)}"
                           data-page="${p.page_number}" data-pages="${d.page_count || 1}" data-file="${esc(d.filename)}"
                           title="Open page ${p.page_number} full size with the raw extraction">
@@ -1855,11 +1863,18 @@ function formatFieldValue(k, v) {
                     <div class="pg-panel-head">
                       <h5>Read from this page</h5>
                       <span class="pg-count">${keys.length} field${keys.length === 1 ? "" : "s"}</span>
+                      ${keys.length ? `<span class="pg-sure ${pageSure ? "yes" : confirmed ? "part" : "no"}"
+                        title="${pageSure
+                          ? "Every value here was found in this page's own text — the page is confirmed"
+                          : confirmed
+                            ? `${confirmed} of ${keys.length} values were found in this page's text; the rest sit on an image, so their page is the model's citation and is not confirmed`
+                            : "This page has no text layer to check against, so the page number is the model's citation rather than a confirmed fact"}"
+                        >${pageSure ? "Page confirmed" : confirmed ? `${confirmed}/${keys.length} confirmed` : "Page unconfirmed"}</span>` : ""}
                     </div>
                     <table class="pg-kv">
                       <tbody>
                         ${keys.map(fk => `
-                          <tr>
+                          <tr${src[fk] === "text_layer" ? "" : ' class="pg-unconfirmed"'}>
                             <td class="pg-k">${esc(formatFieldLabel(fk))}</td>
                             <td class="pg-v${isFinancialField(fk) ? " mono" : ""}">${formatFieldValue(fk, realFields[fk])}<span class="s-chip" data-prov="${p.page_number}|${esc(fk)}" hidden></span></td>
                           </tr>`).join("")}
@@ -3251,18 +3266,93 @@ function formatFieldValue(k, v) {
   }
 
   /* ── export table data ───────────────────── */
+  /* ── export ────────────────────────────────
+     The table shows a readable subset of columns; the export must not be limited to it. What
+     leaves here is everything the platform holds for each dossier in view — including values
+     the table hides for space, and nested objects it cannot render as a cell at all. */
+
+  // internal bookkeeping, or huge blobs that belong in the drawer rather than a spreadsheet
+  const EXPORT_SKIP = new Set([
+    "extracted_data", "raw_extractions", "page_extractions", "_page_extractions", "_cited_pages",
+    "telemetry", "_telemetry", "_phase_timings", "phase_timings", "raw_response", "raw_ocr_text",
+    "_raw_ocr_text", "field_scripts", "field_sources", "mismatches", "documents", "journey",
+    "is_test", "batch_id", "folder_path", "has_blur", "script_tag", "lead_id",
+    "processing_status", "status", "account_lan", "account_no_lan", "folder_name", "lead_name",
+    "created_at", "updated_at", "extraction_prompt", "ocr_confidence", "ocr_route",
+  ]);
+
+  // a nested value becomes flat columns ("property.address" -> "Property Address"); a list of
+  // plain values becomes one cell, because a spreadsheet row cannot branch
+  function flattenValue(prefix, value, out, depth = 0) {
+    if (value === null || value === undefined || value === "") return;
+    if (Array.isArray(value)) {
+      const scalars = value.filter(v => v === null || typeof v !== "object");
+      if (scalars.length === value.length) {
+        out[prefix] = value.filter(v => v !== null && v !== "").join(" | ");
+      } else if (depth < 2) {
+        value.forEach((v, i) => flattenValue(`${prefix} ${i + 1}`, v, out, depth + 1));
+      } else {
+        out[prefix] = JSON.stringify(value);
+      }
+      return;
+    }
+    if (typeof value === "object") {
+      if (depth >= 2) { out[prefix] = JSON.stringify(value); return; }
+      Object.entries(value).forEach(([k, v]) => {
+        if (!k.startsWith("_")) flattenValue(`${prefix} ${formatColName(k)}`, v, out, depth + 1);
+      });
+      return;
+    }
+    out[prefix] = String(value);
+  }
+
+  // one flat record per dossier: identity first, then every extracted value, then the cost
+  function exportRecord(r) {
+    const out = {};
+    out["Lead ID"] = r.lead_id || "";
+    out["Account LAN"] = r.account_no_lan || r.account_lan || "";   // same label the table uses
+    out["Dossier"] = r.folder_name || r.lead_name || "";
+    out["Status"] = r.processing_status || "";
+    out["Source & quality"] = (SCRIPT_LABEL[r.script_tag] || SCRIPT_LABEL.unknown)[0]
+      + (r.has_blur ? " + blurry pages" : "");
+    out["Documents"] = r.total_documents != null
+      ? `${r.processed_documents || 0} read of ${r.total_documents}` : "";
+    out["Extracted at"] = r.updated_at ? String(r.updated_at).replace("T", " ").slice(0, 19) : "";
+
+    Object.entries(r).forEach(([k, v]) => {
+      if (k.startsWith("_") || k.startsWith("telemetry_") || EXPORT_SKIP.has(k)) return;
+      if (["total_documents", "processed_documents", "failed_documents"].includes(k)) return;
+      flattenValue(formatColName(k), v, out);
+    });
+
+    const t = r.telemetry || r._telemetry || {};
+    if (t.total_tokens) out["Tokens used"] = String(t.total_tokens);
+    if (t.model) out["Model"] = String(t.model);
+    return out;
+  }
+
   function exportTableData(format = 'csv') {
     const rows = facetRows().filter(passesColFilters);
     if (!rows.length) return toast("No leads to export", "warn");
 
-    const baseCols = ["lead_id", "processing_status", "script_tag"];
-    const exportCols = [...baseCols, ...dynamicColumns];
-    const headerLabels = exportCols.map(c => {
-      if (c === "lead_id") return "Lead ID";
-      if (c === "processing_status") return "Status";
-      if (c === "script_tag") return "Source & quality";
-      return formatColName(c);
-    });
+    const records = rows.map(exportRecord);
+    // the union of every column any dossier produced, so a value present on one row is never
+    // dropped just because the row above it lacked that field
+    const FIRST = ["Lead ID", "Account LAN", "Dossier", "Status", "Source & quality", "Documents", "Extracted at"];
+    const LAST = ["Tokens used", "Model"];
+    const seen = new Set();
+    records.forEach(rec => Object.keys(rec).forEach(k => seen.add(k)));
+    const priority = priorityExportCols.map(formatColName);
+    const middle = [...seen].filter(k => !FIRST.includes(k) && !LAST.includes(k))
+      .sort((a, b) => {
+        const ia = priority.indexOf(a), ib = priority.indexOf(b);
+        if (ia !== -1 && ib !== -1) return ia - ib;
+        if (ia !== -1) return -1;
+        if (ib !== -1) return 1;
+        return a.localeCompare(b);
+      });
+    const headerLabels = [...FIRST, ...middle, ...LAST.filter(k => seen.has(k))];
+    const cell = (rec, h) => (rec[h] === undefined || rec[h] === null) ? "" : String(rec[h]);
 
     const dateStr = new Date().toISOString().slice(0, 10);
 
@@ -3283,16 +3373,8 @@ function formatFieldValue(k, v) {
               <tr>${headerLabels.map(h => `<th>${esc(h)}</th>`).join("")}</tr>
             </thead>
             <tbody>
-              ${rows.map(r => `
-                <tr>
-                  ${exportCols.map(col => {
-                    let v = r[col];
-                    if (v === undefined || v === null) v = "";
-                    else if (typeof v === "object") v = JSON.stringify(v);
-                    else v = String(v);
-                    return `<td>${esc(v)}</td>`;
-                  }).join("")}
-                </tr>
+              ${records.map(rec => `
+                <tr>${headerLabels.map(h => `<td>${esc(cell(rec, h))}</td>`).join("")}</tr>
               `).join("")}
             </tbody>
           </table>
@@ -3311,15 +3393,8 @@ function formatFieldValue(k, v) {
       toast("Excel downloaded successfully", "ok");
     } else {
       let csv = "\uFEFF" + headerLabels.map(h => `"${String(h).replace(/"/g, '""')}"`).join(",") + "\r\n";
-      rows.forEach(r => {
-        const line = exportCols.map(col => {
-          let v = r[col];
-          if (v === undefined || v === null) v = "";
-          else if (typeof v === "object") v = JSON.stringify(v);
-          else v = String(v);
-          return `"${v.replace(/"/g, '""')}"`;
-        }).join(",");
-        csv += line + "\r\n";
+      records.forEach(rec => {
+        csv += headerLabels.map(h => `"${cell(rec, h).replace(/"/g, '""')}"`).join(",") + "\r\n";
       });
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
@@ -3354,8 +3429,6 @@ function formatFieldValue(k, v) {
     $("#refreshBtn").onclick = refreshAll;
     
     // Export buttons
-    const exportBtn = $("#exportCsvBtn");
-    if (exportBtn) exportBtn.onclick = () => exportTableData('csv');
     const tableCsvBtn = $("#tableExportCsvBtn");
     if (tableCsvBtn) tableCsvBtn.onclick = () => exportTableData('csv');
     const tableExcelBtn = $("#tableExportExcelBtn");
