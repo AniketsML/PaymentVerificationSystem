@@ -194,6 +194,9 @@ CREATE TABLE IF NOT EXISTS legal_field_provenance (
     tag         TEXT NOT NULL,                    -- handwritten | scanned | typed | unknown
     fields      JSONB NOT NULL DEFAULT '{}'::jsonb,
     counts      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- the tagging rules that produced this row. Readers ignore rows from older rules, which is
+    -- what makes a verdict computed before (say) blur existed get recomputed instead of shown.
+    version     TEXT NOT NULL DEFAULT '',
     computed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_legal_provenance_tag ON legal_field_provenance(tag);
@@ -264,6 +267,8 @@ def init_schema() -> None:
                 ALTER TABLE legal_lead_documents ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;
                 ALTER TABLE legal_lead_documents ADD COLUMN IF NOT EXISTS file_size_bytes BIGINT DEFAULT 0;
                 ALTER TABLE legal_lead_documents ADD COLUMN IF NOT EXISTS page_count INT DEFAULT 0;
+
+                ALTER TABLE legal_field_provenance ADD COLUMN IF NOT EXISTS version TEXT NOT NULL DEFAULT '';
             """)
         _schema_ready = True
 

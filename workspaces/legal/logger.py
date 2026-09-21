@@ -347,13 +347,17 @@ class PgLegalLeadLogger:
                     l.updated_at
                 FROM legal_leads l
                 LEFT JOIN legal_lead_results r ON l.lead_id = r.lead_id
-                LEFT JOIN legal_field_provenance p ON p.lead_id = l.lead_id
+                LEFT JOIN legal_field_provenance p ON p.lead_id = l.lead_id AND p.version = %s
                 {where}
                 ORDER BY l.updated_at DESC
                 LIMIT {limit}
         """
+        # the provenance join's %s comes first in the statement, so its value leads the params.
+        # A verdict from older tagging rules reads as NULL here, which is what makes the
+        # dashboard queue it for a re-scan instead of showing a stale tag forever.
+        from workspaces.legal.provenance import VERSION as PROV_VERSION
         with pg.pool().connection() as c:
-            rows = c.execute(sql, params).fetchall()
+            rows = c.execute(sql, [PROV_VERSION] + params).fetchall()
             ret = []
             for r in rows:
                 d = dict(r)

@@ -485,7 +485,9 @@ def api_legal_provenance_scan():
     from workspaces.legal import provenance
     body = request.get_json(force=True, silent=True) or {}
     ids = [str(x) for x in (body.get("lead_ids") or []) if x]
-    return jsonify({"tags": provenance.scan(ids)})
+    scanned = provenance.scan(ids)
+    return jsonify({"tags": {k: v["tag"] for k, v in scanned.items()},
+                    "blur": {k: bool(v["blurred"]) for k, v in scanned.items()}})
 
 
 @legal_bp.route("/api/legal/observability")

@@ -166,11 +166,12 @@ def values_histogram(s: Slice) -> List[dict]:
 def script_mix(s: Slice) -> Dict[str, Any]:
     """Value-level and dossier-level typed / scanned / handwritten, from the provenance cache.
     Dossiers not yet analysed are reported as such, never guessed."""
+    from workspaces.legal.provenance import VERSION as PROV_VERSION
     rows = s.rows("""
         SELECT p.tag, p.counts
-        FROM tel LEFT JOIN legal_field_provenance p ON p.lead_id = tel.lead_id
+        FROM tel LEFT JOIN legal_field_provenance p ON p.lead_id = tel.lead_id AND p.version = %s
         WHERE tel.status IN ('completed','partial','missing_documents','failed')
-    """)
+    """, (PROV_VERSION,))
     values = {"typed": 0, "scanned": 0, "handwritten": 0, "unknown": 0}
     dossiers = {"typed": 0, "scanned": 0, "handwritten": 0, "unknown": 0, "none": 0, "not_checked": 0}
     # blur cuts across the mix above (a value can be handwritten AND on a blurry page), so it
@@ -268,6 +269,7 @@ def reading(s: Slice) -> Dict[str, Any]:
 
 # ── the table view behind every chart ─────────────────────────────────────────
 def per_dossier(s: Slice, limit: int = 500) -> List[dict]:
+    from workspaces.legal.provenance import VERSION as PROV_VERSION
     rows = s.rows("""
         SELECT tel.lead_id, COALESCE(NULLIF(tel.folder_name, ''), tel.lead_name, tel.lead_id) AS name,
                tel.batch_id, tel.batch_name, tel.folder_path, tel.status,
@@ -277,9 +279,9 @@ def per_dossier(s: Slice, limit: int = 500) -> List[dict]:
                COALESCE(tel.completion_tokens, 0)::int AS completion_tokens,
                tel.vlm_ms, tel.pipeline_ms, p.tag AS script_tag, tel.updated_at,
                COALESCE((p.counts->>'blurred')::int, 0) > 0 AS has_blur
-        FROM tel LEFT JOIN legal_field_provenance p ON p.lead_id = tel.lead_id
+        FROM tel LEFT JOIN legal_field_provenance p ON p.lead_id = tel.lead_id AND p.version = %s
         ORDER BY tel.updated_at DESC LIMIT %s
-    """, (limit,))
+    """, (PROV_VERSION, limit))
     names: Dict[str, str] = {}
     out = []
     for r in rows:

@@ -170,18 +170,11 @@ def _extract_pdf_pages(file_path: str, pages: List[int]) -> List[Image.Image]:
     return [img for _, img in items]
 
 def _classify_by_filename(filename: str) -> str:
-    fn = filename.lower()
-    for kws, dt in [
-        (("sanction", "approval", "sl_"), "sanction_letter"),
-        (("fcl", "foreclosure", "demand_notice"), "foreclosure_notice"),
-        (("modt", "memorandum", "mortgage_deed"), "modt"),
-        (("legal_report", "title_search", "advocate_report"), "legal_report"),
-        (("collateral", "sale_deed", "patta", "conveyance"), "collateral_deed"),
-        (("loan_agreement", "agreement"), "loan_agreement"),
-    ]:
-        if any(k in fn for k in kws):
-            return dt
-    return ""
+    """One classifier, shared with doc_filter — two copies of the keyword table drifted apart
+    once already. Returns "" rather than "document" so callers can tell "no idea" apart."""
+    from workspaces.legal.doc_filter import classify_doc_by_filename
+    dt = classify_doc_by_filename(filename)
+    return "" if dt == "document" else dt
 
 def _get_priority_pages_for_type(doc_type: str, page_count: int) -> List[int]:
     if page_count <= 1: return [0]

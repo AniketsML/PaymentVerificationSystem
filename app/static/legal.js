@@ -590,10 +590,14 @@
           body: JSON.stringify({ lead_ids: chunk }),
         });
         if (!r.ok) return;
-        const { tags } = await r.json();
+        const { tags, blur } = await r.json();
         let touched = false;
         (allRows || []).forEach(row => {
-          if (tags && tags[row.lead_id]) { row.script_tag = tags[row.lead_id]; touched = true; }
+          if (tags && tags[row.lead_id]) {
+            row.script_tag = tags[row.lead_id];
+            row.has_blur = !!(blur && blur[row.lead_id]);   // patch both, or the marker goes stale
+            touched = true;
+          }
         });
         if (touched) { renderFacets(); renderLeadRows(); }
       } catch (e) { return; }

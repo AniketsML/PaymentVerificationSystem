@@ -53,7 +53,8 @@ from db import pg
 # scan of a handwritten form still reads "Handwritten" and is still findable under "Scanned".
 TAG_RANK = {"handwritten": 4, "scanned": 3, "printed": 2, "typed": 1, "unknown": 0}
 LEAD_TAGS = ("handwritten", "scanned", "typed", "unknown", "none")
-_VERSION = "3"                # bump when the tagging rules change, so cached verdicts recompute
+_VERSION = "4"                # bump when the tagging rules change, so cached verdicts recompute
+VERSION = _VERSION            # readers join on this to ignore verdicts from older rules
 
 # a page whose sharpest edges are softer than this reads as blurry. Calibrated on 42 real
 # image-only pages: crisp scans score ~240, ordinary ones ~157, the softest phone scans ~97.
@@ -222,8 +223,9 @@ def analyze(lead_id: str, force: bool = False) -> Dict[str, Any]:
     if not force:
         with pg.pool().connection() as c:
             hit = c.execute(
-                "SELECT tag, fields, counts FROM legal_field_provenance WHERE lead_id=%s AND fingerprint=%s",
-                (lead_id, fp)).fetchone()
+                "SELECT tag, fields, counts FROM legal_field_provenance "
+                "WHERE lead_id=%s AND fingerprint=%s AND version=%s",
+                (lead_id, fp, _VERSION)).fetchone()
         if hit:
             return {"lead_id": lead_id, "tag": hit["tag"], "fields": hit["fields"] or {},
                     "counts": hit["counts"] or {}, "cached": True}
@@ -285,11 +287,11 @@ def analyze(lead_id: str, force: bool = False) -> Dict[str, Any]:
     try:
         with pg.pool().connection() as c:
             c.execute(
-                "INSERT INTO legal_field_provenance(lead_id, fingerprint, tag, fields, counts, computed_at) "
-                "VALUES(%s,%s,%s,%s,%s,now()) ON CONFLICT (lead_id) DO UPDATE SET "
+                "INSERT INTO legal_field_provenance(lead_id, fingerprint, tag, fields, counts, version, computed_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s,now()) ON CONFLICT (lead_id) DO UPDATE SET "
                 "fingerprint=EXCLUDED.fingerprint, tag=EXCLUDED.tag, fields=EXCLUDED.fields, "
-                "counts=EXCLUDED.counts, computed_at=now()",
-                (lead_id, fp, tag, Jsonb(fields), Jsonb(counts)))
+                "counts=EXCLUDED.counts, version=EXCLUDED.version, computed_at=now()",
+                (lead_id, fp, tag, Jsonb(fields), Jsonb(counts), _VERSION))
     except Exception as e:  # noqa: BLE001 — the cache is an optimisation, never a hard failure
         sys.stderr.write(f"[provenance] cache write failed for {lead_id}: {e}\n")
 
@@ -297,15 +299,19 @@ def analyze(lead_id: str, force: bool = False) -> Dict[str, Any]:
             "pages": pages, "cached": False}
 
 
-def scan(lead_ids: List[str], limit: int = 40) -> Dict[str, str]:
-    """Tags for a batch of leads (computing the missing ones). Used by the dashboard."""
-    out: Dict[str, str] = {}
+def scan(lead_ids: List[str], limit: int = 40) -> Dict[str, dict]:
+    """Verdicts for a batch of leads (computing the missing ones). Used by the dashboard.
+
+    Returns the blur flag next to the tag: the dashboard patches both into rows it already
+    painted, and a row updated with only the tag would keep a stale blur marker."""
+    out: Dict[str, dict] = {}
     for lead_id in list(lead_ids)[:limit]:
         try:
-            out[lead_id] = analyze(lead_id)["tag"]
+            r = analyze(lead_id)
+            out[lead_id] = {"tag": r["tag"], "blurred": int((r.get("counts") or {}).get("blurred", 0))}
         except Exception as e:  # noqa: BLE001 — one bad dossier must not fail the table
             sys.stderr.write(f"[provenance] scan failed for {lead_id}: {e}\n")
-            out[lead_id] = "unknown"
+            out[lead_id] = {"tag": "unknown", "blurred": 0}
     return out
 
 
@@ -315,5 +321,6 @@ def tag_counts(scope: str = "real") -> List[dict]:
     with pg.pool().connection() as c:
         rows = c.execute(
             f"SELECT p.tag, count(*) AS n FROM legal_field_provenance p "
-            f"JOIN legal_leads l ON l.lead_id = p.lead_id WHERE {where} GROUP BY 1 ORDER BY 2 DESC").fetchall()
+            f"JOIN legal_leads l ON l.lead_id = p.lead_id "
+            f"WHERE p.version = %s AND {where} GROUP BY 1 ORDER BY 2 DESC", (_VERSION,)).fetchall()
     return [{"tag": r["tag"], "n": r["n"]} for r in rows]
