@@ -157,8 +157,11 @@ def set_extraction_config(routing=None, main=None, multilingual=None, scanned=No
     route pages to a model that cannot be called — Gemini chosen with no key, or a "hybrid" that
     uses the same model for both languages."""
     cur = extraction_config(fresh=True)
+    # the payment console runs on this endpoint — a blank field here never clears it
     if medha_url is not None and not str(medha_url).strip():
-        medha_url = None       # the payment console runs on this endpoint — never blanked from here
+        medha_url = None
+    if medha_model is not None and not str(medha_model).strip():
+        medha_model = None
     new_gemini_key = "" if clear_gemini_key else (str(gemini_key) if gemini_key not in (None, "") else cur["gemini"]["key"])
     new = {
         "routing": _pick(routing, ROUTINGS, cur["routing"]) if routing is not None else cur["routing"],

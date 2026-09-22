@@ -279,5 +279,7 @@ def test_blank_medha_url_never_clears_shared_endpoint(saved_config):
     url = rt.model_config(fresh=True)["url"]
     if not url:
         pytest.skip("no Medha endpoint configured")
-    rt.set_extraction_config(medha_url="", routing="single", main="medha")
+    model = rt.model_config(fresh=True)["model"]
+    rt.set_extraction_config(medha_url="", medha_model="", routing="single", main="medha")
     assert rt.model_config(fresh=True)["url"] == url
+    assert rt.model_config(fresh=True)["model"] == model
