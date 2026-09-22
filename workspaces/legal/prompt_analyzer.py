@@ -278,52 +278,11 @@ def _parse_json_robust(raw: str) -> Dict[str, Any]:
     return {}
 
 
-def _call_medha_text(prompt: str) -> Optional[str]:
-    """Call Medha API with text-only prompt (no image)."""
-    try:
-        import httpx
-        from config import runtime
-        cfg = runtime.model_config()
-
-        url = cfg["url"]
-        if url.endswith("/v1") or url.endswith("/v1/"):
-            url = url.rstrip("/") + "/chat/completions"
-        elif not url.endswith("/chat/completions"):
-            url = url.rstrip("/") + "/chat/completions"
-
-        body = {
-            "model": cfg["model"],
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 2048,
-            "temperature": 0.05,  # Very low for deterministic parsing
-        }
-        headers = {"Content-Type": "application/json"}
-        api_key = cfg.get("key", "")
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        resp = httpx.post(url, json=body, headers=headers, timeout=60.0)
-        resp.raise_for_status()
-        return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-    except Exception as e:
-        sys.stderr.write(f"[prompt_analyzer] Medha call failed: {e}\n")
-        return None
-
-
-def _call_gemini_text(prompt: str) -> Optional[str]:
-    """Fallback: call Gemini API with text-only prompt."""
-    try:
-        import google.generativeai as genai
-        from config import settings
-        if not settings.GEMINI_API_KEY:
-            return None
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel(settings.GEMINI_MODEL)
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        sys.stderr.write(f"[prompt_analyzer] Gemini fallback failed: {e}\n")
-        return None
+def _call_model_text(prompt: str) -> Optional[str]:
+    """The planner's text call. It follows the main model chosen in Model settings (prompts are
+    written in English), retrying on the other model when that is allowed — see llm.call_text."""
+    from workspaces.legal import llm
+    return llm.call_text(prompt)
 
 
 # ── Validation ─────────────────────────────────────────────────────────────
@@ -426,10 +385,7 @@ def analyze_extraction_prompt(
         f"Return ONLY valid JSON."
     )
 
-    # Try Medha first, then Gemini
-    raw_response = _call_medha_text(full_prompt)
-    if not raw_response:
-        raw_response = _call_gemini_text(full_prompt)
+    raw_response = _call_model_text(full_prompt)
 
     # Parse and build the plan
     plan = ExtractionPlan(raw_prompt=prompt)

@@ -60,7 +60,7 @@
         </div>
         {% endif %}
         <button id="themeToggle" class="theme-btn" title="Toggle theme"><span class="tt-dot"></span><span id="themeLabel">Dark</span></button>
-        <button class="model-chip" id="modelChip" title="Configure model endpoint">
+        <button class="model-chip" id="modelChip" title="Extraction models">
           <span class="live-dot"></span>
           <div><div class="mc-model" id="mcModel">model</div><div class="mc-url" id="mcUrl"></div></div>
           <svg class="mc-gear" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06-.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" stroke-width="2"/></svg>
@@ -436,25 +436,88 @@
 
   <!-- ── model API config modal ──────────────────────────────── -->
   <div class="modal-scrim" id="cfgScrim"></div>
-  <aside class="modal cfg-modal" id="cfgModal" aria-label="Model API configuration">
+  <aside class="modal cfg-modal mdl-modal" id="cfgModal" aria-label="Extraction models">
     <div class="modal-head">
-      <div><div class="dh-eyebrow">Endpoint</div><div class="modal-title">Model API</div></div>
+      <div><div class="dh-eyebrow">Extraction</div><div class="modal-title">Models</div></div>
       <button class="btn line small" id="cfgClose" aria-label="Close">✕</button>
     </div>
     <div class="modal-body">
-      <p class="lede" style="margin-bottom:18px">Configure the VLM endpoint for the legal document extraction pipeline.</p>
-      <div class="cfg-field"><label>Endpoint URL</label>
-        <input id="cfgUrl" class="rv-input" placeholder="http://host:8002/v1" autocomplete="off"></div>
-      <div class="cfg-field"><label>API key <span class="hint" id="cfgKeyHint"></span></label>
-        <input id="cfgKey" class="rv-input" type="password" placeholder="leave blank to keep current" autocomplete="off"></div>
-      <div class="cfg-row">
-        <div class="cfg-field" style="flex:1"><label>Model</label>
-          <input id="cfgModel" class="rv-input" placeholder="Medha" autocomplete="off"></div>
-      </div>
-      <div class="cfg-test hidden" id="cfgTestResult"></div>
-      <div class="cfg-actions">
-        <button class="btn line" id="cfgTest">Test connection</button>
-        <button class="btn solid" id="cfgSave">Save</button>
+      <!-- 1. which model reads what — two choices, never a matrix -->
+      <section class="mdl-sec">
+        <h4 class="mdl-h">How pages are read</h4>
+        <div class="mdl-modes" role="radiogroup" aria-label="How pages are read">
+          <label class="mdl-mode">
+            <input type="radio" name="llmRouting" value="single">
+            <span class="mdl-mode-t">One model for everything</span>
+            <span class="mdl-mode-d">Every page, in any language, is read by the same model.</span>
+          </label>
+          <label class="mdl-mode">
+            <input type="radio" name="llmRouting" value="hybrid">
+            <span class="mdl-mode-t">Hybrid — by language</span>
+            <span class="mdl-mode-d">English text is read by one model, text in other languages by another.</span>
+          </label>
+        </div>
+
+        <div class="mdl-assign">
+          <label class="mdl-row"><span class="mdl-row-k" id="llmMainLabel">Model</span>
+            <select id="llmMain" class="rv-input"></select></label>
+          <label class="mdl-row mdl-hybrid"><span class="mdl-row-k">Other languages</span>
+            <select id="llmOther" class="rv-input"></select></label>
+          <div class="mdl-row mdl-hybrid mdl-scanned">
+            <span class="mdl-row-k">Scanned pages</span>
+            <div class="mdl-scan-opts">
+              <label><input type="radio" name="llmScanned" value="english_first">
+                English model first — re-read by the other-language model if the text isn't English</label>
+              <label><input type="radio" name="llmScanned" value="multilingual">
+                Always the other-language model</label>
+              <p class="mdl-note">A scan has no text to tell its language until a model reads it. Pages with a
+                text layer go straight to the right model.</p>
+            </div>
+          </div>
+          <label class="mdl-check"><input type="checkbox" id="llmFallback">
+            If a model call fails, retry once on the other model</label>
+          <p class="mdl-note" id="mdlSummary"></p>
+        </div>
+      </section>
+
+      <!-- 2. the providers and their credentials -->
+      <section class="mdl-sec mdl-prov" id="provMedha">
+        <div class="mdl-prov-head"><h4 class="mdl-h">Medha</h4><span class="mdl-status" id="medhaStatus"></span></div>
+        <div class="cfg-field"><label>Endpoint URL</label>
+          <input id="cfgUrl" class="rv-input" placeholder="http://host:8002/v1" autocomplete="off"></div>
+        <div class="cfg-row">
+          <div class="cfg-field" style="flex:1"><label>API key <span class="hint" id="cfgKeyHint"></span></label>
+            <input id="cfgKey" class="rv-input" type="password" placeholder="leave blank to keep current" autocomplete="off"></div>
+          <div class="cfg-field" style="flex:1"><label>Model</label>
+            <input id="cfgModel" class="rv-input" placeholder="Medha" autocomplete="off"></div>
+        </div>
+        <div class="mdl-prov-foot">
+          <button class="btn line small" id="cfgTestMedha" type="button">Test connection</button>
+          <span class="mdl-test" id="medhaTest"></span>
+        </div>
+        <p class="mdl-note">This endpoint is shared with the payment console.</p>
+      </section>
+
+      <section class="mdl-sec mdl-prov" id="provGemini">
+        <div class="mdl-prov-head"><h4 class="mdl-h">Google Gemini</h4><span class="mdl-status" id="gemStatus"></span></div>
+        <div class="cfg-row">
+          <div class="cfg-field" style="flex:1.4"><label>API key <span class="hint" id="gemKeyHint"></span></label>
+            <input id="gemKey" class="rv-input" type="password" placeholder="paste a Gemini API key" autocomplete="off"></div>
+          <div class="cfg-field" style="flex:1"><label>Model</label>
+            <input id="gemModel" class="rv-input" list="gemModels" placeholder="gemini-2.5-flash" autocomplete="off">
+            <datalist id="gemModels"></datalist></div>
+        </div>
+        <div class="mdl-prov-foot">
+          <button class="btn line small" id="cfgTestGemini" type="button">Test connection</button>
+          <span class="mdl-test" id="gemTest"></span>
+          <button class="mdl-link hidden" id="gemClear" type="button">Remove key</button>
+        </div>
+      </section>
+
+      <div class="cfg-actions mdl-actions">
+        <span class="mdl-err" id="mdlErr" role="alert"></span>
+        <button class="btn line" id="cfgCancel" type="button">Cancel</button>
+        <button class="btn solid" id="cfgSave" type="button">Save</button>
       </div>
     </div>
   </aside>

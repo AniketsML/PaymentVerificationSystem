@@ -303,8 +303,10 @@
       renderDonut(s.counts || {});
       renderDocTypes(s.document_types || []);
       if (s.model) {
-        $("#mcModel").textContent = s.model.model || "Medha";
-        $("#mcUrl").textContent = (s.model.url || "").replace(/^https?:\/\//, "").split("/")[0] || "—";
+        // the chip says which model reads the pages — or the English / other-language pair
+        const ex = s.model.extraction || {};
+        $("#mcModel").textContent = ex.title || s.model.model || "Medha";
+        $("#mcUrl").textContent = ex.sub || (s.model.url || "").replace(/^https?:\/\//, "").split("/")[0] || "—";
       }
     } catch (e) {
       // transient poll error ignored
@@ -3469,44 +3471,149 @@ function formatFieldValue(k, v) {
   }
 
   /* ── model config modal ─────────────────── */
+  /* ── extraction models ───────────────────────
+     Two decisions, never a matrix: how pages are read (one model, or hybrid by language), and
+     which model fills each role. A model can't be picked until it has credentials — as you type
+     them, not only after saving — and the server refuses any setup that couldn't run. */
+  let mdlSaved = null;         // what /api/legal/models last returned
+  let mdlClearGemini = false;  // "Remove key" pressed, applied on save
+
+  function mdlConfigured(p) {
+    // a blank Medha URL keeps the saved one — the payment console runs on it
+    if (p === "medha") return !!($("#cfgUrl").value.trim() || (mdlSaved && mdlSaved.medha.url));
+    return (!!$("#gemKey").value.trim() || (mdlSaved && mdlSaved.gemini.has_key && !mdlClearGemini))
+      && !!$("#gemModel").value.trim();
+  }
+  const mdlName = (p) => {
+    const label = p === "medha" ? "Medha" : "Gemini";
+    const m = $(p === "medha" ? "#cfgModel" : "#gemModel").value.trim();
+    return m && m.toLowerCase() !== label.toLowerCase() ? `${label} · ${m}` : label;
+  };
+
+  function mdlOptions(sel, value) {
+    sel.innerHTML = ["medha", "gemini"].map(p => {
+      const ok = mdlConfigured(p);
+      return `<option value="${p}" ${ok ? "" : "disabled"}>${esc(mdlName(p))}${ok ? "" : " — add credentials below"}</option>`;
+    }).join("");
+    sel.value = value;
+  }
+
+  function mdlRender() {
+    const hybrid = ($('input[name="llmRouting"]:checked') || {}).value === "hybrid";
+    $("#cfgModal").classList.toggle("is-hybrid", hybrid);
+    $("#llmMainLabel").textContent = hybrid ? "English text" : "Model";
+    const main = $("#llmMain").value || (mdlSaved && mdlSaved.main) || "medha";
+    let other = $("#llmOther").value || (mdlSaved && mdlSaved.multilingual) || "gemini";
+    if (hybrid && other === main) other = main === "medha" ? "gemini" : "medha";
+    mdlOptions($("#llmMain"), main);
+    mdlOptions($("#llmOther"), other);
+    // a status line per provider, and one plain sentence that says what will happen
+    const st = (p, host) => {
+      const inUse = [main].concat(hybrid ? [other] : []).includes(p);
+      host.className = "mdl-status " + (mdlConfigured(p) ? (inUse ? "on" : "ready") : "off");
+      host.textContent = mdlConfigured(p) ? (inUse ? "In use" : "Ready") : (p === "gemini" ? "No API key" : "No endpoint");
+    };
+    st("medha", $("#medhaStatus"));
+    st("gemini", $("#gemStatus"));
+    const L = { medha: "Medha", gemini: "Gemini" };
+    const scanned = ($('input[name="llmScanned"]:checked') || {}).value;
+    $("#mdlSummary").textContent = hybrid
+      ? `${L[main]} reads English text and ${L[other]} reads other languages. ` +
+        (scanned === "multilingual" ? `Scans go straight to ${L[other]}.` : `Scans go to ${L[main]} first and to ${L[other]} if they turn out not to be in English.`) +
+        ` The prompt itself is read by ${L[main]}.`
+      : `${L[main]} reads every page and the prompt.`;
+    $("#mdlErr").textContent = "";
+  }
+
+  async function mdlOpen() {
+    try {
+      mdlSaved = await (await fetch("/api/legal/models")).json();
+    } catch (e) { toast("Couldn't load the model settings", "bad"); return; }
+    const c = mdlSaved;
+    mdlClearGemini = false;
+    $$('input[name="llmRouting"]').forEach(r => { r.checked = r.value === c.routing; });
+    $$('input[name="llmScanned"]').forEach(r => { r.checked = r.value === c.scanned; });
+    $("#llmFallback").checked = !!c.fallback;
+    $("#cfgUrl").value = c.medha.url || "";
+    $("#cfgModel").value = c.medha.model || "";
+    $("#cfgKey").value = "";
+    $("#cfgKeyHint").textContent = c.medha.has_key ? `current: ${c.medha.key_masked}` : "none set";
+    $("#gemKey").value = "";
+    $("#gemModel").value = c.gemini.model || "";
+    $("#gemKeyHint").textContent = c.gemini.has_key ? `current: ${c.gemini.key_masked}` : "none set";
+    $("#gemClear").classList.toggle("hidden", !c.gemini.has_key);
+    $("#medhaTest").textContent = ""; $("#gemTest").textContent = "";
+    $("#llmMain").value = c.main; $("#llmOther").value = c.multilingual;
+    mdlOptions($("#llmMain"), c.main);
+    mdlOptions($("#llmOther"), c.multilingual);
+    mdlRender();
+    $("#cfgModal .modal-body").scrollTop = 0;
+    $("#cfgModal").classList.add("open"); $("#cfgScrim").classList.add("open");
+  }
+
+  function mdlClose() { $("#cfgModal").classList.remove("open"); $("#cfgScrim").classList.remove("open"); }
+
+  async function mdlTest(provider) {
+    const btn = provider === "gemini" ? $("#cfgTestGemini") : $("#cfgTestMedha");
+    const out = provider === "gemini" ? $("#gemTest") : $("#medhaTest");
+    const body = provider === "gemini"
+      ? { provider, key: $("#gemKey").value.trim(), model: $("#gemModel").value.trim() }
+      : { provider, url: $("#cfgUrl").value.trim(), key: $("#cfgKey").value, model: $("#cfgModel").value.trim() };
+    btn.disabled = true; out.className = "mdl-test"; out.textContent = "Testing…";
+    try {
+      const r = await (await fetch("/api/legal/models/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).json();
+      if (r.ok) {
+        const present = r.model_present === false ? " — but this model isn't available to it" : "";
+        out.className = "mdl-test " + (r.model_present === false ? "warn" : "ok");
+        out.textContent = `✓ Connected · ${r.ms} ms${present}`;
+        if (provider === "gemini" && (r.models || []).length)
+          $("#gemModels").innerHTML = r.models.map(m => `<option value="${esc(m)}">`).join("");
+      } else {
+        out.className = "mdl-test bad"; out.textContent = `✗ ${r.error || "not reachable"}`;
+      }
+    } catch (e) { out.className = "mdl-test bad"; out.textContent = "✗ the test didn't run"; }
+    btn.disabled = false;
+  }
+
+  async function mdlSave() {
+    const routing = ($('input[name="llmRouting"]:checked') || {}).value || "single";
+    const body = {
+      routing, main: $("#llmMain").value, multilingual: $("#llmOther").value,
+      scanned: ($('input[name="llmScanned"]:checked') || {}).value || "english_first",
+      fallback: $("#llmFallback").checked,
+      medha: { url: $("#cfgUrl").value.trim(), key: $("#cfgKey").value, model: $("#cfgModel").value.trim() },
+      gemini: { key: $("#gemKey").value.trim(), model: $("#gemModel").value.trim(), clear_key: mdlClearGemini },
+    };
+    const btn = $("#cfgSave"); btn.disabled = true;
+    try {
+      const r = await fetch("/api/legal/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const res = await r.json();
+      if (!r.ok) { $("#mdlErr").textContent = res.error || "Couldn't save"; btn.disabled = false; return; }
+      mdlSaved = res;
+      mdlClose();
+      toast("Model settings saved — they apply to the next dossier", "ok");
+      loadStats();
+    } catch (e) { $("#mdlErr").textContent = "Couldn't save — check the connection"; }
+    btn.disabled = false;
+  }
+
   function initModelConfig() {
-    $("#modelChip").onclick = () => {
-      fetch("/api/config/model").then(r => r.json()).then(c => {
-        $("#cfgUrl").value = c.url || "";
-        $("#cfgModel").value = c.model || "";
-        $("#cfgKey").value = "";
-        $("#cfgKeyHint").textContent = c.has_key ? `current: ${c.key_masked}` : "none set";
-        $("#cfgTestResult").classList.add("hidden");
-        $("#cfgModal").classList.add("open"); $("#cfgScrim").classList.add("open");
-      }).catch(() => toast("Failed to load model config", "bad"));
+    $("#modelChip").onclick = mdlOpen;
+    $("#cfgClose").onclick = mdlClose;
+    $("#cfgCancel").onclick = mdlClose;
+    $("#cfgScrim").onclick = mdlClose;
+    $$('input[name="llmRouting"], input[name="llmScanned"]').forEach(r => r.onchange = mdlRender);
+    ["#llmMain", "#llmOther"].forEach(s => $(s).onchange = mdlRender);
+    ["#cfgUrl", "#cfgModel", "#gemKey", "#gemModel"].forEach(s => $(s).addEventListener("input", debounce(mdlRender, 150)));
+    $("#cfgTestMedha").onclick = () => mdlTest("medha");
+    $("#cfgTestGemini").onclick = () => mdlTest("gemini");
+    $("#gemClear").onclick = () => {
+      mdlClearGemini = true; $("#gemKey").value = "";
+      $("#gemKeyHint").textContent = "will be removed on save";
+      $("#gemClear").classList.add("hidden");
+      mdlRender();
     };
-    $("#cfgClose").onclick = () => { $("#cfgModal").classList.remove("open"); $("#cfgScrim").classList.remove("open"); };
-    $("#cfgScrim").onclick = () => { $("#cfgModal").classList.remove("open"); $("#cfgScrim").classList.remove("open"); };
-    $("#cfgTest").onclick = async () => {
-      const btn = $("#cfgTest"); btn.disabled = true; btn.textContent = "Testing…";
-      const body = { url: $("#cfgUrl").value.trim(), key: $("#cfgKey").value, model: $("#cfgModel").value.trim() };
-      const box = $("#cfgTestResult"); box.classList.remove("hidden"); box.className = "cfg-test"; box.textContent = "…";
-      try {
-        const r = await (await fetch("/api/config/model/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).json();
-        if (r.ok) {
-          box.className = "cfg-test ok"; box.textContent = `✓ Reachable — HTTP ${r.status} · ${r.ms} ms`;
-        } else {
-          box.className = "cfg-test bad"; box.textContent = `✗ ${r.error || "unreachable"}`;
-        }
-      } catch (e) { box.className = "cfg-test bad"; box.textContent = "✗ test failed"; }
-      btn.disabled = false; btn.textContent = "Test connection";
-    };
-    $("#cfgSave").onclick = async () => {
-      const body = { url: $("#cfgUrl").value.trim(), key: $("#cfgKey").value, model: $("#cfgModel").value.trim() };
-      if (!body.url) { toast("Endpoint URL is required", "bad"); return; }
-      try {
-        const c = await (await fetch("/api/config/model", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).json();
-        $("#mcModel").textContent = c.model || "Medha";
-        $("#mcUrl").textContent = (c.url || "").replace(/^https?:\/\//, "").split("/")[0] || "—";
-        toast("Endpoint saved — applies to the next lead", "ok");
-        $("#cfgModal").classList.remove("open"); $("#cfgScrim").classList.remove("open");
-      } catch (e) { toast("Save failed", "bad"); }
-    };
+    $("#cfgSave").onclick = mdlSave;
   }
 
   /* ── refresh all ────────────────────────── */
@@ -3587,99 +3694,30 @@ function formatFieldValue(k, v) {
     });
   }
 
-  /* ── export table data ───────────────────── */
   /* ── export ────────────────────────────────
-     The table shows a readable subset of columns; the export must not be limited to it. What
-     leaves here is everything the platform holds for each dossier in view — including values
-     the table hides for space, and nested objects it cannot render as a cell at all. */
-
-  // internal bookkeeping, or huge blobs that belong in the drawer rather than a spreadsheet
-  const EXPORT_SKIP = new Set([
-    "extracted_data", "raw_extractions", "page_extractions", "_page_extractions", "_cited_pages",
-    "telemetry", "_telemetry", "_phase_timings", "phase_timings", "raw_response", "raw_ocr_text",
-    "_raw_ocr_text", "field_scripts", "field_sources", "mismatches", "documents", "journey",
-    "is_test", "batch_id", "folder_path", "has_blur", "script_tag", "lead_id",
-    "processing_status", "status", "account_lan", "account_no_lan", "folder_name", "lead_name",
-    "created_at", "updated_at", "extraction_prompt", "ocr_confidence", "ocr_route",
-  ]);
-
-  // a nested value becomes flat columns ("property.address" -> "Property Address"); a list of
-  // plain values becomes one cell, because a spreadsheet row cannot branch
-  function flattenValue(prefix, value, out, depth = 0) {
-    if (value === null || value === undefined || value === "") return;
-    if (Array.isArray(value)) {
-      const scalars = value.filter(v => v === null || typeof v !== "object");
-      if (scalars.length === value.length) {
-        out[prefix] = value.filter(v => v !== null && v !== "").join(" | ");
-      } else if (depth < 2) {
-        value.forEach((v, i) => flattenValue(`${prefix} ${i + 1}`, v, out, depth + 1));
-      } else {
-        out[prefix] = JSON.stringify(value);
-      }
-      return;
-    }
-    if (typeof value === "object") {
-      if (depth >= 2) { out[prefix] = JSON.stringify(value); return; }
-      Object.entries(value).forEach(([k, v]) => {
-        if (!k.startsWith("_")) flattenValue(`${prefix} ${formatColName(k)}`, v, out, depth + 1);
-      });
-      return;
-    }
-    out[prefix] = String(value);
-  }
-
-  // one flat record per dossier: identity first, then every extracted value, then the cost
-  function exportRecord(r) {
-    const out = {};
-    out["Lead ID"] = r.lead_id || "";
-    out["Account LAN"] = r.account_no_lan || r.account_lan || "";   // same label the table uses
-    out["Dossier"] = r.folder_name || r.lead_name || "";
-    // the same review information the table shows, so a spreadsheet says what was checked
-    const st = displayState(r);
-    out["Status"] = (STATE_META[st] || [st])[0];
-    out["Needs attention"] = reasonOrder(reasonsOf(r)).map(k => REASON_LABEL[k]).join("; ");
-    const tf = ((r._trust || {}).fields) || {};
-    out["Needs review"] = Object.keys(tf).filter(k => tf[k].state === "review")
-      .map(k => `${formatColName(k)} (${(tf[k].reasons || []).map(x => REASON_LABEL[x] || x).join(", ")})`).join("; ");
-    out["Corrected"] = Object.keys(tf).filter(k => tf[k].state === "corrected" || tf[k].state === "confirmed")
-      .map(k => `${formatColName(k)} (${tf[k].state})`).join("; ");
-    out["Documents"] = r.total_documents != null
-      ? `${r.processed_documents || 0} read of ${r.total_documents}` : "";
-    out["Extracted at"] = r.updated_at ? String(r.updated_at).replace("T", " ").slice(0, 19) : "";
-
-    Object.entries(r).forEach(([k, v]) => {
-      if (k.startsWith("_") || k.startsWith("telemetry_") || EXPORT_SKIP.has(k)) return;
-      if (["total_documents", "processed_documents", "failed_documents"].includes(k)) return;
-      flattenValue(formatColName(k), v, out);
-    });
-
-    const t = r.telemetry || r._telemetry || {};
-    if (t.total_tokens) out["Tokens used"] = String(t.total_tokens);
-    if (t.model) out["Model"] = String(t.model);
-    return out;
-  }
+     A download is the data that was asked for, clean: the LAN, then each requested field
+     (borrower, co-borrowers, property, the rest) in reading order — with people's corrections
+     already in it. Nothing about how the platform got there: no status, attention labels, blur
+     or script classification, tokens or model. That all stays in the console. */
+  const exportLan = (r) => r.account_no_lan || r.account_lan || r.folder_name || "";
 
   function exportTableData(format = 'csv') {
     const rows = facetRows().filter(passesColFilters);
-    if (!rows.length) return toast("No leads to export", "warn");
+    if (!rows.length) return toast("No dossiers to export", "warn");
 
-    const records = rows.map(exportRecord);
-    // the union of every column any dossier produced, so a value present on one row is never
-    // dropped just because the row above it lacked that field
-    const FIRST = ["Lead ID", "Account LAN", "Dossier", "Status", "Needs attention", "Needs review", "Corrected", "Documents", "Extracted at"];
-    const LAST = ["Tokens used", "Model"];
-    const seen = new Set();
-    records.forEach(rec => Object.keys(rec).forEach(k => seen.add(k)));
-    const priority = priorityExportCols.map(formatColName);
-    const middle = [...seen].filter(k => !FIRST.includes(k) && !LAST.includes(k))
-      .sort((a, b) => {
-        const ia = priority.indexOf(a), ib = priority.indexOf(b);
-        if (ia !== -1 && ib !== -1) return ia - ib;
-        if (ia !== -1) return -1;
-        if (ib !== -1) return 1;
-        return a.localeCompare(b);
-      });
-    const headerLabels = [...FIRST, ...middle, ...LAST.filter(k => seen.has(k))];
+    // the union of every requested field any dossier in view produced, in reading order, so a
+    // value present on one row is never dropped because the row above it lacked that field
+    const keys = new Set();
+    rows.forEach(r => Object.keys(r).forEach(k => {
+      if (k !== "account_no_lan" && isValueKey(k, r[k]) && hasValue(r, k)) keys.add(k);
+    }));
+    const fields = [...keys].sort(valueOrder);
+    const headerLabels = ["LAN", ...fields.map(formatColName)];
+    const records = rows.map(r => {
+      const rec = { LAN: exportLan(r) };
+      fields.forEach(k => { rec[formatColName(k)] = hasValue(r, k) ? String(r[k]) : ""; });
+      return rec;
+    });
     const cell = (rec, h) => (rec[h] === undefined || rec[h] === null) ? "" : String(rec[h]);
 
     const dateStr = new Date().toISOString().slice(0, 10);

@@ -234,7 +234,8 @@ class LegalVLMClient:
     """
     VLM extraction client for legal documents.
 
-    Routes to Medha API (primary) or Gemini (fallback / Indic script).
+    Builds the extraction prompt; which model reads the pages — Medha, Gemini, or the English /
+    other-language pair chosen in Model settings — is decided per batch in llm.py.
     """
 
     def __init__(self):
@@ -253,6 +254,7 @@ class LegalVLMClient:
         headings: List[str] = None,
         total_pages: int = 0,
         schema_block: str = "",
+        language_hint: str = "unknown",
     ) -> Dict[str, Any]:
         """
         Extract structured data from multiple document page images in a single call.
@@ -282,119 +284,11 @@ class LegalVLMClient:
             document_type=document_type, page_info=page_info, kw_clause=kw_clause,
             extraction_prompt=extraction_prompt, schema_block=schema_block)
 
-        parsed = None
-        route = ""
-        medha_error = ""      # kept so the dossier can say WHY a batch came back empty
-
-        try:
-            parsed, route = self._call_medha(prompt, imgs_bytes)
-        except Exception as e:
-            medha_error = f"{type(e).__name__}: {e}"[:400]
-            sys.stderr.write(f"[ocr] Medha VLM failed: {e}\n")
-
-        if parsed is None or parsed.get("_parse_error"):
-            medha_raw = (parsed or {}).get("_raw_response", "")
-            if parsed is not None and not medha_error:
-                medha_error = "Medha returned a response that is not valid JSON"
-            try:
-                parsed, route = self._call_gemini(prompt, imgs_bytes)
-            except Exception as e:
-                sys.stderr.write(f"[ocr] Gemini fallback also failed: {e}\n")
-                parsed = {"_error": str(e), "_raw_response": medha_raw}
-                route = "failed"
-
-        if medha_error:
-            parsed["_medha_error"] = medha_error
-        parsed["_ocr_route"] = route
-        return parsed
-
-    def _call_medha(self, prompt: str, images_bytes: List[bytes]) -> Tuple[Dict[str, Any], str]:
-        import httpx
-
-        cfg = self._cfg
-        content_parts = []
-        for b in images_bytes:
-            b64 = base64.b64encode(b).decode()
-            content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-            
-        content_parts.append({"type": "text", "text": prompt})
-
-        url = cfg["url"]
-        if url.endswith("/v1") or url.endswith("/v1/"):
-            url = url.rstrip("/") + "/chat/completions"
-        elif not url.endswith("/chat/completions"):
-            url = url.rstrip("/") + "/chat/completions"
-
-        body = {
-            "model": cfg["model"],
-            "messages": [{"role": "user", "content": content_parts}],
-            "max_tokens": 4096,
-            "temperature": 0.1,
-        }
-        headers = {"Content-Type": "application/json"}
-        api_key = cfg.get("key", "")
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        t0 = time.perf_counter()
-        resp = httpx.post(url, json=body, headers=headers, timeout=120.0)
-        resp.raise_for_status()
-        ms = round((time.perf_counter() - t0) * 1000, 1)
-
-        resp_data = resp.json()
-        raw = resp_data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        usage = resp_data.get("usage", {})
-        prompt_tokens = usage.get("prompt_tokens", 0)
-        completion_tokens = usage.get("completion_tokens", 0)
-        total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
-
-        parsed = _parse_json(raw)
-        parsed["_raw_response"] = raw
-        parsed["_meta"] = {
-            "ms": ms,
-            "model": cfg.get("model", "medha-vlm"),
-            "route": "medha_vlm",
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-        }
-        return parsed, "medha_vlm"
-
-    def _call_gemini(self, prompt: str, images_bytes: List[bytes]) -> Tuple[Dict[str, Any], str]:
-        import google.generativeai as genai
-        from config import settings
-
-        if not settings.GEMINI_API_KEY:
-            raise RuntimeError("No GEMINI_API_KEY configured")
-
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel(settings.GEMINI_MODEL)
-
-        contents = [prompt]
-        for b in images_bytes:
-            contents.append({"mime_type": "image/jpeg", "data": b})
-
-        t0 = time.perf_counter()
-        response = model.generate_content(contents)
-        ms = round((time.perf_counter() - t0) * 1000, 1)
-
-        raw = response.text
-        usage_meta = getattr(response, "usage_metadata", None)
-        prompt_tokens = getattr(usage_meta, "prompt_token_count", 0) if usage_meta else 0
-        completion_tokens = getattr(usage_meta, "candidates_token_count", 0) if usage_meta else 0
-        total_tokens = getattr(usage_meta, "total_token_count", 0) if usage_meta else (prompt_tokens + completion_tokens)
-
-        parsed = _parse_json(raw)
-        parsed["_raw_response"] = raw
-        parsed["_meta"] = {
-            "ms": ms,
-            "model": settings.GEMINI_MODEL,
-            "route": "gemini_fallback",
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-        }
-        return parsed, "gemini_fallback"
+        # which model reads this batch — one model, or the English / other-language pair — and the
+        # calls themselves live in llm.py; the reply keeps the contract the pipeline relies on
+        # (_meta, _ocr_route, _raw_response, _error) and adds _calls and _routing
+        from workspaces.legal import llm
+        return llm.extract(prompt, imgs_bytes, language=language_hint or "unknown")
 
 
 # ── Breaker status stub (for metrics.py compatibility) ─────────────────────

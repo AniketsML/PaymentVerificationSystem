@@ -313,6 +313,22 @@ def _ingest_batch(extracted: Dict[str, Any], schema, chunk_pages: List[int], bas
     return [by_page[p] for p in sorted(by_page)], extras, ""
 
 
+def _chunk_language(file_path: str, pages: List[int]) -> str:
+    """'english' | 'multilingual' | 'unknown' for a batch of 0-indexed pages, from the PDF's own text
+    layer — known before any model is called, so hybrid routing can send the batch to the right
+    model directly. A scan has no text layer and comes back 'unknown'."""
+    from workspaces.legal.llm import text_script
+    if not str(file_path).lower().endswith(".pdf"):
+        return "unknown"
+    try:
+        import fitz
+        with fitz.open(file_path) as d:
+            text = " ".join(d[p].get_text("text") or "" for p in pages if 0 <= p < d.page_count)
+        return text_script(text)
+    except Exception:  # noqa: BLE001 — unknown just means "let the routing decide"
+        return "unknown"
+
+
 def _get_priority_pages_for_type(doc_type: str, page_count: int) -> List[int]:
     if page_count <= 1: return [0]
     dt = doc_type.lower()
@@ -731,6 +747,7 @@ def process_lead(
         meta = meta or {}
         entry = dict(batch, outcome=outcome, status=status, values=values,
                      model=meta.get("model", ""), route=meta.get("route", ""),
+                     provider=meta.get("provider", ""),
                      prompt_tokens=meta.get("prompt_tokens") or 0,
                      completion_tokens=meta.get("completion_tokens") or 0,
                      error=error[:400])
@@ -844,10 +861,28 @@ def process_lead(
                     keywords=extraction_plan.get("keywords", []),
                     total_pages=page_count,
                     schema_block=schema_block,
+                    language_hint=_chunk_language(fp, chunk),
                 )
                 batch = {"document_id": doc_id, "filename": filename,
                          "pages": [chunk_page_nums[0], chunk_page_nums[-1]],
                          "ms": round((time.perf_counter() - t_call) * 1000, 1)}
+
+                # every call spent tokens, including a reading that was superseded by the
+                # other-language model or a call that failed before a retry succeeded — record
+                # those too, so cost per model adds up (llm.py returns them in _calls)
+                extracted = extracted if isinstance(extracted, dict) else {}
+                calls = extracted.pop("_calls", None) or []
+                routing_why = extracted.pop("_routing", "") or ""
+                if len(calls) > 1 and (extracted.get("_meta") or {}).get("ms"):
+                    batch["ms"] = extracted["_meta"]["ms"]      # this call's own time; the others are
+                if not extracted.get("_error"):                    # recorded with theirs just below
+                    for c_ in calls:
+                        if c_.get("status") == "SUPERSEDED":
+                            record_batch(dict(batch, ms=c_.get("ms") or 0),
+                                         f"read by {c_.get('model')}, then re-read — {routing_why}", "SUPERSEDED", c_)
+                        elif c_.get("status") == "FAIL":
+                            record_batch(dict(batch, ms=0), f"{c_.get('model')} failed, retried — {c_.get('error', '')}",
+                                         "RETRIED", c_, error=c_.get("error", ""))
 
                 if not extracted or extracted.get("_status") in ("blank_discarded", "duplicate_discarded"):
                     record_batch(batch, "model returned nothing", "EMPTY")
@@ -883,8 +918,8 @@ def process_lead(
                     continue
                 page_extractions.extend(batch_records)
                 n_values = sum(len(r["fields"]) for r in batch_records)
-                record_batch(batch, f"{n_values} value{'s' if n_values != 1 else ''} found", "PASS",
-                             meta, values=n_values)
+                record_batch(batch, f"{n_values} value{'s' if n_values != 1 else ''} found"
+                             + (f" · {routing_why}" if routing_why else ""), "PASS", meta, values=n_values)
                 doc_ok += 1
 
             if doc_err and not doc_ok and not doc_empty:
@@ -1024,6 +1059,17 @@ def process_lead(
             "vlm_errors": sum(1 for c in vlm_calls if c.get("status") == "FAIL"),
             "empty_batches": sum(1 for c in vlm_calls if c.get("status") == "EMPTY"),
         }
+        # tokens per model, so a hybrid setup can answer "is the other-language model worth it"
+        by_model: Dict[str, Dict[str, Any]] = {}
+        for c_ in vlm_calls:
+            if not c_.get("model"):
+                continue
+            bm = by_model.setdefault(c_["model"], {"provider": c_.get("provider", ""), "calls": 0,
+                                                   "prompt_tokens": 0, "completion_tokens": 0})
+            bm["calls"] += 1
+            bm["prompt_tokens"] += c_.get("prompt_tokens") or 0
+            bm["completion_tokens"] += c_.get("completion_tokens") or 0
+        lead_telemetry["by_model"] = by_model
         raw_extractions["_vlm_calls"] = vlm_calls
 
         raw_extractions["_telemetry"] = lead_telemetry

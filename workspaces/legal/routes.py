@@ -37,8 +37,16 @@ logger = PgLegalLeadLogger()
 def _model_info() -> dict:
     from config import runtime
     cfg = runtime.model_config()
+    ex = runtime.extraction_config()
+    name = lambda p: (ex[p]["model"] or p.capitalize()) if p in ("medha", "gemini") else p  # noqa: E731
+    # what the console's model chip says: the model in use, or the English / other-language pair
+    if ex["routing"] == "hybrid":
+        summary = {"title": f"{name(ex['main'])} + {name(ex['multilingual'])}",
+                   "sub": "hybrid · English / other languages"}
+    else:
+        summary = {"title": name(ex["main"]), "sub": "one model for everything"}
     return {"model": cfg["model"], "url": cfg["url"],
-            "stream": cfg["stream"], "workers": settings.WORKER_COUNT}
+            "stream": cfg["stream"], "workers": settings.WORKER_COUNT, "extraction": summary}
 
 
 @legal_bp.route("/ws/legal")
@@ -265,6 +273,59 @@ def api_legal_stats():
         "model": _model_info(),
         "workspace": "legal",
     })
+
+
+@legal_bp.route("/api/legal/models", methods=["GET", "POST"])
+def api_legal_models():
+    """Which models legal extraction uses, and their credentials (keys redacted on the way out).
+    POST saves only a setup that can actually run — a model chosen without credentials, or a
+    "hybrid" with the same model twice, is refused with the reason. Blank key = keep the saved one.
+    The Medha endpoint is shared with the payment console; Gemini and the routing are legal-only."""
+    from config import runtime
+    if request.method == "POST":
+        b = request.get_json(force=True, silent=True) or {}
+        m, g = b.get("medha") or {}, b.get("gemini") or {}
+        try:
+            return jsonify(runtime.set_extraction_config(
+                routing=b.get("routing"), main=b.get("main"), multilingual=b.get("multilingual"),
+                scanned=b.get("scanned"), fallback=b.get("fallback"),
+                gemini_key=g.get("key"), gemini_model=g.get("model"), clear_gemini_key=bool(g.get("clear_key")),
+                medha_url=m.get("url"), medha_key=m.get("key"), medha_model=m.get("model")))
+        except runtime.ConfigError as e:
+            return jsonify({"error": str(e)}), 400
+    return jsonify(runtime.extraction_masked())
+
+
+@legal_bp.route("/api/legal/models/test", methods=["POST"])
+def api_legal_models_test():
+    """Probe one provider with the credentials typed in (or the saved ones), without saving.
+    Gemini: lists models — no tokens spent. Medha: its OpenAI-compatible /models list."""
+    import requests as _rq
+    from config import runtime
+    from workspaces.legal import llm
+    b = request.get_json(force=True, silent=True) or {}
+    ex = runtime.extraction_config()
+    if b.get("provider") == "gemini":
+        key = b.get("key") or ex["gemini"]["key"]
+        if not key:
+            return jsonify({"ok": False, "error": "no API key — paste one to test it"}), 400
+        return jsonify(llm.test_gemini(key, b.get("model") or ex["gemini"]["model"]))
+    url = (b.get("url") or ex["medha"]["url"] or "").rstrip("/")
+    key = b.get("key") or ex["medha"]["key"]
+    want = (b.get("model") or ex["medha"]["model"] or "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "no endpoint URL"}), 400
+    t0 = time.time()
+    try:
+        r = _rq.get(f"{url}/models", headers={"Authorization": f"Bearer {key}"} if key else {}, timeout=8)
+        ids = []
+        if r.headers.get("content-type", "").startswith("application/json"):
+            ids = [x.get("id") for x in (r.json().get("data") or []) if isinstance(x, dict)]
+        return jsonify({"ok": r.status_code == 200, "status": r.status_code, "ms": round((time.time() - t0) * 1000),
+                        "models": ids[:25], "model_present": (want in ids) if (ids and want) else None,
+                        "error": "" if r.status_code == 200 else f"HTTP {r.status_code}"})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ok": False, "ms": round((time.time() - t0) * 1000), "error": f"{type(e).__name__}: {e}"[:200]})
 
 
 @legal_bp.route("/api/legal/leads")
