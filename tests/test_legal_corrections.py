@@ -143,3 +143,15 @@ def test_purging_a_lead_leaves_no_orphans():
         for table in _LEAD_TABLES + ("legal_leads",):
             n = c.execute(f"SELECT count(*) n FROM {table} WHERE lead_id=%s", (LEAD,)).fetchone()["n"]
             assert n == 0, table
+
+
+def test_the_review_metrics_count_what_people_checked():
+    from workspaces.legal.corrections import record
+    from workspaces.legal.metrics import Slice, review
+    record(LEAD, "borrower_name", "corrected", "Ravi Kumar", expected="Ravi Kumr")
+    record(LEAD, "co_borrower_1_name", "confirmed", expected="Sita Devi")
+    rv = review(Slice("test", "batch-corrtest", None))
+    assert rv["corrections"]["checked"] == 2 and rv["corrections"]["agreement"] == 50.0
+    fields = {f["field"]: f for f in rv["corrections"]["fields"]}
+    assert fields["co_borrower_n_name"]["confirmed"] == 1          # co-borrowers counted as one field
+    assert rv["states"] == {"reviewed": 1}

@@ -2143,3 +2143,11 @@ td.c-family{min-width:200px;max-width:320px}
   .vr-a{text-align:left}
   td.c-attn{min-width:140px}
 }
+
+/* observability: the review card */
+.ob-sub{margin:18px 0 8px;font:700 11px "Inter",sans-serif;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft)}
+.ob-sub span{font:500 11px "Inter",sans-serif;letter-spacing:0;text-transform:none;color:var(--ink-faint);margin-left:6px}
+.ob-agree{font-size:13px;color:var(--ink-soft);margin-bottom:8px}
+.ob-agree b{font:700 22px "Inter",sans-serif;color:var(--ink);margin-right:6px;vertical-align:-2px}
+.ob-agree span{color:var(--ink-faint)}
+#obScript .ob-legend + .ob-legend{margin-top:4px}

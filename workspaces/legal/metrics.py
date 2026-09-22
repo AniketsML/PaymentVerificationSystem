@@ -36,7 +36,11 @@ _BASE = """
                COALESCE(l.extracted_data->'_telemetry', '{{}}'::jsonb)          AS t,
                COALESCE(l.extracted_data->'_page_extractions', '[]'::jsonb)     AS pxs,
                (SELECT count(*) FROM jsonb_object_keys(COALESCE(l.extracted_data, '{{}}'::jsonb)) k
-                 WHERE left(k, 1) <> '_' AND k NOT IN ('page_extractions', 'telemetry'))  AS values_n
+                 WHERE left(k, 1) <> '_' AND k NOT IN ('page_extractions', 'telemetry'))  AS values_n,
+               l.extracted_data->'_trust'                                       AS trust,
+               CASE WHEN jsonb_typeof(l.extracted_data->'_extras') = 'object'
+                    THEN (SELECT count(*) FROM jsonb_object_keys(l.extracted_data->'_extras'))
+                    ELSE 0 END                                                   AS extras_n
         FROM legal_leads l
         WHERE {where}
     ), tel AS (
@@ -193,6 +197,71 @@ def script_mix(s: Slice) -> Dict[str, Any]:
     return {"values": values, "dossiers": dossiers, "blur": blur}
 
 
+# ── 3b. what needs a person, and how right was the model? ──────────────────────
+def review(s: Slice) -> Dict[str, Any]:
+    """The review picture for finished dossiers, from each dossier's trust verdict (trust.py)
+    and the corrections people made (corrections.py):
+
+      states       dossiers by review state
+      reasons      per reason: dossiers carrying it, and values
+      values       how values were trusted: verified / clear / review / unchecked / corrected …
+      corrections  per field: how many values people corrected and confirmed — and the model's
+                   agreement rate on the values people checked (confirmed / (confirmed + corrected)),
+                   which is the only ground truth a production system gets for free
+      extras       fields returned outside the run's schema, per dossier (schema adherence)"""
+    rows = s.rows("""
+        SELECT lead_id, trust, extras_n FROM tel
+        WHERE status IN ('completed','partial','missing_documents','failed')
+    """)
+    states: Dict[str, int] = {}
+    reasons_dossiers: Dict[str, int] = {}
+    reasons_values: Dict[str, int] = {}
+    values: Dict[str, int] = {}
+    extras_total = 0
+    for r in rows:
+        t = r.get("trust") or {}
+        st = t.get("state") or "not_assessed"
+        states[st] = states.get(st, 0) + 1
+        for k, n in (t.get("reasons") or {}).items():
+            reasons_dossiers[k] = reasons_dossiers.get(k, 0) + 1
+            reasons_values[k] = reasons_values.get(k, 0) + int(n or 0)
+        for f in (t.get("fields") or {}).values():
+            values[f.get("state") or "?"] = values.get(f.get("state") or "?", 0) + 1
+        extras_total += int(r.get("extras_n") or 0)
+
+    corr_rows = s.rows("""
+        SELECT field, action, count(*)::int AS n FROM (
+            SELECT DISTINCT ON (fc.lead_id, fc.field) fc.field, fc.action
+            FROM legal_field_corrections fc JOIN tel ON tel.lead_id = fc.lead_id
+            ORDER BY fc.lead_id, fc.field, fc.id DESC
+        ) latest WHERE action <> 'reverted' GROUP BY 1, 2
+    """)
+    import re as _re
+    per_field: Dict[str, Dict[str, int]] = {}
+    for c in corr_rows:
+        # co-borrower 1, 2, 3 … are one field for this purpose
+        key = _re.sub(r"_(\d+)_", "_n_", c["field"])
+        per_field.setdefault(key, {"corrected": 0, "confirmed": 0})[c["action"]] += c["n"]
+    fields = sorted(({"field": k, **v, "checked": v["corrected"] + v["confirmed"],
+                      "agreement": round(100.0 * v["confirmed"] / (v["corrected"] + v["confirmed"]), 1)
+                      if (v["corrected"] + v["confirmed"]) else None}
+                     for k, v in per_field.items()), key=lambda x: -x["checked"])
+    checked = sum(f["checked"] for f in fields)
+    confirmed = sum(f["confirmed"] for f in fields)
+    finished = len(rows)
+    return {
+        "finished": finished,
+        "states": states,
+        "reasons": [{"reason": k, "dossiers": reasons_dossiers[k], "values": reasons_values[k]}
+                    for k in sorted(reasons_dossiers, key=lambda k: -reasons_dossiers[k])],
+        "values": values,
+        "corrections": {"checked": checked, "confirmed": confirmed, "corrected": checked - confirmed,
+                        "agreement": round(100.0 * confirmed / checked, 1) if checked else None,
+                        "fields": fields[:20]},
+        "extras_per_dossier": round(extras_total / finished, 2) if finished else 0,
+    }
+
+
 # ── 4. what does it cost? ─────────────────────────────────────────────────────
 def tokens(s: Slice) -> Dict[str, Any]:
     r = s.one("""
@@ -278,6 +347,7 @@ def per_dossier(s: Slice, limit: int = 500) -> List[dict]:
                COALESCE(tel.prompt_tokens, 0)::int     AS prompt_tokens,
                COALESCE(tel.completion_tokens, 0)::int AS completion_tokens,
                tel.vlm_ms, tel.pipeline_ms, p.tag AS script_tag, tel.updated_at,
+               tel.trust->>'state' AS review_state,
                COALESCE((p.counts->>'blurred')::int, 0) > 0 AS has_blur
         FROM tel LEFT JOIN legal_field_provenance p ON p.lead_id = tel.lead_id AND p.version = %s
         ORDER BY tel.updated_at DESC LIMIT %s
@@ -295,6 +365,7 @@ def per_dossier(s: Slice, limit: int = 500) -> List[dict]:
             "completion_tokens": r["completion_tokens"],
             "vlm_ms": _num(r["vlm_ms"], 0), "pipeline_ms": _num(r["pipeline_ms"], 0),
             "script_tag": r["script_tag"], "has_blur": bool(r["has_blur"]),
+            "review_state": r["review_state"],
             "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
         })
     return out
@@ -326,6 +397,7 @@ def snapshot(scope: str = "real", batch_id: Optional[str] = None, days: Optional
         "field_coverage": field_coverage(s),
         "values_histogram": values_histogram(s),
         "script_mix": script_mix(s),
+        "review": review(s),
         "tokens": tokens(s),
         "per_run": per_run(s),
         "timing": timing(s),

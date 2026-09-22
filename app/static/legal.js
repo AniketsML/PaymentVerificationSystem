@@ -2994,14 +2994,6 @@ function formatFieldValue(k, v) {
     ["partial", "Partial", "var(--viz-serious)"],
     ["failed", "Failed", "var(--ch-bad)"],
   ];
-  const SCRIPTS = [
-    ["typed", "Typed", "var(--ch-ok)"],
-    ["scanned", "Scanned · possibly handwritten", "var(--ch-warn)"],
-    ["handwritten", "Handwritten", "var(--ch-bad)"],
-    ["unknown", "Unchecked page", "var(--ch-neutral)"],
-    ["none", "No values extracted", "var(--ink-faint)"],
-  ];
-
   function cardHead(title, sub, extra = "") {
     return `<div class="ob-card-head"><div><h3>${esc(title)}</h3>${sub ? `<p>${esc(sub)}</p>` : ""}</div>${extra}</div>`;
   }
@@ -3136,47 +3128,78 @@ function formatFieldValue(k, v) {
     });
   }
 
-  /* ── 02 where values came from ── */
+  /* ── 02 review: what needs a person, and how often the model was right ──
+     From each dossier's trust verdict (trust.py) and people's corrections (corrections.py).
+     The agreement rate — values people confirmed as read, out of all they checked — is the only
+     ground truth the system gets for free, so it is shown as soon as there is any. */
+  const REVIEW_STATES = [
+    ["extracted", "Extracted", "var(--ch-ok)"],
+    ["reviewed", "Reviewed by a person", "var(--accent)"],
+    ["needs_review", "Needs review", "var(--ch-warn)"],
+    ["unverified", "Not verified (older run)", "var(--ch-neutral)"],
+    ["no_values", "No values", "var(--ink-faint)"],
+  ];
+  const VALUE_STATES = [
+    ["verified", "Verified in the document text", "var(--ch-ok)"],
+    ["clear", "Read clearly from a good page", "color-mix(in srgb, var(--ch-ok) 55%, transparent)"],
+    ["confirmed", "Confirmed by a person", "var(--accent)"],
+    ["corrected", "Corrected by a person", "color-mix(in srgb, var(--accent) 55%, transparent)"],
+    ["review", "Needs review", "var(--ch-warn)"],
+    ["unchecked", "Not verified (older run)", "var(--ch-neutral)"],
+  ];
+
   function renderScript(d) {
-    const m = d.script_mix || { values: {}, dossiers: {} };
-    const v = m.values || {}, ds = m.dossiers || {};
-    const vParts = SCRIPTS.map(([k, label, color]) => ({ label, color, n: v[k] || 0 }));
-    const dParts = SCRIPTS.map(([k, label, color]) => ({ label, color, n: ds[k] || 0 }));
-    const vTotal = vParts.reduce((a, p) => a + p.n, 0);
+    const rv = d.review || { states: {}, values: {}, reasons: [], corrections: {} };
+    const dParts = REVIEW_STATES.map(([k, label, color]) => ({ label, color, n: (rv.states || {})[k] || 0 }));
+    const vParts = VALUE_STATES.map(([k, label, color]) => ({ label, color, n: (rv.values || {})[k] || 0 }));
     const dTotal = dParts.reduce((a, p) => a + p.n, 0);
-    const pending = ds.not_checked || 0;
-    // blur is a property of the page, not of the script, so it gets its own bar rather than a
-    // segment inside the two above — a value can be handwritten AND on a blurry page.
-    const blur = m.blur || { values: 0, dossiers: 0 };
-    const bParts = [
-      { label: "On a blurry page", color: "var(--viz-serious)", n: blur.values || 0 },
-      { label: "Page sharp enough", color: "var(--ch-neutral)", n: Math.max(0, vTotal - (blur.values || 0)) },
-    ];
-    $("#obScript").innerHTML = cardHead("Typed, scanned or handwritten",
-      "A dossier takes the strongest tag among its values: handwritten › scanned › typed",
-      pending ? `<button type="button" class="btn line small" id="obCheckScripts">Check ${fmtInt(pending)} dossier${pending === 1 ? "" : "s"}</button>` : "") +
+    const vTotal = vParts.reduce((a, p) => a + p.n, 0);
+    const reasons = (rv.reasons || []).filter(r => r.reason !== "unchecked");
+    const maxR = Math.max(1, ...reasons.map(r => r.dossiers));
+    const c = rv.corrections || {};
+    const fields = c.fields || [];
+    const fieldLabel = (f) => formatColName(f.replace(/_n_/, "_"));
+
+    $("#obScript").innerHTML = cardHead("Review",
+      "What was trusted automatically, what needs a person, and why") +
       `<div class="ob-script">
-        <div class="ob-script-row"><span class="ob-script-k">Values<b>${fmtInt(vTotal)}</b></span>${stackedBar(vParts, vTotal)}</div>
         <div class="ob-script-row"><span class="ob-script-k">Dossiers<b>${fmtInt(dTotal)}</b></span>${stackedBar(dParts, dTotal)}</div>
-        <div class="ob-script-row"><span class="ob-script-k">Page quality<b>${fmtInt(blur.values || 0)}</b></span>${stackedBar(bParts, vTotal)}</div>
-      </div>` + legend(vParts.concat(bParts.slice(0, 1)), vTotal) +
-      `<div class="ob-note">Handwriting is flagged by the model on runs extracted since this was added. Older runs can only show
-        whether a value appears in the PDF's own text (Typed) or was read off the page image (Scanned — which may be handwriting).
-        ${blur.values ? `<b>${fmtInt(blur.values)}</b> value${blur.values === 1 ? "" : "s"} across
-        <b>${fmtInt(blur.dossiers)}</b> dossier${blur.dossiers === 1 ? "" : "s"} sit on pages soft or low-contrast enough to be
-        worth a second look; that count cuts across the rows above rather than adding to them.` : ""}</div>`;
-    const chk = $("#obCheckScripts");
-    if (chk) chk.onclick = async () => {
-      chk.disabled = true; chk.textContent = "Checking…";
-      const ids = (d.per_dossier || []).filter(r => !r.script_tag).map(r => r.lead_id);
-      try {
-        for (let i = 0; i < ids.length; i += 25) {
-          await fetch("/api/legal/provenance/scan", { method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ lead_ids: ids.slice(i, i + 25) }) });
-        }
-      } catch (e) { toast("Check failed", "bad"); }
-      loadObservability();
-    };
+        <div class="ob-script-row"><span class="ob-script-k">Values<b>${fmtInt(vTotal)}</b></span>${stackedBar(vParts, vTotal)}</div>
+      </div>` + legend(dParts, dTotal) + legend(vParts, vTotal) +
+      (reasons.length ? `
+        <h4 class="ob-sub">Why values need review <span>dossiers affected · values</span></h4>
+        <div class="ob-rank">${reasons.map(r => `
+          <button type="button" class="ob-rank-row" data-reason="${esc(r.reason)}"
+                  ${tipAttrs(REASON_LABEL[r.reason] || r.reason, `${fmtInt(r.dossiers)} dossiers · ${fmtInt(r.values)} values — click to see them`)}>
+            <span class="ob-rank-l">${esc(REASON_LABEL[r.reason] || r.reason)}</span>
+            <span class="ob-rank-track"><span style="width:${Math.max(2, Math.round(100 * r.dossiers / maxR))}%"></span></span>
+            <span class="ob-rank-v">${fmtInt(r.dossiers)}</span>
+            <span class="ob-rank-n">${fmtInt(r.values)}</span>
+          </button>`).join("")}</div>` : "") +
+      `<h4 class="ob-sub">How often the model was right <span>on values people checked</span></h4>` +
+      (c.checked ? `
+        <div class="ob-agree"><b>${c.agreement}%</b> of ${fmtInt(c.checked)} checked values were right as read
+          <span>(${fmtInt(c.confirmed)} confirmed · ${fmtInt(c.corrected)} corrected)</span></div>
+        <div class="ob-rank">${fields.map(f => `
+          <div class="ob-rank-row" ${tipAttrs(fieldLabel(f.field), `${fmtInt(f.confirmed)} confirmed · ${fmtInt(f.corrected)} corrected`)}>
+            <span class="ob-rank-l">${esc(fieldLabel(f.field))}</span>
+            <span class="ob-rank-track"><span style="width:${Math.max(2, f.agreement || 0)}%"></span></span>
+            <span class="ob-rank-v">${f.agreement}%</span>
+            <span class="ob-rank-n">${fmtInt(f.checked)}</span>
+          </div>`).join("")}</div>`
+        : `<div class="ob-note">Nothing checked yet. Each value a person confirms or corrects in a dossier counts here,
+            and the rate per field shows where the model needs a better prompt.</div>`) +
+      `<div class="ob-note">${rv.extras_per_dossier ? `${rv.extras_per_dossier} field${rv.extras_per_dossier === 1 ? "" : "s"} per dossier came back
+         that the prompt didn't ask for — kept aside as evidence, never shown as columns.` : "Every field returned was one the prompt asked for."}</div>`;
+
+    $$("#obScript [data-reason]").forEach(b => b.onclick = () => {
+      state.attention = new Set([b.dataset.reason]);
+      state.view = "all";
+      state.batchId = OB.batchId || null;
+      switchView("dashboard");
+      updateBatchFilterUI();
+      toast(`Showing dossiers with “${REASON_LABEL[b.dataset.reason] || b.dataset.reason}”`, "ok");
+    });
   }
 
   /* ── 03 cost ── */
@@ -3300,7 +3323,7 @@ function formatFieldValue(k, v) {
   /* ── 05 the table ── */
   const OB_COLS = [
     ["name", "Dossier", false], ["run", "Run", false], ["status", "Status", false],
-    ["script_tag", "Source & quality", false], ["values", "Values", true], ["cited_pages", "Pages cited", true],
+    ["review_state", "Review", false], ["values", "Values", true], ["cited_pages", "Pages cited", true],
     ["documents_read", "Docs read", true], ["tokens", "Tokens", true], ["vlm_ms", "Model time", true],
     ["pipeline_ms", "Total time", true], ["updated_at", "Finished", false],
   ];
@@ -3327,7 +3350,7 @@ function formatFieldValue(k, v) {
         <td><div class="rv-name">${esc(r.name)}</div><div class="rv-id">${esc(r.lead_id)}</div></td>
         <td class="ob-run" title="${esc(r.run)}">${esc(r.run)}</td>
         <td>${badge(r.status)}</td>
-        <td>${scriptChip(r.script_tag, r.has_blur)}</td>
+        <td>${stateBadge(r.review_state || "unverified")}</td>
         <td class="c-num">${r.values ? fmtInt(r.values) : '<span class="ob-zero">0</span>'}</td>
         <td class="c-num">${fmtInt(r.cited_pages)}</td>
         <td class="c-num">${fmtInt(r.documents_read)}/${fmtInt(r.documents)}</td>
