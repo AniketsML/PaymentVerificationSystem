@@ -55,6 +55,11 @@ def test_the_models_own_doubt_is_enough():
     assert state(dossier(legibility="illegible"))[1] == ["illegible"]
 
 
+def test_not_verified_is_not_listed_beside_a_real_problem():
+    s, reasons, _ = state(dossier(script="handwritten", legibility=None))
+    assert s == REVIEW and reasons == ["handwritten"]
+
+
 def test_no_verdict_is_not_verified_rather_than_a_problem():
     s, reasons, lead = state(dossier(legibility=None))
     assert (s, reasons, lead) == (UNCHECKED, ["unchecked"], LEAD_UNVERIFIED)

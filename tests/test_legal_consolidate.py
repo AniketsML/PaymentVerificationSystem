@@ -76,6 +76,13 @@ def test_single_fields_agree_by_majority_and_record_disagreement():
     assert "Plot 91" in out.notes["property_details"]["conflict"]
 
 
+def test_a_conflict_names_each_page_once():
+    records = [rec(5, {"property_details": "Plot 12"}), rec(6, {"property_details": "Plot 12"}),
+               rec(9, {"property_details": "Plot 91"}), rec(9, {"property_details": "Plot 91"})]
+    out = consolidate(records, SCHEMA, doc_type)
+    assert out.notes["property_details"]["conflict"] == "Plot 91 (p. 9)"
+
+
 def test_a_fuller_reading_is_not_a_conflict():
     records = [rec(5, {"property_details": "Plot 12"}), rec(6, {"property_details": "Plot 12, Survey 44"})]
     out = consolidate(records, SCHEMA, doc_type)

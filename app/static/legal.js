@@ -37,7 +37,9 @@
     let h; return (...a) => { clearTimeout(h); h = setTimeout(() => fn(...a), ms); };
   };
 
-  let state = { status: "all", q: "", scope: null, batchId: null, script: "all", missing: null };
+  // view: the status segment (review state once finished); attention: reasons picked in the
+  // "Needs attention" menu; missing: a field whose absence is being looked for
+  let state = { status: "all", q: "", scope: null, batchId: null, view: "all", attention: new Set(), missing: null };
   let charts = {};
   let allRows = [];
   const COL_FILTERS = {};        // filled from the columns the extraction actually produced
@@ -298,7 +300,6 @@
       if (!resp.ok) return;
       const s = await resp.json();
       renderStats(s.counts || {});
-      renderStatusCounts(s.counts || {});
       renderDonut(s.counts || {});
       renderDocTypes(s.document_types || []);
       if (s.model) {
@@ -343,7 +344,6 @@
     } catch (e) { toast("Clear failed", "bad"); }
   }
 
-  let dynamicColumns = [];
   // the order a reviewer reads a dossier in — shared by the table and the export so a column
   // does not sit in one place on screen and somewhere else in the file
   const priorityExportCols = [
@@ -395,84 +395,226 @@
       allRows = [];
     }
     
-    // Determine dynamic columns
-    const excludeKeys = new Set([
-      "lead_id", "batch_id", "folder_name", "folder_path", "dossier_type",
-      "total_documents", "processed_documents", "failed_documents", "status",
-      "processing_status", "is_test", "extraction_prompt", "created_at",
-      "updated_at", "account_lan", "lead_name", "telemetry", "_raw_ocr_text",
-      "_page_extractions", "page_extractions", "_cited_pages", "_telemetry", "_phase_timings",
-      "borrower_details", "co_borrower_details", "details_of_borrower", "details_of_co_borrower",
-      "details_of_the_borrower", "borrowers", "co_borrowers", "co_applicants",
-      // the blur flag is drawn inside the Source & quality chip, not as a column of its own
-      "applicant_name", "applicant_address", "script_tag", "has_blur"
-    ]);
-    const keys = new Set();
-    allRows.forEach(r => {
-       Object.keys(r).forEach(k => {
-           if (!excludeKeys.has(k) && !k.startsWith("_") && !k.startsWith("telemetry_") && typeof r[k] !== 'object') {
-             keys.add(k);
-           }
-       });
-    });
-
-    dynamicColumns = Array.from(keys).sort((a, b) => {
-      const idxA = priorityExportCols.indexOf(a);
-      const idxB = priorityExportCols.indexOf(b);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
-      return a.localeCompare(b);
-    });
-    
-    // Rebuild thead
-    const theadRow = $("#dynamicTheadRow");
-    if (theadRow) {
-       theadRow.innerHTML = `
-          <th class="th-filter" data-col="lead_id">Lead ID<span class="th-caret" aria-hidden="true">▾</span></th>
-          <th class="th-filter" data-col="processing_status">Status<span class="th-caret" aria-hidden="true">▾</span></th>
-          <th class="th-filter" data-col="script_tag" title="Whether values were typed, read off a scan or handwritten — and whether the page was sharp enough to read">Source &amp; quality<span class="th-caret" aria-hidden="true">▾</span></th>
-          ${dynamicColumns.map(c => {
-            const isAddr = c.toLowerCase().includes("address");
-            const style = isAddr ? 'style="min-width: 280px; max-width: 420px;"' : '';
-            return `<th class="th-filter" data-col="${c}" ${style}>${formatColName(c)}<span class="th-caret" aria-hidden="true">▾</span></th>`;
-          }).join("")}
-       `;
-    }
-
-    syncColFilters();
+    buildColumns(allRows);
+    renderLeadHead();
     renderFacets();
     renderLeadRows();
-    scanMissingScriptTags();
   }
 
-  /* ── dashboard filters ───────────────────────
-     Column filters follow whatever columns the extraction produced; the facet bar adds the
-     cuts that are actually useful on this data: script type and "which field is missing". */
-  function syncColFilters() {
-    const live = new Set(["lead_id", "processing_status", "script_tag", ...dynamicColumns]);
+  function renderLeadHead() {
+    const theadRow = $("#dynamicTheadRow");
+    if (!theadRow) return;
+    theadRow.innerHTML =
+      `<th class="c-dossier">Dossier</th><th class="c-state">Status</th><th class="c-attn">Needs attention</th>` +
+      visibleColumns().map(c => c.kind === "field"
+        ? `<th class="th-filter" data-col="${esc(c.id)}">${esc(c.label)}<span class="th-caret" aria-hidden="true">▾</span></th>`
+        : `<th class="c-${c.kind}">${esc(c.label)}</th>`).join("");
+  }
+
+  /* ── the review model: one status, one list of reasons ──────────────────────
+     A finished dossier's status is its REVIEW state, decided on the server (trust.py): Extracted
+     when every value was confirmed in the document's text or read cleanly from a good page,
+     Needs review when something wasn't, Not verified when it predates legibility checks. While a
+     dossier is still running its status is the pipeline's. Every reason a value wasn't trusted
+     lives in one "Needs attention" column instead of a column per signal. */
+  const REASON_LABEL = {
+    illegible: "Illegible", blank: "Blank page", conflict: "Conflicting reads", handwritten: "Handwritten",
+    partial: "Partly legible", blurry: "Blurry", faint: "Faint print", dark: "Dark",
+    low_resolution: "Low resolution", rotated: "Rotated or skewed", name: "Name needs a look",
+    format: "Format looks wrong", not_english: "Not in English", unchecked: "Not verified (older run)",
+  };
+  const REASON_WHY = {
+    illegible: "The model says it was guessing at this value",
+    blank: "The value was cited from a page with nothing on it — it was mis-cited or invented",
+    conflict: "Different pages read this differently, or disagree about who the borrower is",
+    handwritten: "Written by hand — always checked by a person",
+    partial: "The model says part of it was hard to read",
+    blurry: "The page image is soft", faint: "The print on the page is faint",
+    dark: "The page image is dark", low_resolution: "The page image has too few pixels per character",
+    rotated: "The page is tilted", name: "The name still carries something odd — digits, a handle, two people",
+    format: "Doesn't look like what the field holds — e.g. a pincode that isn't 6 digits",
+    not_english: "Still not in English script",
+    unchecked: "Extracted before the model was asked about legibility — a re-run verifies it",
+  };
+  const STATE_META = {
+    needs_review: ["Needs review", "st-review", "Some values weren't trusted automatically — open to check them against the page"],
+    unverified: ["Not verified", "st-unverified", "Extracted before legibility checks existed — a re-run verifies it"],
+    extracted: ["Extracted", "st-ok", "Every value was confirmed in the document's text or read cleanly from a good page"],
+    reviewed: ["Reviewed", "st-ok", "A person corrected or confirmed every flagged value"],
+    no_values: ["No values", "st-empty", "The extraction found nothing — open to see why"],
+    processing: ["Processing", "st-run", "Being read now"],
+    queued: ["Queued", "st-run", "Waiting for a worker"],
+    missing: ["Missing documents", "st-warn", "No document in the dossier could be read"],
+    failed: ["Failed", "st-bad", "Every model call for this dossier failed"],
+  };
+  const STATUS_SEGMENTS = [
+    ["all", "All"], ["needs_review", "Needs review"], ["unverified", "Not verified"],
+    ["extracted", "Extracted"], ["reviewed", "Reviewed"], ["no_values", "No values"],
+    ["running", "Processing"], ["problem", "Failed"],
+  ];
+
+  function displayState(r) {
+    const ps = String(r.processing_status || r.status || "pending").toLowerCase();
+    if (ps === "processing") return "processing";
+    if (ps === "pending" || ps === "draft" || ps === "paused") return "queued";
+    if (ps === "failed") return "failed";
+    if (ps === "missing_documents") return "missing";
+    return ((r._trust || {}).state) || "unverified";
+  }
+  const segmentOf = (st) => (st === "processing" || st === "queued") ? "running"
+    : (st === "missing" || st === "failed") ? "problem" : st;
+  function stateBadge(st) {
+    const [label, cls, why] = STATE_META[st] || [st, "st-empty", ""];
+    return `<span class="st-badge ${cls}" title="${esc(why)}">${esc(label)}</span>`;
+  }
+  const reasonsOf = (r) => ((r && r._trust) || {}).reasons || {};
+  const fieldTrust = (r, key) => ((((r && r._trust) || {}).fields) || {})[key] || null;
+  const reasonOrder = (reasons) => Object.keys(REASON_LABEL).filter(k => reasons[k]);
+  function reasonChips(reasons, max = 3) {
+    const keys = reasonOrder(reasons);
+    if (!keys.length) return "";
+    const shown = keys.slice(0, max);
+    const more = keys.length - shown.length;
+    return shown.map(k => `<span class="rs-chip rs-${k}" title="${esc(REASON_WHY[k] || "")}">${esc(REASON_LABEL[k] || k)}` +
+      `${reasons[k] > 1 ? `<b>${reasons[k]}</b>` : ""}</span>`).join("") +
+      (more ? `<span class="rs-more" title="${esc(keys.slice(max).map(k => REASON_LABEL[k] || k).join(", "))}">+${more}</span>` : "");
+  }
+
+  // What counts as a value — ONE definition shared by the table, the export and the drawer, the
+  // way meta.is_meta_key is on the server. Anything else is bookkeeping.
+  const NOT_VALUE_KEYS = new Set([
+    "lead_id", "batch_id", "batch_name", "folder_name", "folder_path", "dossier_type", "total_documents",
+    "processed_documents", "failed_documents", "status", "processing_status", "is_test", "extraction_prompt",
+    "created_at", "updated_at", "account_lan", "lead_name", "telemetry", "page_extractions", "script_tag",
+    "has_blur", "applicant_name", "applicant_address", "raw_extractions", "extracted_data", "phase_timings",
+    "cited_pages", "ocr_routes_used", "flags", "confidence_score", "summary", "raw_response", "raw_ocr_text",
+    "ocr_route", "ocr_confidence", "page_number", "mismatches", "borrower_details", "co_borrower_details",
+    "details_of_borrower", "details_of_co_borrower", "details_of_the_borrower", "borrowers", "co_borrowers",
+    "co_applicants",
+  ]);
+  const META_RE = /^_|^telemetry_|^field_(scripts|sources|page_sources|evidence|notes)|_page_sources$/;
+  const isValueKey = (k, v) => !META_RE.test(k) && !NOT_VALUE_KEYS.has(k) && (v === undefined || v === null || typeof v !== "object");
+  const hasValue = (r, col) => r[col] !== undefined && r[col] !== null && String(r[col]).trim() !== "" && r[col] !== "—";
+
+  /* ── columns: people grouped, everything else one column per requested field ── */
+  const FAMILY_RE = /^(co_borrower|guarantor)_(\d+)_(name|address)$/;
+  const PROPERTY_ORDER = ["property_details", "property_address", "property_plot_no", "property_survey_no",
+    "property_building_no", "property_area", "property_built_up_area", "property_pincode", "property_boundaries"];
+  const HIDDEN_KEY = "legal.hiddenColumns";
+  const safeGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const safeSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private window */ } };
+  let hiddenCols = new Set((() => { try { return JSON.parse(safeGet(HIDDEN_KEY) || "[]"); } catch (e) { return []; } })());
+  let columns = [];
+
+  function familyMembers(r, fam) {
+    const people = {};
+    Object.keys(r).forEach(k => {
+      const m = k.match(FAMILY_RE);
+      if (m && m[1] === fam && hasValue(r, k)) (people[+m[2]] = people[+m[2]] || { n: +m[2] })[m[3]] = r[k];
+    });
+    return Object.values(people).filter(p => p.name || p.address).sort((a, b) => a.n - b.n);
+  }
+
+  const propRank = (k) => { const i = PROPERTY_ORDER.indexOf(k); return i === -1 ? 99 : i; };
+
+  function buildColumns(rows) {
+    const keys = new Set();
+    rows.forEach(r => Object.keys(r).forEach(k => {
+      if (k !== "account_no_lan" && isValueKey(k, r[k]) && hasValue(r, k)) keys.add(k);
+    }));
+    const cols = [];
+    if (keys.has("borrower_name") || keys.has("borrower_address"))
+      cols.push({ id: "borrower", label: "Borrower", kind: "borrower", keys: ["borrower_name", "borrower_address"] });
+    for (const [fam, label] of [["co_borrower", "Co-borrowers"], ["guarantor", "Guarantors"]]) {
+      const fk = [...keys].filter(k => (k.match(FAMILY_RE) || [])[1] === fam);
+      if (fk.length) cols.push({ id: fam, label, kind: "family", fam, keys: fk });
+    }
+    const prop = [...keys].filter(k => k.startsWith("property_")).sort((a, b) => propRank(a) - propRank(b) || a.localeCompare(b));
+    if (prop.length) cols.push({ id: "property", label: "Property", kind: "property", keys: prop });
+    [...keys].filter(k => !FAMILY_RE.test(k) && !k.startsWith("property_") && k !== "borrower_name" && k !== "borrower_address")
+      .sort((a, b) => a.localeCompare(b))
+      .forEach(k => cols.push({ id: k, label: formatColName(k), kind: "field", keys: [k] }));
+    columns = cols;
+    // column value filters exist only for plain one-value columns
+    const live = new Set(cols.filter(c => c.kind === "field").map(c => c.id));
     Object.keys(COL_FILTERS).forEach(k => { if (!live.has(k)) delete COL_FILTERS[k]; });
     live.forEach(k => { if (!(k in COL_FILTERS)) COL_FILTERS[k] = null; });
   }
+  const visibleColumns = () => columns.filter(c => !hiddenCols.has(c.id));
 
-  // "blurred" is not a script verdict but a flag that can sit on any of them, so it filters on
-  // its own column — a blurry handwritten dossier answers to both "Handwritten" and "Blurry".
-  const SCRIPT_FACETS = [
-    ["all", "All"], ["handwritten", "Handwritten"], ["scanned", "Scanned"],
-    ["typed", "Typed"], ["blurred", "Blurry"], ["none", "No values"], ["unknown", "Unchecked"],
-  ];
-  const scriptOf = (r) => r.script_tag || "unknown";
-  const facetCount = (rows, k) =>
-    k === "all" ? rows.length
-      : k === "blurred" ? rows.filter(r => r.has_blur).length
-        : rows.filter(r => scriptOf(r) === k).length;
-  const hasValue = (r, col) => r[col] !== undefined && r[col] !== null && String(r[col]).trim() !== "" && r[col] !== "—";
+  // the worst trust state among a cell's fields decides its marker
+  function cellMark(r, keys) {
+    let worst = null;
+    const why = [];
+    for (const k of keys) {
+      const t = fieldTrust(r, k);
+      if (!t) continue;
+      if (t.state === "review") {
+        worst = "review";
+        why.push(`${formatColName(k)}: ${(t.reasons || []).map(x => REASON_LABEL[x] || x).join(", ")}`);
+      } else if ((t.state === "corrected" || t.state === "confirmed") && worst !== "review") {
+        worst = t.state;
+      }
+    }
+    if (worst === "review") return `<i class="tm tm-review" title="${esc("Needs review — " + why.join("; "))}"></i>`;
+    if (worst === "corrected") return `<i class="tm tm-fixed" title="Corrected by a person"></i>`;
+    if (worst === "confirmed") return `<i class="tm tm-ok" title="Confirmed by a person"></i>`;
+    return "";
+  }
 
-  function facetRows() {
+  function renderCell(r, col) {
+    const mark = cellMark(r, col.keys);
+    if (col.kind === "borrower") {
+      if (!hasValue(r, "borrower_name") && !hasValue(r, "borrower_address")) return `<td class="c-empty">—</td>`;
+      return `<td class="c-person"><div class="cp-name">${mark}${esc(r.borrower_name || "—")}</div>` +
+        (hasValue(r, "borrower_address") ? `<div class="cp-sub" title="${esc(r.borrower_address)}">${esc(r.borrower_address)}</div>` : "") + `</td>`;
+    }
+    if (col.kind === "family") {
+      const ppl = familyMembers(r, col.fam);
+      if (!ppl.length) return `<td class="c-empty">—</td>`;
+      const title = ppl.map(p => `${p.n}. ${p.name || "—"}${p.address ? " — " + p.address : ""}`).join("\n");
+      return `<td class="c-family" title="${esc(title)}">${mark}<span class="cf-count">${ppl.length}</span>` +
+        `<span class="cf-names">${esc(ppl.map(p => p.name || "(no name)").join(", "))}</span></td>`;
+    }
+    if (col.kind === "property") {
+      const main = r.property_details || r.property_address || "";
+      const parts = col.keys.filter(k => k !== "property_details" && k !== "property_address" && hasValue(r, k))
+        .map(k => `${formatColName(k).replace(/^Property /, "")}: ${r[k]}`);
+      if (!main && !parts.length) return `<td class="c-empty">—</td>`;
+      return `<td class="c-prop">${main ? `<div class="cp-main" title="${esc(main)}">${mark}${esc(main)}</div>` : ""}` +
+        (parts.length ? `<div class="cp-sub" title="${esc(parts.join(" · "))}">${main ? "" : mark}${esc(parts.join(" · "))}</div>` : "") + `</td>`;
+    }
+    const v = r[col.keys[0]];
+    return hasValue(r, col.keys[0]) ? `<td class="c-field${isFinancialField(col.keys[0]) ? " mono" : ""}">${mark}${esc(v)}</td>`
+      : `<td class="c-empty">—</td>`;
+  }
+
+  /* ── filtering: status segment, attention reasons, a missing field, column values ── */
+  function coverageItems() {
+    const items = [];
+    for (const c of columns) {
+      if (c.kind === "family") {
+        const label = c.fam === "co_borrower" ? "Co-borrower" : "Guarantor";
+        if (c.keys.some(k => k.endsWith("_name")))
+          items.push({ id: `${c.fam}:name`, label: `${label} names`, test: r => familyMembers(r, c.fam).some(p => p.name) });
+        if (c.keys.some(k => k.endsWith("_address")))
+          items.push({ id: `${c.fam}:address`, label: `${label} addresses`, test: r => familyMembers(r, c.fam).some(p => p.address) });
+      } else {
+        c.keys.forEach(k => items.push({ id: k, label: formatColName(k), test: r => hasValue(r, k) }));
+      }
+    }
+    return items;
+  }
+
+  function facetRows({ ignoreView = false, ignoreAttention = false } = {}) {
     let rows = Array.isArray(allRows) ? allRows : [];
-    if (state.script === "blurred") rows = rows.filter(r => r.has_blur);
-    else if (state.script !== "all") rows = rows.filter(r => scriptOf(r) === state.script);
-    if (state.missing) rows = rows.filter(r => !hasValue(r, state.missing));
+    if (!ignoreView && state.view !== "all") rows = rows.filter(r => segmentOf(displayState(r)) === state.view);
+    if (!ignoreAttention && state.attention.size)
+      rows = rows.filter(r => { const rs = reasonsOf(r); return [...state.attention].some(k => rs[k]); });
+    if (state.missing) {
+      const item = coverageItems().find(i => i.id === state.missing);
+      if (item) rows = rows.filter(r => !item.test(r));
+    }
     return rows;
   }
 
@@ -481,32 +623,59 @@
     renderLeadRows();
   }
 
+  function renderStatusSegments() {
+    const host = $("#statusChips");
+    if (!host) return;
+    const base = facetRows({ ignoreView: true });
+    const counts = { all: base.length };
+    base.forEach(r => { const s = segmentOf(displayState(r)); counts[s] = (counts[s] || 0) + 1; });
+    const dot = { needs_review: "d-warn", unverified: "d-neutral", extracted: "d-ok", reviewed: "d-accent",
+                  no_values: "d-none", running: "d-accent", problem: "d-bad" };
+    host.innerHTML = STATUS_SEGMENTS
+      .filter(([k]) => k === "all" || counts[k] || state.view === k)
+      .map(([k, label]) => {
+        const on = state.view === k;
+        const meta = STATE_META[k] || STATE_META[k === "running" ? "processing" : "failed"];
+        const why = k === "all" ? "Every dossier" : meta[2];
+        return `<button type="button" class="chip seg-b${on ? " active" : ""}" role="tab" aria-selected="${on}" data-view="${k}" title="${esc(why)}">` +
+          `${k === "all" ? "" : `<i class="sdot ${dot[k]}"></i>`}${label}<span class="seg-n">${(counts[k] || 0).toLocaleString("en-IN")}</span></button>`;
+      }).join("");
+    $$("[data-view]", host).forEach(b => b.onclick = () => { state.view = b.dataset.view; applyFilters(); });
+  }
+
   function renderFacets() {
-    // typed / handwritten — a compact segmented control, only the tags present (plus the active one)
-    const host = $("#scriptFacets");
-    if (host) {
-      const rows0 = allRows || [];
+    renderStatusSegments();
+
+    // needs attention — each reason with the number of dossiers carrying it
+    const list = $("#attentionList");
+    if (list) {
+      const base = facetRows({ ignoreAttention: true });
       const counts = {};
-      SCRIPT_FACETS.forEach(([k]) => { counts[k] = facetCount(rows0, k); });
-      host.innerHTML = SCRIPT_FACETS
-        .filter(([k]) => k === "all" || counts[k] || state.script === k)
-        .map(([k, label]) => {
-          const on = state.script === k;
-          const n = counts[k] || 0;
-          return `<button type="button" class="chip seg-b${on ? " active" : ""}" role="radio" aria-checked="${on}"
-              data-script="${k}" title="${esc(k === "all" ? "Every dossier" : (SCRIPT_LABEL[k] || SCRIPT_LABEL.unknown)[1])}">
-              ${k === "all" ? "" : `<i class="sdot d-${k}"></i>`}${label}<span class="seg-n">${n}</span></button>`;
-        }).join("");
-      $$("[data-script]", host).forEach(b => b.onclick = () => { state.script = b.dataset.script; applyFilters(); });
+      base.forEach(r => Object.keys(reasonsOf(r)).forEach(k => { counts[k] = (counts[k] || 0) + 1; }));
+      const keys = Object.keys(REASON_LABEL).filter(k => counts[k] || state.attention.has(k));
+      const problems = keys.filter(k => k !== "unchecked").length;
+      const sum = $("#attentionSummary");
+      if (sum) sum.textContent = state.attention.size ? `${state.attention.size} selected` : (problems ? `${problems} reasons` : "");
+      list.innerHTML = keys.length ? keys.map(k => `
+          <label class="attrow${state.attention.has(k) ? " on" : ""}" title="${esc(REASON_WHY[k] || "")}">
+            <input type="checkbox" value="${k}" ${state.attention.has(k) ? "checked" : ""}>
+            <span class="rs-dot rs-${k}"></span><span class="attrow-l">${esc(REASON_LABEL[k])}</span>
+            <span class="attrow-n">${counts[k] || 0}</span>
+          </label>`).join("")
+        : `<div class="covlist-empty">Nothing needs attention in this view.</div>`;
+      $$("input", list).forEach(cb => cb.onchange = () => {
+        if (cb.checked) state.attention.add(cb.value); else state.attention.delete(cb.value);
+        applyFilters();
+      });
     }
 
     // field coverage — lives in a popover; the button carries a one-line summary
     const cov = $("#fieldCoverage");
     if (cov) {
-      const rows = allRows || [];
-      const stats = dynamicColumns.map(c => {
-        const filled = rows.filter(r => hasValue(r, c)).length;
-        return { col: c, filled, missing: rows.length - filled, pct: rows.length ? Math.round((100 * filled) / rows.length) : 0 };
+      const rows = facetRows({ ignoreView: true, ignoreAttention: true }).filter(r => displayState(r) !== "no_values");
+      const stats = coverageItems().map(it => {
+        const filled = rows.filter(it.test).length;
+        return { ...it, filled, missing: rows.length - filled, pct: rows.length ? Math.round((100 * filled) / rows.length) : 0 };
       });
       const gaps = stats.filter(s => s.pct < 50).length;
       const sum = $("#coverageSummary");
@@ -514,8 +683,8 @@
       cov.innerHTML = !rows.length || !stats.length
         ? `<div class="covlist-empty">No extracted fields in this view yet.</div>`
         : stats.map(s => `
-          <button type="button" class="covrow${state.missing === s.col ? " on" : ""}" data-missing="${esc(s.col)}">
-            <span class="covrow-l">${esc(formatColName(s.col))}
+          <button type="button" class="covrow${state.missing === s.id ? " on" : ""}" data-missing="${esc(s.id)}">
+            <span class="covrow-l">${esc(s.label)}
               <small>${s.missing ? `${s.missing} dossier${s.missing === 1 ? "" : "s"} missing it` : "found in every dossier"}</small></span>
             <span class="covrow-bar"><span class="${s.pct < 50 ? "low" : ""}" style="width:${Math.max(2, s.pct)}%"></span></span>
             <span class="covrow-v">${s.pct}%</span>
@@ -526,6 +695,20 @@
         applyFilters();
       });
     }
+
+    // columns — every group can be hidden; the choice is remembered on this browser
+    const colList = $("#columnsList");
+    if (colList) {
+      colList.innerHTML = columns.length ? columns.map(c => `
+          <label class="colrow"><input type="checkbox" value="${esc(c.id)}" ${hiddenCols.has(c.id) ? "" : "checked"}>
+            <span>${esc(c.label)}</span></label>`).join("")
+        : `<div class="covlist-empty">No columns yet.</div>`;
+      $$("input", colList).forEach(cb => cb.onchange = () => {
+        if (cb.checked) hiddenCols.delete(cb.value); else hiddenCols.add(cb.value);
+        safeSet(HIDDEN_KEY, JSON.stringify([...hiddenCols]));
+        renderLeadRows();
+      });
+    }
     renderActiveFilters();
   }
 
@@ -534,35 +717,25 @@
     const host = $("#activeFilters");
     if (!host) return;
     const chips = [];
-    if (state.script !== "all") {
-      const label = (SCRIPT_FACETS.find(([k]) => k === state.script) || [, state.script])[1];
-      chips.push(["script", `Source: ${label}`]);
+    state.attention.forEach(k => chips.push([`att:${k}`, `Needs attention: ${REASON_LABEL[k] || k}`]));
+    if (state.missing) {
+      const item = coverageItems().find(i => i.id === state.missing);
+      chips.push(["missing", `Missing: ${item ? item.label : formatColName(state.missing)}`]);
     }
-    if (state.missing) chips.push(["missing", `Missing: ${formatColName(state.missing)}`]);
     const colN = Object.values(COL_FILTERS).filter(s => s !== null).length;
     if (colN) chips.push(["cols", `${colN} column filter${colN === 1 ? "" : "s"}`]);
     host.innerHTML = chips.map(([k, text]) =>
-      `<span class="af-chip" data-k="${k}">${esc(text)}<button type="button" aria-label="Remove ${esc(text)}">✕</button></span>`).join("");
+      `<span class="af-chip" data-k="${esc(k)}">${esc(text)}<button type="button" aria-label="Remove ${esc(text)}">✕</button></span>`).join("");
     $$(".af-chip button", host).forEach(btn => btn.onclick = () => {
       const k = btn.parentElement.dataset.k;
-      if (k === "script") state.script = "all";
+      if (k.startsWith("att:")) state.attention.delete(k.slice(4));
       if (k === "missing") state.missing = null;
       if (k === "cols") for (const c in COL_FILTERS) COL_FILTERS[c] = null;
       applyFilters();
     });
   }
 
-  // status segments carry live counts; empty statuses stay but step back visually
-  function renderStatusCounts(counts) {
-    $$("#statusChips [data-count]").forEach(el => {
-      const key = el.dataset.count;
-      const n = key === "total" ? (counts.total || 0) : (counts[key] || 0);
-      el.textContent = n ? n.toLocaleString("en-IN") : "";
-      el.closest(".seg-b").classList.toggle("is-zero", key !== "total" && !n);
-    });
-  }
-
-  /* ── small popovers (export menu, field coverage) ── */
+  /* ── small popovers (export, columns, needs attention, field coverage) ── */
   function closeMenus() {
     $$(".fpop").forEach(p => p.classList.add("hidden"));
     $$(".fmenu [aria-expanded]").forEach(b => b.setAttribute("aria-expanded", "false"));
@@ -579,32 +752,6 @@
       if (opening) { pop.classList.remove("hidden"); btn.setAttribute("aria-expanded", "true"); }
     };
     pop.addEventListener("click", (e) => { if (e.target.closest("[role=menuitem]")) closeMenus(); });
-  }
-
-  // Leads whose script tag hasn't been worked out yet get one in the background.
-  async function scanMissingScriptTags() {
-    // untagged, or tagged under older rules ("unknown" is re-checked; it recomputes if stale)
-    const pending = (allRows || []).filter(r => !r.script_tag || r.script_tag === "unknown").map(r => r.lead_id);
-    for (let i = 0; i < pending.length; i += 25) {
-      const chunk = pending.slice(i, i + 25);
-      try {
-        const r = await fetch("/api/legal/provenance/scan", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ lead_ids: chunk }),
-        });
-        if (!r.ok) return;
-        const { tags, blur } = await r.json();
-        let touched = false;
-        (allRows || []).forEach(row => {
-          if (tags && tags[row.lead_id]) {
-            row.script_tag = tags[row.lead_id];
-            row.has_blur = !!(blur && blur[row.lead_id]);   // patch both, or the marker goes stale
-            touched = true;
-          }
-        });
-        if (touched) { renderFacets(); renderLeadRows(); }
-      } catch (e) { return; }
-    }
   }
 
   /* ── runs view ─────────────────────────────────────────────────────────────
@@ -1293,38 +1440,39 @@
     return Object.entries(COL_FILTERS).every(([col, set]) => set === null || set.has(rowVal(r, col)));
   }
 
+  // the rows on screen, in order — also what the drawer steps through with ‹ › and J / K
+  let visibleRows = [];
+
   function renderLeadRows() {
     const rows = facetRows().filter(passesColFilters);
+    visibleRows = rows;
     const body = $("#leadsBody");
     const total = (allRows || []).length;
     const filtered = rows.length !== total;
-    const anyFilter = Object.values(COL_FILTERS).some(s => s !== null) || state.script !== "all" || !!state.missing;
+    const anyFilter = Object.values(COL_FILTERS).some(s => s !== null) || state.attention.size > 0 || !!state.missing;
 
-    $("#tableCount").textContent = `${rows.length} lead${rows.length === 1 ? "" : "s"}` +
-      (filtered ? ` of ${total}` : "");
+    $("#tableCount").textContent = `${rows.length} dossier${rows.length === 1 ? "" : "s"}` + (filtered ? ` of ${total}` : "");
     $("#clearFilters").classList.toggle("hidden", !anyFilter);
+    $("#tableEmpty").classList.toggle("hidden", rows.length > 0);
 
-    const empty = $("#tableEmpty");
-    empty.classList.toggle("hidden", rows.length > 0);
-
+    renderLeadHead();
+    const cols = visibleColumns();
     body.innerHTML = rows.map(r => {
-      let tds = `
-        <td class="lead-id mono nowrap">${esc(r.lead_id)}</td>
-        <td>${badge(r.processing_status)}</td>
-        <td class="c-script">${scriptChip(r.script_tag, r.has_blur)}</td>
-      `;
-      dynamicColumns.forEach(col => {
-         let val = r[col];
-         if (val === undefined || val === null) val = "—";
-         else if (typeof val === 'number') val = val.toString();
-         const isAddr = col.toLowerCase().includes("address");
-         const cellStyle = isAddr
-           ? 'style="min-width: 280px; max-width: 420px; white-space: normal; word-break: break-word; line-height: 1.45; font-size: 12.5px;"'
-           : '';
-         tds += `<td ${cellStyle}>${esc(val)}</td>`;
-      });
-      
-      return `<tr data-id="${esc(r.lead_id)}" class="clickable">${tds}</tr>`;
+      const st = displayState(r);
+      const name = r.folder_name || r.lead_name || r.lead_id;
+      const lan = r.account_no_lan || r.account_lan || "";
+      const sub = lan && lan !== name ? lan : r.lead_id;
+      // "not verified" is shown only when it is the whole story; beside a real problem the
+      // status already says "Needs review"
+      const rs = { ...reasonsOf(r) };
+      if (Object.keys(rs).some(k => k !== "unchecked")) delete rs.unchecked;
+      const attn = reasonChips(rs);
+      return `<tr data-id="${esc(r.lead_id)}" class="clickable st-row-${st}">
+          <td class="c-dossier"><div class="cd-name">${esc(name)}</div><div class="cd-sub mono">${esc(sub)}</div></td>
+          <td class="c-state">${stateBadge(st)}</td>
+          <td class="c-attn">${attn || (st === "extracted" || st === "reviewed" ? '<span class="rs-clear">All clear</span>' : '<span class="c-none">—</span>')}</td>
+          ${cols.map(c => renderCell(r, c)).join("")}
+        </tr>`;
     }).join("");
 
     $$("#leadsBody tr").forEach(tr => tr.onclick = () => openLead(tr.dataset.id));
@@ -1341,7 +1489,7 @@
   }
   function resetColFilters() {
     for (const k in COL_FILTERS) COL_FILTERS[k] = null;
-    state.script = "all";
+    state.attention.clear();
     state.missing = null;
     closeColFilter();
     renderFacets();
@@ -1632,27 +1780,265 @@ function formatFieldValue(k, v) {
   }
 
   /* ── lead drawer ───────────────────────── */
+  /* ── reviewing values in the drawer ─────────────────────────────────────────
+     Every value shows its verdict (trust.py) and can be confirmed as read, corrected, or put
+     back to what the model read — in the values table, and beside each page preview, where the
+     evidence is. A save goes to /api/legal/lead/<id>/field with the value the reviewer was
+     looking at, so a colleague's change in the meantime is refused rather than overwritten. */
+  const TRUST_CHIP = {
+    verified: ["Verified", "tr-ok", "Found in the document's own text — it can't have been misread"],
+    clear: ["Clear", "tr-ok", "Printed, on a good page, and the model read every character clearly"],
+    review: ["Needs review", "tr-review", ""],
+    unchecked: ["Not verified", "tr-unverified", "Extracted before legibility checks existed — a re-run verifies it"],
+    corrected: ["Corrected", "tr-fixed", ""],
+    confirmed: ["Confirmed", "tr-ok", ""],
+  };
+  let drawerCtx = null;       // {leadId, ed, assess} for the dossier on screen
+
+  function trustChip(t, corr) {
+    if (!t) return "";
+    const [label, cls, why] = TRUST_CHIP[t.state] || [t.state, "tr-unverified", ""];
+    let title = why;
+    if (t.state === "review") title = (t.reasons || []).map(r => `${REASON_LABEL[r] || r}: ${REASON_WHY[r] || ""}`).join("\n");
+    if ((t.state === "corrected" || t.state === "confirmed") && corr)
+      title = `${label} by ${corr.reviewer || "a reviewer"}${corr.ts ? " · " + String(corr.ts).replace("T", " ").slice(0, 16) : ""}`;
+    const reasons = t.state === "review" && (t.reasons || []).length
+      ? `<span class="tr-why">${esc((t.reasons || []).map(r => REASON_LABEL[r] || r).join(" · "))}</span>` : "";
+    return `<span class="tr-chip ${cls}" title="${esc(title)}">${esc(label)}</span>${reasons}`;
+  }
+
+  // the order a reviewer reads a dossier in: borrower, co-borrowers, guarantors, property, the rest
+  function valueOrder(a, b) {
+    const rank = (k) => {
+      if (k === "borrower_name") return [0, 0, 0];
+      if (k === "borrower_address") return [0, 0, 1];
+      const m = k.match(FAMILY_RE);
+      if (m) return [m[1] === "co_borrower" ? 1 : 2, +m[2], m[3] === "name" ? 0 : 1];
+      if (k.startsWith("property_")) return [3, propRank(k), 0];
+      return [4, 0, 0];
+    };
+    const ra = rank(a), rb = rank(b);
+    for (let i = 0; i < 3; i++) if (ra[i] !== rb[i]) return ra[i] - rb[i];
+    return a.localeCompare(b);
+  }
+
+  function drawerValueKeys(ed, assess) {
+    const keys = new Set(Object.keys(((assess || {}).trust || {}).fields || {}));
+    Object.keys(ed || {}).forEach(k => { if (k !== "account_no_lan" && isValueKey(k, ed[k]) && hasValue(ed, k)) keys.add(k); });
+    return [...keys].sort(valueOrder);
+  }
+
+  function valueNotes(key, value) {
+    const a = drawerCtx.assess;
+    const n = (a.field_notes || {})[key] || {};
+    const out = [];
+    if (n.relation) out.push(`<span class="vn">${esc(n.relation)}</span>`);
+    if (a.model_values && key in a.model_values && String(a.model_values[key] ?? "") !== String(value ?? ""))
+      out.push(`<span class="vn vn-model" title="What the model read, before a person corrected it">Model read: ${esc(a.model_values[key] || "(nothing)")}</span>`);
+    if (n.raw && n.raw !== value) out.push(`<span class="vn" title="${esc(n.raw)}">Cleaned from: ${esc(String(n.raw).slice(0, 90))}${String(n.raw).length > 90 ? "…" : ""}</span>`);
+    if (n.conflict) out.push(`<span class="vn vn-warn">${esc(n.conflict)}</span>`);
+    if (n.issue) out.push(`<span class="vn vn-warn">Model: ${esc(n.issue)}</span>`);
+    if ((n.variants || []).length) out.push(`<span class="vn">Also spelled: ${esc(n.variants.join(", "))}</span>`);
+    if (n.original) out.push(`<span class="vn" title="The text in its original script">Original: ${esc(n.original)}</span>`);
+    return out.length ? `<div class="vnotes">${out.join("")}</div>` : "";
+  }
+
+  function valueActions(key) {
+    const t = (((drawerCtx.assess.trust || {}).fields) || {})[key] || {};
+    const settled = t.state === "corrected" || t.state === "confirmed";
+    const trusted = t.state === "verified" || t.state === "clear";
+    return `<span class="va">` +
+      (!settled && !trusted ? `<button type="button" class="va-b" data-act="confirm" data-field="${esc(key)}" title="The value is right as read">✓ Confirm</button>` : "") +
+      `<button type="button" class="va-b" data-act="edit" data-field="${esc(key)}" title="Type the right value">Edit</button>` +
+      (settled ? `<button type="button" class="va-b" data-act="revert" data-field="${esc(key)}" title="Undo — back to what the model read">Undo</button>` : "") +
+      `</span>`;
+  }
+
+  function valueRowHtml(key) {
+    const { ed, assess } = drawerCtx;
+    const v = ed[key];
+    const t = (((assess.trust || {}).fields) || {})[key];
+    const corr = (assess.corrections || {})[key];
+    return `<tr class="vr vr-${t ? t.state : "none"}" data-field="${esc(key)}">
+        <td class="vr-k">${esc(formatFieldLabel(key))}</td>
+        <td class="vr-v"><div class="vr-text${isFinancialField(key) ? " mono" : ""}">${hasValue(ed, key) ? esc(v) : '<span class="c-none">—</span>'}</div>${valueNotes(key, v)}</td>
+        <td class="vr-t">${trustChip(t, corr)}</td>
+        <td class="vr-a">${valueActions(key)}</td>
+      </tr>`;
+  }
+
+  function reviewSectionHtml(j) {
+    const { ed, assess } = drawerCtx;
+    const trust = assess.trust || {};
+    const keys = drawerValueKeys(ed, assess);
+    const fields = trust.fields || {};
+    const nReview = keys.filter(k => (fields[k] || {}).state === "review").length;
+    const nFixed = keys.filter(k => ["corrected", "confirmed"].includes((fields[k] || {}).state)).length;
+    const lan = ed.account_no_lan || (j.lead || {}).account_lan || "";
+    const mentioned = assess.mentioned || [];
+    const extras = Object.entries(assess.extras || {});
+    return `
+      <div class="d-section dvr-sec">
+        <div class="dvr-head">
+          <div class="dvr-state">
+            <span class="dvr-count">${keys.length} value${keys.length === 1 ? "" : "s"}${nReview ? ` · <b>${nReview} need${nReview === 1 ? "s" : ""} review</b>` : ""}${nFixed ? ` · ${nFixed} checked by a person` : ""}</span>
+          </div>
+          ${lan ? `<span class="dvr-lan mono" title="Loan account number">${esc(lan)}</span>` : ""}
+        </div>
+        ${Object.keys(trust.reasons || {}).length ? `<div class="dvr-reasons">${reasonChips(trust.reasons || {}, 8)}</div>` : ""}
+        ${keys.length ? `<table class="vtable"><tbody>${keys.map(valueRowHtml).join("")}</tbody></table>`
+          : `<div class="dvr-empty">No values were extracted for this dossier.</div>`}
+        ${mentioned.length ? `
+          <details class="dvr-more"><summary>Also named in the documents, but not a party <span class="n">${mentioned.length}</span></summary>
+            <p class="dvr-note">Sellers, previous owners and witnesses in title deeds are often labelled as co-borrowers by the model. These people appeared only in such documents, once, and never next to the borrower — so they were kept out of the values.</p>
+            <ul class="dvr-list">${mentioned.map(m => `<li>${esc(m.name)} <span class="mono">p. ${esc((m.pages || []).join(", "))}</span>${m.read_as ? ` <span class="vn">read as ${esc(m.read_as)}</span>` : ""}</li>`).join("")}</ul>
+          </details>` : ""}
+        ${extras.length ? `
+          <details class="dvr-more"><summary>Returned but not asked for <span class="n">${extras.length}</span></summary>
+            <p class="dvr-note">The model returned these although the prompt didn't ask for them. They are kept as evidence and never become columns.</p>
+            <ul class="dvr-list">${extras.slice(0, 60).map(([k, v]) => `<li><b>${esc(k)}</b>: ${esc(typeof v === "object" ? JSON.stringify(v) : String(v)).slice(0, 200)}</li>`).join("")}</ul>
+          </details>` : ""}
+      </div>`;
+  }
+
+  // the controls beside a value read on a page — the same decision as in the values table
+  function pageFieldControls(key, pageValue) {
+    const { ed, assess } = drawerCtx;
+    const t = (((assess.trust || {}).fields) || {})[key];
+    if (!t && !(key in ed)) return "";
+    const dossierValue = ed[key];
+    const differs = hasValue(ed, key) && String(dossierValue) !== String(pageValue);
+    return `${differs ? `<div class="vnotes"><span class="vn" title="The dossier's value — another page's reading, or a correction">Dossier value: ${esc(dossierValue)}</span></div>` : ""}` +
+      `<div class="pf-ctl" data-field="${esc(key)}">${trustChip(t, (assess.corrections || {})[key])}${valueActions(key)}</div>`;
+  }
+
+  function openEditor(key, host) {
+    const { ed } = drawerCtx;
+    const current = ed[key] ?? "";
+    const long = String(current).length > 70 || /address|details|boundar/.test(key);
+    host.innerHTML = `
+      <div class="ved">
+        ${long ? `<textarea class="ved-in" rows="3">${esc(current)}</textarea>` : `<input class="ved-in" type="text" value="${esc(current)}">`}
+        <div class="ved-act">
+          <button type="button" class="btn solid small" data-ved="save">Save</button>
+          <button type="button" class="btn line small" data-ved="cancel">Cancel</button>
+          <span class="ved-hint">Enter to save · Esc to cancel${long ? " · Shift+Enter for a new line" : ""}</span>
+        </div>
+      </div>`;
+    const input = $(".ved-in", host);
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    const cancel = () => renderDrawerFromCtx();
+    const save = () => saveField(key, "correct", input.value, current);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cancel(); }   // cancel the edit, not the drawer
+      if (e.key === "Enter" && !(long && e.shiftKey)) { e.preventDefault(); save(); }
+    });
+    $('[data-ved="save"]', host).onclick = save;
+    $('[data-ved="cancel"]', host).onclick = cancel;
+  }
+
+  async function saveField(key, action, value, expected) {
+    const leadId = drawerCtx.leadId;
+    try {
+      const r = await fetch(`/api/legal/lead/${encodeURIComponent(leadId)}/field`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ field: key, action, value, expected }),
+      });
+      const res = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        toast(esc(res.error || `Couldn't save (HTTP ${r.status})`), "bad");
+        if (r.status === 409) await refreshDrawer();
+        return;
+      }
+      patchDashboardRow(leadId, key, res);
+      toast(action === "confirm" ? "Confirmed" : action === "revert" ? "Put back to what the model read" : "Saved", "ok", 1800);
+      await refreshDrawer();
+    } catch (e) {
+      toast("Couldn't save — check the connection and try again", "bad");
+    }
+  }
+
+  // the dashboard row changes in place, so the table and its counts agree with the drawer
+  function patchDashboardRow(leadId, key, res) {
+    const row = (allRows || []).find(r => r.lead_id === leadId);
+    if (!row) return;
+    if (res.value === null || res.value === undefined || res.value === "") delete row[key];
+    else row[key] = res.value;
+    row._trust = row._trust || { fields: {} };
+    row._trust.fields = row._trust.fields || {};
+    if (res.trust) row._trust.fields[key] = res.trust;
+    row._trust.state = res.lead_state;
+    row._trust.reasons = res.reasons || {};
+    renderFacets();
+    renderLeadRows();
+  }
+
+  function wireReview() {
+    const body = $("#drawerBody");
+    $$("[data-act]", body).forEach(b => b.onclick = (e) => {
+      e.stopPropagation();
+      const key = b.dataset.field, act = b.dataset.act;
+      const current = drawerCtx.ed[key] ?? "";
+      if (act === "confirm") return saveField(key, "confirm", null, current);
+      if (act === "revert") return saveField(key, "revert", null, current);
+      const host = b.closest(".vr") ? $(".vr-v", b.closest(".vr")) : b.closest(".pf-ctl");
+      if (host) openEditor(key, host);
+    });
+  }
+
+  // prev / next through the dossiers currently on screen — the review queue
+  function updateDrawerNav(leadId) {
+    const nav = $("#dNav");
+    if (!nav) return;
+    const i = visibleRows.findIndex(r => r.lead_id === leadId);
+    nav.hidden = i === -1 || visibleRows.length < 2;
+    if (i === -1) return;
+    $("#dPos").textContent = `${i + 1} / ${visibleRows.length}`;
+    $("#dPrev").disabled = i === 0;
+    $("#dNext").disabled = i === visibleRows.length - 1;
+  }
+  function stepDrawer(dir) {
+    if (!drawerCtx) return;
+    const i = visibleRows.findIndex(r => r.lead_id === drawerCtx.leadId);
+    const next = visibleRows[i + dir];
+    if (i !== -1 && next) openLead(next.lead_id);
+  }
+
+  let lastLeadPayload = null;
+  function renderDrawerFromCtx() {
+    if (!lastLeadPayload) return;
+    const body = $("#drawerBody");
+    const top = body ? body.scrollTop : 0;
+    renderDrawer(lastLeadPayload);
+    if (body) body.scrollTop = top;
+  }
+  async function refreshDrawer() {
+    if (!drawerCtx) return;
+    try {
+      const r = await fetch("/api/legal/lead/" + encodeURIComponent(drawerCtx.leadId));
+      if (!r.ok) return;
+      lastLeadPayload = await r.json();
+      renderDrawerFromCtx();
+    } catch (e) { /* the next open refreshes it */ }
+  }
+
   function renderDrawer(j) {
     const f = j.final || {};
     const lead = j.lead || {};
-    const status = liveStatus(lead.status, f.processing_status);
+    lastLeadPayload = j;
+    drawerCtx = { leadId: j.lead_id, ed: (lead.extracted_data && typeof lead.extracted_data === "object") ? lead.extracted_data : {},
+                  assess: j.assessment || {} };
     $("#dLeadId").textContent = j.lead_id;
-    const b = $("#dStatus"); b.className = "badge"; b.innerHTML = badge(status);
+    const b = $("#dStatus"); b.className = "";
+    b.innerHTML = stateBadge(displayState({ processing_status: lead.status || f.processing_status, _trust: drawerCtx.assess.trust }));
+    const tagHost = $("#dScriptTag"); if (tagHost) tagHost.innerHTML = "";
     $("#dRawLink").href = "/logs/legal/" + encodeURIComponent(j.lead_id);
 
     const raw = f.raw_extractions || {};
     const pageExtractions = Array.isArray(raw.page_extractions) ? raw.page_extractions : (Array.isArray(raw._page_extractions) ? raw._page_extractions : []);
     const leadMeta = raw.lead_metadata || {};
     const docs = j.documents || [];
-
-    // 1. High-Level Summary Banner
-    const summary = `
-      <div class="lead-summary">
-        <div class="ls-cell"><div class="ls-k">Account LAN</div><div class="ls-v mono">${esc(f.account_no_lan || lead.account_lan || "—")}</div></div>
-        <div class="ls-cell"><div class="ls-k">Primary Borrower</div><div class="ls-v">${esc(f.borrower_name || f.applicant_name || lead.lead_name || "—")}</div></div>
-        <div class="ls-cell"><div class="ls-k">Sanction Amount</div><div class="ls-v mono">${fmtINR(f.sanction_amount)}</div></div>
-        <div class="ls-cell"><div class="ls-k">Total Outstanding (TOS)</div><div class="ls-v mono" style="font-weight:700">${fmtINR(f.tos)}</div></div>
-      </div>`;
 
     // 1.5 Model Execution & Token Telemetry Banner
     const tel = f.telemetry || raw.telemetry || raw._telemetry || lead.telemetry || {};
@@ -1714,65 +2100,6 @@ function formatFieldValue(k, v) {
           <div class="meta-card"><div class="mc-k">Phase Timings</div><div class="mc-v mono" style="font-size:11px">${esc(timingStr)}</div></div>
         </div>
       </div>`;
-
-    // 2.5 Consolidated Dossier Extractions
-    const priorityCols = [
-      "borrower_name", "borrower_address",
-      "co_borrower_1_name", "co_borrower_1_address",
-      "co_borrower_2_name", "co_borrower_2_address",
-      "co_borrower_3_name", "co_borrower_3_address",
-      "applicant_name", "applicant_address",
-      "account_no_lan", "sanction_amount", "sanction_date", "disbursal_date", "roi_in_number", "npa_date",
-      "future_principal", "principal_overdue", "interest_overdue", "interest_on_termination",
-      "late_payment_penal", "cheque_bounce_inc_gst", "other_charges_inc_gst", 
-      "foreclosure_charges", "litigation_charges", "tos",
-      "mortgaged_property_detail_1", "directions", "property_owner_mortgagor"
-    ];
-
-    const customFields = (f.extracted_data && f.extracted_data.custom_fields) ? f.extracted_data.custom_fields : {};
-    const flatF = { ...f, ...customFields };
-    // internal bookkeeping never belongs in the value table — the page sections below show
-    // the per-page extractions, and the raw model output lives in the page preview modal
-    const NOT_A_VALUE = [
-      "lead_id", "status", "processing_status", "raw_extractions", "extracted_data", "telemetry",
-      "phase_timings", "updated_at", "created_at", "page_extractions", "cited_pages",
-      "field_scripts", "field_sources", "ocr_routes_used", "flags", "confidence_score", "is_test",
-      "summary", "raw_response", "raw_ocr_text", "ocr_route", "ocr_confidence", "page_number",
-      "mismatches",
-    ];
-    const allExtractKeys = Object.keys(flatF).filter(k =>
-      !k.startsWith("_") &&
-      !NOT_A_VALUE.includes(k) &&
-      !k.endsWith("_page_sources") &&
-      typeof flatF[k] !== "object" &&
-      flatF[k] != null && flatF[k] !== "" && flatF[k] !== "—"
-    );
-
-    const sortedExtractKeys = allExtractKeys.sort((a, b) => {
-      const idxA = priorityCols.indexOf(a);
-      const idxB = priorityCols.indexOf(b);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
-      return a.localeCompare(b);
-    });
-
-    let consolidatedHtml = "";
-    if (sortedExtractKeys.length > 0) {
-      consolidatedHtml = `
-        <div class="d-section" style="margin-top:20px;">
-          <h4>Consolidated Dossier Extractions <span class="n">${sortedExtractKeys.length} fields resolved</span></h4>
-          <table class="page-fields-table" style="width:100%; border-collapse:collapse; margin-top:12px; background:var(--surface); border:1px solid var(--line); border-radius:6px; overflow:hidden;">
-            <tbody>
-              ${sortedExtractKeys.map(k => `
-                <tr>
-                  <td class="pft-k" style="padding:10px 14px; border-bottom:1px solid var(--line-light); vertical-align:top; width:220px; font-weight:600;">${esc(formatFieldLabel(k))}</td>
-                  <td class="pft-v${isFinancialField(k) ? ' mono' : ''}" style="padding:10px 14px; border-bottom:1px solid var(--line-light); font-weight:500; ${k.toLowerCase().includes('address') ? 'white-space:normal; line-height:1.45;' : ''}">${formatFieldValue(k, flatF[k])}</td>
-                </tr>`).join("")}
-            </tbody>
-          </table>
-        </div>`;
-    }
 
     // 3. Document & Page-by-Page Extraction Provenance Section (ONLY EXACT PAGES WITH EXTRACTED DATA)
     const docMap = new Map();
@@ -1876,7 +2203,7 @@ function formatFieldValue(k, v) {
                         ${keys.map(fk => `
                           <tr${src[fk] === "text_layer" ? "" : ' class="pg-unconfirmed"'}>
                             <td class="pg-k">${esc(formatFieldLabel(fk))}</td>
-                            <td class="pg-v${isFinancialField(fk) ? " mono" : ""}">${formatFieldValue(fk, realFields[fk])}<span class="s-chip" data-prov="${p.page_number}|${esc(fk)}" hidden></span></td>
+                            <td class="pg-v${isFinancialField(fk) ? " mono" : ""}">${formatFieldValue(fk, realFields[fk])}${pageFieldControls(fk, realFields[fk])}</td>
                           </tr>`).join("")}
                       </tbody>
                     </table>
@@ -1942,7 +2269,14 @@ function formatFieldValue(k, v) {
       `;
     }
 
-    $("#drawerBody").innerHTML = summary + telemetryBanner + metaSection + consolidatedHtml + docProvenanceSection + eventLogsHtml;
+    const pipelineDetails = `
+      <details class="d-section d-more">
+        <summary>Pipeline details <span class="n">model, tokens, timings, event log</span></summary>
+        ${telemetryBanner}${metaSection}${eventLogsHtml}
+      </details>`;
+    $("#drawerBody").innerHTML = reviewSectionHtml(j) + docProvenanceSection + pipelineDetails;
+    wireReview();
+    updateDrawerNav(j.lead_id);
   }
 
   /* ── typed / handwritten chips ───────────────
@@ -1958,39 +2292,6 @@ function formatFieldValue(k, v) {
     unknown: ["Unchecked", "The page could not be checked"],
     none: ["No values", "The extraction returned no values for this dossier — open it to see why"],
   };
-
-  async function loadLeadProvenance(leadId) {
-    let data;
-    try {
-      const r = await fetch(`/api/legal/lead/${encodeURIComponent(leadId)}/provenance`);
-      if (!r.ok) return;
-      data = await r.json();
-    } catch (e) { return; }
-    if ($("#dLeadId").textContent !== leadId) return;      // the drawer moved on
-    const fields = data.fields || {};
-    $$("#drawerBody .s-chip[data-prov]").forEach(chip => {
-      const info = fields[chip.dataset.prov];
-      const key = (info && info.script) || "unknown";
-      const [label, why] = SCRIPT_LABEL[key] || SCRIPT_LABEL.unknown;
-      const blurry = !!(info && info.blurred);
-      chip.className = `s-chip s-${key === "printed" ? "typed" : key}${blurry ? " s-soft" : ""}`;
-      chip.textContent = blurry ? `${label} · blurry` : label;
-      const why2 = info && info.source === "model" ? `${why} (model)` : why;
-      chip.title = blurry ? `${why2}\n${SCRIPT_LABEL.blurred[1]}` : why2;
-      chip.hidden = false;
-    });
-    const c = data.counts || {};
-    const parts = [];
-    if (c.handwritten) parts.push(`${c.handwritten} handwritten`);
-    if (c.scanned) parts.push(`${c.scanned} scanned`);
-    const typed = (c.typed || 0) + (c.printed || 0);
-    if (typed) parts.push(`${typed} typed`);
-    if (c.blurred) parts.push(`${c.blurred} on blurry pages`);
-    const sum = $("#provSummary");
-    if (sum && parts.length) sum.textContent = parts.join(" · ");
-    const badgeHost = $("#dScriptTag");
-    if (badgeHost) badgeHost.innerHTML = scriptChip(data.tag, c.blurred > 0);
-  }
 
   /* Blur sits beside the script verdict rather than replacing it, so a dossier that is both
      handwritten and softly scanned still reads "Handwritten" — with a blur marker next to it. */
@@ -2008,7 +2309,6 @@ function formatFieldValue(k, v) {
       if (!r.ok) { toast("Lead not found: " + esc(id), "bad"); return; }
       renderDrawer(await r.json());
       $("#drawer").classList.add("open"); $("#scrim").classList.add("open");
-      loadLeadProvenance(id);
     } catch (e) { toast("Failed to open lead", "bad"); }
   }
   window.openLead = openLead;
@@ -2826,7 +3126,9 @@ function formatFieldValue(k, v) {
           <span class="ob-rank-n">${fmtInt(c.n)}/${fmtInt(finished)}</span>
         </button>`).join("")}</div>` : `<div class="ob-empty">No values extracted in this slice yet.</div>`);
     $$("#obCoverage [data-field]").forEach(b => b.onclick = () => {
-      state.missing = b.dataset.field;
+      // co-borrowers are one group on the dashboard: "co_borrower_2_name" means "co-borrower names"
+      const fam = b.dataset.field.match(FAMILY_RE);
+      state.missing = fam ? `${fam[1]}:${fam[3]}` : b.dataset.field;
       state.batchId = OB.batchId || null;
       switchView("dashboard");
       updateBatchFilterUI();
@@ -3312,9 +3614,15 @@ function formatFieldValue(k, v) {
     out["Lead ID"] = r.lead_id || "";
     out["Account LAN"] = r.account_no_lan || r.account_lan || "";   // same label the table uses
     out["Dossier"] = r.folder_name || r.lead_name || "";
-    out["Status"] = r.processing_status || "";
-    out["Source & quality"] = (SCRIPT_LABEL[r.script_tag] || SCRIPT_LABEL.unknown)[0]
-      + (r.has_blur ? " + blurry pages" : "");
+    // the same review information the table shows, so a spreadsheet says what was checked
+    const st = displayState(r);
+    out["Status"] = (STATE_META[st] || [st])[0];
+    out["Needs attention"] = reasonOrder(reasonsOf(r)).map(k => REASON_LABEL[k]).join("; ");
+    const tf = ((r._trust || {}).fields) || {};
+    out["Needs review"] = Object.keys(tf).filter(k => tf[k].state === "review")
+      .map(k => `${formatColName(k)} (${(tf[k].reasons || []).map(x => REASON_LABEL[x] || x).join(", ")})`).join("; ");
+    out["Corrected"] = Object.keys(tf).filter(k => tf[k].state === "corrected" || tf[k].state === "confirmed")
+      .map(k => `${formatColName(k)} (${tf[k].state})`).join("; ");
     out["Documents"] = r.total_documents != null
       ? `${r.processed_documents || 0} read of ${r.total_documents}` : "";
     out["Extracted at"] = r.updated_at ? String(r.updated_at).replace("T", " ").slice(0, 19) : "";
@@ -3338,7 +3646,7 @@ function formatFieldValue(k, v) {
     const records = rows.map(exportRecord);
     // the union of every column any dossier produced, so a value present on one row is never
     // dropped just because the row above it lacked that field
-    const FIRST = ["Lead ID", "Account LAN", "Dossier", "Status", "Source & quality", "Documents", "Extracted at"];
+    const FIRST = ["Lead ID", "Account LAN", "Dossier", "Status", "Needs attention", "Needs review", "Corrected", "Documents", "Extracted at"];
     const LAST = ["Tokens used", "Model"];
     const seen = new Set();
     records.forEach(rec => Object.keys(rec).forEach(k => seen.add(k)));
@@ -3439,16 +3747,11 @@ function formatFieldValue(k, v) {
     // export menu + field-coverage popover; any click elsewhere closes them
     wireMenu("#exportMenu", "#exportMenuBtn");
     wireMenu("#coverageMenu", "#coverageBtn");
+    wireMenu("#attentionMenu", "#attentionBtn");
+    wireMenu("#columnsMenu", "#columnsMenuBtn");
     document.addEventListener("click", (e) => { if (!e.target.closest(".fmenu")) closeMenus(); });
 
-    $$("#statusChips .chip").forEach(c => {
-      c.onclick = () => {
-        $$("#statusChips .chip").forEach(x => x.classList.remove("active"));
-        c.classList.add("active");
-        state.status = c.dataset.status;
-        loadLeads();
-      };
-    });
+    // status segments are wired where they are rendered (renderStatusSegments)
 
     // Header column filter dropdowns — delegated, because the head is rebuilt per load
     const thead = $("#dynamicTheadRow");
@@ -3461,9 +3764,18 @@ function formatFieldValue(k, v) {
       });
     }
 
-    // Drawer close
+    // Drawer close, and stepping through the dossiers on screen (the review queue)
     $("#drawerClose").onclick = closeDrawer;
     $("#scrim").onclick = closeDrawer;
+    $("#dPrev").onclick = () => stepDrawer(-1);
+    $("#dNext").onclick = () => stepDrawer(1);
+    document.addEventListener("keydown", (e) => {
+      if (!$("#drawer").classList.contains("open") || e.altKey || e.ctrlKey || e.metaKey) return;
+      if (e.target.closest && e.target.closest("input, textarea, select, [contenteditable]")) return;
+      if ($("#pageModal") && $("#pageModal").classList.contains("open")) return;
+      if (e.key === "j" || e.key === "J") { e.preventDefault(); stepDrawer(1); }
+      else if (e.key === "k" || e.key === "K") { e.preventDefault(); stepDrawer(-1); }
+    });
 
     // a page preview opens that page full size, with its raw extraction
     $("#drawerBody").addEventListener("click", (e) => {

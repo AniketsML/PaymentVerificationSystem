@@ -133,13 +133,21 @@ def clean_name(value: str) -> CleanName:
                      flags=flags, original=original)
 
 
+# a labelled segment that describes the person, not the place: "Caste: Samanya", "Age - 32"
+_ADDR_NOT_PLACE = re.compile(
+    r"^\s*(?:caste|jati|religion|nationality|occupation|age|aged|dob|d\.o\.b|mobile|mob|phone|ph|"
+    r"email|e-mail|pan|aadhaa?r|gender|sex)\b\s*(?:no\.?)?\s*[:\-–]", re.I)
+
+
 def clean_address(value: str) -> CleanName:
-    """Addresses keep their commas; only a leading label is removed."""
+    """Addresses keep their commas; a leading label is removed, and so are labelled segments that
+    describe the person rather than the place ("…, Sehore M.P, Caste: Samanya, Nationality: Indian")."""
     original = str(value or "")
     s = re.sub(r"\s+", " ", original).strip()
     s = re.sub(r"^\s*(?:address|addr|add|residential address|permanent address)\s*[:\-–]\s*", "", s, flags=re.I)
     s = re.sub(r"^\s*(?:r\s*/\s*o|resident of|residing at)\s*[:\-–]?\s*", "", s, flags=re.I)
-    s = _tidy(s)
+    parts = [p for p in s.split(",") if not _ADDR_NOT_PLACE.match(p)]
+    s = _tidy(",".join(parts))
     flags = ["not in English script"] if _NON_LATIN.search(s) else []
     return CleanName(name=s or _tidy(original), flags=flags, original=original)
 

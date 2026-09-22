@@ -294,8 +294,9 @@ def consolidate(records: List[dict], schema=None,
         rivals = [g for g in ranked[1:]
                   if not (_norm_value(g[0][0]) in _norm_value(value) or _norm_value(value) in _norm_value(g[0][0]))]
         if rivals:
-            note["conflict"] = "; ".join(f"{str(g[0][0])[:60]} (p. {', '.join(str(p) for _, p, _ in g if p)})"
-                                         for g in rivals[:3])
+            note["conflict"] = "; ".join(
+                f"{str(g[0][0])[:60]} (p. {', '.join(str(p) for p in sorted({p for _, p, _ in g if p}))})"
+                for g in rivals[:3])
         out.notes[k] = note
     return out
 

@@ -58,7 +58,14 @@ def _rebuild(ed: Dict[str, Any], prompt: str, doc_paths: Dict[str, str]) -> Tupl
         base = {k: rec.get(k) for k in ("document_id", "filename", "ocr_route", "telemetry",
                                         "raw_response", "raw_ocr_text")}
         new_recs, rec_extras, _ = _ingest_batch(reply, schema, [page], base)
+        # A second run re-ingests values an earlier run already cleaned: there is nothing left to
+        # clean, so what the earlier run learned (the original text, the relation) must be carried
+        # forward rather than lost. Notes from this run win where both say something.
+        old_notes = rec.get("field_notes") or {}
         for nr in new_recs:
+            for fk in nr.get("fields", {}):
+                if old_notes.get(fk):
+                    nr.setdefault("field_notes", {})[fk] = {**old_notes[fk], **nr.get("field_notes", {}).get(fk, {})}
             stats["names_cleaned"] += sum(1 for n in nr.get("field_notes", {}).values() if n.get("raw"))
         records.extend(new_recs)
         for k, v in rec_extras.items():

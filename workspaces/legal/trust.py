@@ -137,7 +137,9 @@ def field_trust(ed: Dict[str, Any], key: str, quality: Dict[str, Any]) -> Tuple[
 
     reasons = [r for r in REASONS if r in reasons]            # canonical order, de-duplicated
     if any(r in PROBLEMS for r in reasons):
-        return REVIEW, reasons
+        # "not verified" is the absence of a check, not a problem — beside a real problem it only
+        # adds noise, and counting it there would inflate the older-run tally
+        return REVIEW, [r for r in reasons if r != "unchecked"]
     if reasons:                                                # only "unchecked"
         return UNCHECKED, reasons
     return (VERIFIED if verified else CLEAR), []

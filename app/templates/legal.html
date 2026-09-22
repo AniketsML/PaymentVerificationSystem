@@ -188,15 +188,9 @@
                what's active shows as removable chips -->
           <div class="fbar">
             <div class="fbar-top">
-              <div class="seg" id="statusChips" role="tablist" aria-label="Status">
-                <button type="button" class="chip seg-b active" data-status="all">All<span class="seg-n" data-count="total"></span></button>
-                <button type="button" class="chip seg-b" data-status="completed"><i class="sdot d-ok"></i>Completed<span class="seg-n" data-count="completed"></span></button>
-                <button type="button" class="chip seg-b" data-status="missing_documents"><i class="sdot d-warn"></i>Missing docs<span class="seg-n" data-count="missing_documents"></span></button>
-                <button type="button" class="chip seg-b" data-status="partial"><i class="sdot d-serious"></i>Partial<span class="seg-n" data-count="partial"></span></button>
-                <button type="button" class="chip seg-b" data-status="pending"><i class="sdot d-neutral"></i>Queued<span class="seg-n" data-count="pending"></span></button>
-                <button type="button" class="chip seg-b" data-status="processing"><i class="sdot d-accent"></i>Processing<span class="seg-n" data-count="processing"></span></button>
-                <button type="button" class="chip seg-b" data-status="failed"><i class="sdot d-bad"></i>Failed<span class="seg-n" data-count="failed"></span></button>
-              </div>
+              <!-- status segments are rendered from the data (legal.js renderStatusSegments): the
+                   pipeline's state while a dossier runs, its review state once it is done -->
+              <div class="seg" id="statusChips" role="tablist" aria-label="Status"></div>
               <div class="fbar-end">
                 <span class="count" id="tableCount">—</span>
                 <div class="fmenu" id="exportMenu">
@@ -209,12 +203,29 @@
                     <button type="button" role="menuitem" id="tableExportExcelBtn">Excel<span>.xls</span></button>
                   </div>
                 </div>
+                <div class="fmenu" id="columnsMenu">
+                  <button type="button" class="btn line small" id="columnsMenuBtn" aria-haspopup="dialog" aria-expanded="false" title="Choose the columns shown">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h16M9 3v18M15 3v18"/></svg>
+                    Columns
+                  </button>
+                  <div class="fpop fpop-cols hidden" id="columnsPop" role="dialog" aria-label="Columns">
+                    <div class="fpop-head"><b>Columns</b><span>Dossier, status and what needs attention are always shown.</span></div>
+                    <div class="collist" id="columnsList"></div>
+                  </div>
+                </div>
               </div>
             </div>
             <div class="fbar-sub">
-              <div class="fgroup">
-                <span class="fgroup-k">Source &amp; quality</span>
-                <div class="seg sm" id="scriptFacets" role="radiogroup" aria-label="Typed or handwritten"></div>
+              <div class="fmenu" id="attentionMenu">
+                <button type="button" class="fpill" id="attentionBtn" aria-haspopup="dialog" aria-expanded="false">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                  Needs attention<span class="fpill-n" id="attentionSummary"></span>
+                  <svg class="fpill-caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+                <div class="fpop fpop-att hidden" id="attentionPop" role="dialog" aria-label="Needs attention">
+                  <div class="fpop-head"><b>Needs attention</b><span>Why values weren't trusted automatically. Pick reasons to see only those dossiers.</span></div>
+                  <div class="attlist" id="attentionList"></div>
+                </div>
               </div>
               <div class="fmenu" id="coverageMenu">
                 <button type="button" class="fpill" id="coverageBtn" aria-haspopup="dialog" aria-expanded="false">
@@ -235,10 +246,7 @@
           <div class="tablewrap">
             <table>
               <thead>
-                <tr id="dynamicTheadRow">
-                  <th class="th-filter" data-col="lead_id">Lead ID<span class="th-caret" aria-hidden="true">▾</span></th>
-                  <th class="th-filter" data-col="processing_status">Status<span class="th-caret" aria-hidden="true">▾</span></th>
-                </tr>
+                <tr id="dynamicTheadRow"></tr>
               </thead>
               <tbody id="leadsBody"></tbody>
             </table>
@@ -413,6 +421,12 @@
         <span class="dh-tags"><span class="badge" id="dStatus">—</span><span id="dScriptTag"></span></span>
       </div>
       <div class="dh-actions">
+        <!-- step through the dossiers on screen without closing — the review queue, with J / K -->
+        <div class="dh-nav" id="dNav" hidden>
+          <button class="btn line small" id="dPrev" aria-label="Previous dossier" title="Previous (K)">‹</button>
+          <span class="dh-pos mono" id="dPos"></span>
+          <button class="btn line small" id="dNext" aria-label="Next dossier" title="Next (J)">›</button>
+        </div>
         <a class="btn line small" id="dRawLink" target="_blank">Raw JSON</a>
         <button class="btn line small" id="drawerClose" aria-label="Close">✕</button>
       </div>

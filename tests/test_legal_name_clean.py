@@ -57,6 +57,13 @@ def test_addresses_keep_their_commas():
     assert c.name == "12, Gandhi Road, Jaipur 302001"
 
 
+def test_an_address_loses_what_describes_the_person_not_the_place():
+    # a real address from the corpus
+    c = clean_address("P.A. Pahadi Dham, Tehsil Mehar, District Seoni, Caste: Samanya, Nationality: Indian")
+    assert c.name == "P.A. Pahadi Dham, Tehsil Mehar, District Seoni"
+    assert "Caste" in c.original
+
+
 @pytest.mark.parametrize("a,b,same", [
     ("Bharat Lal", "BHARAT LAL BEER", True),         # a dropped surname
     ("Firoz Bagwan", "FIROZ BAGWAN", True),
