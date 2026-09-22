@@ -1965,11 +1965,8 @@ function formatFieldValue(k, v) {
     if (!row) return;
     if (res.value === null || res.value === undefined || res.value === "") delete row[key];
     else row[key] = res.value;
-    row._trust = row._trust || { fields: {} };
-    row._trust.fields = row._trust.fields || {};
-    if (res.trust) row._trust.fields[key] = res.trust;
-    row._trust.state = res.lead_state;
-    row._trust.reasons = res.reasons || {};
+    // the server re-assessed the whole dossier; take all of it, never a mix of fresh and stale
+    if (res.lead_trust) row._trust = res.lead_trust;
     renderFacets();
     renderLeadRows();
   }

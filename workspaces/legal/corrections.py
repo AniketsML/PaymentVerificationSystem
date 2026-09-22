@@ -176,7 +176,9 @@ def record(lead_id: str, field: str, action: str, value: Any = None, expected: A
     return {"lead_id": lead_id, "field": field, "action": action, "value": ed.get(field),
             "model_value": ed.get("_model_values", {}).get(field),
             "trust": ed["_trust"]["fields"].get(field), "lead_state": ed["_trust"]["state"],
-            "reasons": ed["_trust"]["reasons"]}
+            "reasons": ed["_trust"]["reasons"],
+            # the whole verdict, so a client patching its copy never mixes fresh and stale fields
+            "lead_trust": ed["_trust"]}
 
 
 def latest_in(c, lead_id: str) -> Dict[str, Dict[str, Any]]:

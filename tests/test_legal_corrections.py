@@ -155,3 +155,10 @@ def test_the_review_metrics_count_what_people_checked():
     fields = {f["field"]: f for f in rv["corrections"]["fields"]}
     assert fields["co_borrower_n_name"]["confirmed"] == 1          # co-borrowers counted as one field
     assert rv["states"] == {"reviewed": 1}
+
+
+def test_a_save_returns_the_whole_verdict():
+    from workspaces.legal.corrections import record
+    res = record(LEAD, "borrower_name", "corrected", "Ravi Kumar", expected="Ravi Kumr")
+    assert set(res["lead_trust"]["fields"]) == {"borrower_name", "co_borrower_1_name"}
+    assert res["lead_trust"]["state"] == res["lead_state"]
