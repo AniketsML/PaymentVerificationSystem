@@ -31,6 +31,7 @@ from workspaces.legal.ocr import LegalVLMClient
 
 from workspaces.legal.logger import PgLegalLeadLogger
 from workspaces.legal.jobs import update_document_status, update_lead_doc_counts
+from workspaces.legal.meta import is_meta_key as _is_meta_key
 
 _LAN_RE = re.compile(settings.ACCOUNT_LAN_PATTERN, re.IGNORECASE)
 
@@ -449,6 +450,10 @@ def _normalize_extracted_fields(data: Dict[str, Any]) -> Dict[str, Any]:
     # 3. Process remaining keys from data
     for k, v in data.items():
         if k.startswith("_") or k.endswith("_page_sources") or k in ("borrower", "primary_borrower", "applicant", "co_borrowers", "co_borrower", "co_applicants", "co_applicant", "borrower_details", "co_borrower_details", "details_of_borrower", "details_of_co_borrower", "details_of_the_borrower", "borrowers", "cited_pages", "field_page_sources"):
+            continue
+        # the model's bookkeeping is never a value — spelled without its underscore, a nested
+        # note like field_scripts used to be flattened into "field_scripts_borrower_name" columns
+        if _is_meta_key(k):
             continue
 
         clean_k = k.strip().lower().replace("-", "_").replace(" ", "_")

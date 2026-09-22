@@ -418,12 +418,13 @@ class PgLegalLeadLogger:
                 if "account_no_lan" not in merged and (d.get("account_no_lan") or d.get("account_lan")):
                     merged["account_no_lan"] = d.get("account_no_lan") or d.get("account_lan")
 
+                from workspaces.legal.pipeline import _is_meta_key
                 for key, val in merged.items():
                     if key not in d and not key.startswith("_") and not key.endswith("_page_sources") and key not in (
                         "page_extractions", "telemetry", "borrower_details", "co_borrower_details",
                         "details_of_borrower", "details_of_co_borrower", "details_of_the_borrower",
                         "borrower", "co_borrowers", "co_applicants"
-                    ) and not key.startswith("telemetry_"):
+                    ) and not key.startswith("telemetry_") and not _is_meta_key(key):
                         if not isinstance(val, (dict, list)):
                             d[key] = val
                         

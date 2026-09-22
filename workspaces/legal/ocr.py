@@ -23,6 +23,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image
 
+# The model does not always spell its bookkeeping with the leading underscore it was asked for;
+# canonical_meta moves "field_scripts" to "_field_scripts" etc. at parse time. See meta.py.
+from workspaces.legal.meta import META_KEYS, canonical_meta as _canonical_meta  # noqa: F401
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -39,21 +43,21 @@ def _parse_json(raw: str) -> Dict[str, Any]:
     """Robustly parse JSON from LLM output (handles code fences, embedded text)."""
     raw = raw.strip()
     try:
-        return json.loads(raw)
+        return _canonical_meta(json.loads(raw))
     except json.JSONDecodeError:
         pass
     # Try markdown code fences
     m = re.search(r"```(?:json)?\s*\n?(\{.*?\})\s*```", raw, re.DOTALL)
     if m:
         try:
-            return json.loads(m.group(1))
+            return _canonical_meta(json.loads(m.group(1)))
         except json.JSONDecodeError:
             pass
     # Try finding raw JSON object
     start, end = raw.find("{"), raw.rfind("}")
     if start != -1 and end > start:
         try:
-            return json.loads(raw[start:end + 1])
+            return _canonical_meta(json.loads(raw[start:end + 1]))
         except json.JSONDecodeError:
             pass
     return {"_parse_error": True, "_raw_text": raw[:500]}

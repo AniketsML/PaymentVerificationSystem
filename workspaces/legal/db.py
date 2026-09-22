@@ -288,7 +288,53 @@ def init_schema() -> None:
                    AND d.processing_status = 'pending'
                    AND l.status IN ('completed', 'partial', 'missing_documents', 'failed');
             """)
+            _strip_flattened_meta(conn)
         _schema_ready = True
+
+
+# rows written before the model's bookkeeping was canonicalised at parse time can carry it as
+# value-looking keys ("field_scripts_borrower_name"); those showed up as columns and CSV headers
+_FLATTENED_RE = r'"(field_scripts|field_sources|field_page_sources|field_evidence|cited_pages)_'
+
+
+def _strip_flattened_meta(conn) -> int:
+    """Remove flattened bookkeeping from stored extractions. Idempotent: once a row is clean the
+    guard query no longer selects it, so on an already-clean database this is one cheap scan."""
+    from psycopg.types.json import Jsonb
+    from workspaces.legal.meta import strip_flattened
+
+    fixed = 0
+    rows = conn.execute(
+        "SELECT lead_id, extracted_data FROM legal_leads WHERE extracted_data::text ~ %s",
+        (_FLATTENED_RE,)).fetchall()
+    for r in rows:
+        ed = r["extracted_data"] or {}
+        n = strip_flattened(ed)
+        for key in ("_page_extractions", "page_extractions"):
+            for px in ed.get(key) or []:
+                if isinstance(px, dict):
+                    # the page's own per-field maps mirror the field names, leaked ones included
+                    for part in ("fields", "field_sources", "field_scripts"):
+                        n += strip_flattened(px.get(part) or {})
+        if n:
+            conn.execute("UPDATE legal_leads SET extracted_data = %s WHERE lead_id = %s",
+                         (Jsonb(ed), r["lead_id"]))
+            fixed += 1
+    rows = conn.execute(
+        "SELECT lead_id, raw_extractions FROM legal_lead_results WHERE raw_extractions::text ~ %s",
+        (_FLATTENED_RE,)).fetchall()
+    for r in rows:
+        raw = r["raw_extractions"] or {}
+        n = strip_flattened(raw)
+        for key in ("_page_extractions", "page_extractions"):
+            for px in raw.get(key) or []:
+                if isinstance(px, dict):
+                    for part in ("fields", "field_sources", "field_scripts"):
+                        n += strip_flattened(px.get(part) or {})
+        if n:
+            conn.execute("UPDATE legal_lead_results SET raw_extractions = %s WHERE lead_id = %s",
+                         (Jsonb(raw), r["lead_id"]))
+    return fixed
 
 
 def purge_expired_legal_test_data(ttl_days: int = 7) -> Dict[str, int]:
