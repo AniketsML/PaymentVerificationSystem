@@ -201,6 +201,27 @@ CREATE TABLE IF NOT EXISTS legal_field_provenance (
 );
 CREATE INDEX IF NOT EXISTS idx_legal_provenance_tag ON legal_field_provenance(tag);
 
+-- The closed field list derived from a prompt (field_schema.py). One row per distinct prompt, so
+-- every dossier of a run — and a re-run months later — gets exactly the same columns, even though
+-- the prompt analyzer behind it is a model call that could answer differently each time.
+CREATE TABLE IF NOT EXISTS legal_run_schemas (
+    prompt_hash TEXT PRIMARY KEY,
+    prompt      TEXT,
+    schema      JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- A dossier's stored extraction as it was before a data migration rewrote it, so every migration
+-- of extracted values can be undone (backfill.restore). One row per dossier per migration.
+CREATE TABLE IF NOT EXISTS legal_extraction_snapshots (
+    lead_id     TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    data        JSONB NOT NULL,
+    results     JSONB,
+    taken_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (lead_id, reason)
+);
+
 -- CSV manifest intake: one row per upload of a link sheet, so the fetch phase is visible
 -- (and a link that could not be downloaded is never silently missing).
 CREATE TABLE IF NOT EXISTS legal_manifest_runs (

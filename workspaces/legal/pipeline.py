@@ -209,6 +209,110 @@ def _doc_matches_targets(doc: dict, target_docs: List[str]) -> bool:
     return False
 
 
+_NAME_KEY = re.compile(r"^(borrower|co_borrower_\d+|guarantor_\d+|property_owner)(_name)?$")
+_ADDR_KEY = re.compile(r"^(borrower|co_borrower_\d+|guarantor_\d+)_address$")
+
+
+def _ingest_batch(extracted: Dict[str, Any], schema, chunk_pages: List[int], base: Dict[str, Any]
+                  ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str]:
+    """One model reply -> page records. Returns (records, extras, empty_reason).
+
+    Every value is filed under the schema's canonical key, names are cleaned (the original kept in
+    `field_notes`), the lender filter runs on the CLEANED value so it judges what will be shown,
+    and each field carries the model's own evidence: page, script, legibility, relation, original.
+    `empty_reason` is set when nothing usable survived, and says why."""
+    from workspaces.legal.field_schema import canonical_key, conform, validate
+    from workspaces.legal.name_clean import clean_address, clean_name
+
+    evidence = extracted.pop("_field_evidence", None) or {}
+    legacy_pages = extracted.pop("_field_page_sources", None) or {}
+    legacy_scripts = extracted.pop("_field_scripts", None) or {}
+    cited = extracted.pop("_cited_pages", None) or []
+    for k in list(extracted.keys()):                    # "borrower_name_page_sources": "33"
+        if k.endswith("_page_sources"):
+            val = str(extracted.pop(k) or "").split(",")[0].strip()
+            if val.isdigit():
+                legacy_pages.setdefault(k[:-len("_page_sources")], int(val))
+    evidence = evidence if isinstance(evidence, dict) else {}
+    legacy_pages = legacy_pages if isinstance(legacy_pages, dict) else {}
+    legacy_scripts = legacy_scripts if isinstance(legacy_scripts, dict) else {}
+
+    def canon(k: str) -> str:
+        return (schema.canonical(k) if schema is not None and not schema.is_empty() else None) \
+            or canonical_key(k) or k
+
+    ev: Dict[str, Dict[str, Any]] = {}
+    for k, v in evidence.items():
+        if isinstance(v, dict):
+            ev.setdefault(canon(k), {}).update({kk: vv for kk, vv in v.items() if vv not in (None, "")})
+    for k, v in legacy_pages.items():
+        ev.setdefault(canon(k), {}).setdefault("page", v)
+    for k, v in legacy_scripts.items():
+        ev.setdefault(canon(k), {}).setdefault("script", v)
+
+    norm = _normalize_extracted_fields(extracted)
+    if not norm:
+        return [], {}, "model returned no values"
+    kept, extras = conform(norm, schema)
+    if not kept:
+        return [], extras, "returned only fields the prompt did not ask for"
+
+    notes: Dict[str, Dict[str, Any]] = {}
+    for k in list(kept):
+        v = kept[k]
+        if not isinstance(v, str):
+            continue
+        is_name = bool(_NAME_KEY.match(k)) or (schema is not None and schema.kind(k) == "name")
+        is_addr = bool(_ADDR_KEY.match(k)) or (schema is not None and schema.kind(k) == "address")
+        if not is_name and not is_addr:
+            fmt = validate(k, v, schema)
+            if fmt:
+                notes[k] = {"flags": fmt}
+            continue
+        if is_name:
+            cn = clean_name(v)
+            note = {"relation": cn.relation or str((ev.get(k) or {}).get("relation") or ""),
+                    "dropped": cn.dropped, "flags": cn.flags}
+        elif is_addr:
+            cn = clean_address(v)
+            note = {"flags": cn.flags}
+        else:
+            continue
+        if cn.changed:
+            note["raw"] = cn.original
+        note = {nk: nv for nk, nv in note.items() if nv}
+        if note:
+            notes[k] = note
+        kept[k] = cn.name
+        # judge the value that will be shown, not the clause it was cut from
+        if (is_name or is_addr) and _is_institutional_lender(cn.name):
+            kept.pop(k)
+            notes.pop(k, None)
+            extras[f"{k} (lender, filtered)"] = v
+    if not kept:
+        return [], extras, "only lender / bank details found — filtered out"
+
+    cited_in_chunk = [int(p) for p in cited if str(p).isdigit() and int(p) in chunk_pages]
+    fallback_page = cited_in_chunk[0] if cited_in_chunk else chunk_pages[0]
+    by_page: Dict[int, Dict[str, Any]] = {}
+    for k, v in kept.items():
+        page = (ev.get(k) or {}).get("page")
+        page = int(page) if str(page).isdigit() and int(page) in chunk_pages else fallback_page
+        rec = by_page.get(page)
+        if rec is None:
+            rec = by_page[page] = {**base, "page_number": page, "fields": {}, "field_scripts": {},
+                                   "field_evidence": {}, "field_notes": {}, "mismatches": [],
+                                   "ocr_confidence": 1.0}
+        rec["fields"][k] = v
+        if ev.get(k):
+            rec["field_evidence"][k] = ev[k]
+            if ev[k].get("script"):
+                rec["field_scripts"][k] = ev[k]["script"]
+        if notes.get(k):
+            rec["field_notes"][k] = notes[k]
+    return [by_page[p] for p in sorted(by_page)], extras, ""
+
+
 def _get_priority_pages_for_type(doc_type: str, page_count: int) -> List[int]:
     if page_count <= 1: return [0]
     dt = doc_type.lower()
@@ -598,6 +702,19 @@ def process_lead(
     except Exception as e:
         sys.stderr.write(f"[pipeline] Planner failed: {e}\n")
         extraction_plan = {}
+        plan_obj = None
+
+    # The run's closed field list: the only keys the model may return, and the dashboard's
+    # columns. Cached per prompt, so every dossier of a run gets exactly the same schema.
+    from workspaces.legal.field_schema import RunSchema, schema_for_prompt
+    try:
+        run_schema = schema_for_prompt(extraction_prompt, plan_obj) if (extraction_prompt or "").strip() \
+            else RunSchema()
+    except Exception as e:  # noqa: BLE001 — never lose a run over the schema; fall back to open
+        sys.stderr.write(f"[pipeline] schema unavailable, extracting without one: {e}\n")
+        run_schema = RunSchema()
+    schema_block = run_schema.prompt_block() if not run_schema.is_empty() else ""
+    extras_seen: Dict[str, Any] = {}
 
     processed_docs, failed_docs, skipped_docs = 0, 0, 0
     raw_extractions: Dict[str, Any] = {}
@@ -725,7 +842,8 @@ def process_lead(
                     heading_hint=extraction_plan.get("heading", ""),
                     headings=extraction_plan.get("headings", []),
                     keywords=extraction_plan.get("keywords", []),
-                    total_pages=page_count
+                    total_pages=page_count,
+                    schema_block=schema_block,
                 )
                 batch = {"document_id": doc_id, "filename": filename,
                          "pages": [chunk_page_nums[0], chunk_page_nums[-1]],
@@ -752,124 +870,21 @@ def process_lead(
                     doc_err += 1
                     continue
 
-                # Capture provenance metadata
-                cited_pages = extracted.pop("_cited_pages", [])
-                field_page_sources = extracted.pop("_field_page_sources", {}) or {}
-                # how each value appears on the page (handwritten / printed) — absent on
-                # runs extracted before this was asked for, which read as "unknown".
-                field_scripts = extracted.pop("_field_scripts", {}) or {}
-                if not isinstance(field_scripts, dict):
-                    field_scripts = {}
-
-                # Also capture flat keys like borrower_name_page_sources
-                for k in list(extracted.keys()):
-                    if k.endswith("_page_sources"):
-                        val = extracted.pop(k)
-                        base_field = k[:-len("_page_sources")]
-                        if val and base_field not in field_page_sources:
-                            try:
-                                p_str = str(val).split(",")[0].strip()
-                                if p_str.isdigit():
-                                    field_page_sources[base_field] = int(p_str)
-                            except Exception:
-                                pass
-
-                # Normalize extracted fields
-                norm_fields = _normalize_extracted_fields(extracted)
-                if not norm_fields:
-                    record_batch(batch, "model returned no values", "EMPTY", meta, raw=raw_resp)
+                # file the reply: canonical keys, clean names, evidence per field (see _ingest_batch)
+                batch_records, batch_extras, empty_reason = _ingest_batch(
+                    extracted, run_schema, chunk_page_nums,
+                    {"document_id": doc_id, "filename": filename, "ocr_route": route,
+                     "telemetry": meta, "raw_response": raw_resp, "raw_ocr_text": raw_resp})
+                for ek, evv in batch_extras.items():
+                    extras_seen.setdefault(ek, evv)
+                if empty_reason:
+                    record_batch(batch, empty_reason, "EMPTY", meta, raw=raw_resp)
                     doc_empty += 1
                     continue
-
-                # Filter out institutional lenders/financing entities from borrower fields
-                clean_norm_fields = {}
-                for fk, fv in norm_fields.items():
-                    if isinstance(fv, str):
-                        if ("borrower" in fk or fk in ("applicant_name", "applicant_address")) and _is_institutional_lender(fv):
-                            continue
-                        if "address" in fk and _is_institutional_lender(fv):
-                            continue
-                    clean_norm_fields[fk] = fv
-                norm_fields = clean_norm_fields
-                if not norm_fields:
-                    record_batch(batch, "only lender / bank details found — filtered out", "EMPTY", meta, raw=raw_resp)
-                    doc_empty += 1
-                    continue
-
-                # Record page_extractions with EXACT pages where data was found
-                if isinstance(field_page_sources, dict) and field_page_sources:
-                    by_page = {}
-                    for fk, fv in norm_fields.items():
-                        src_p = field_page_sources.get(fk)
-                        if src_p is None:
-                            for spk, spv in field_page_sources.items():
-                                if spk in fk or fk in spk:
-                                    src_p = spv
-                                    break
-                        try:
-                            src_p_int = int(src_p) if src_p is not None else None
-                        except (ValueError, TypeError):
-                            src_p_int = None
-
-                        if not src_p_int and cited_pages:
-                            try:
-                                src_p_int = int(cited_pages[0])
-                            except Exception:
-                                src_p_int = chunk_page_nums[0]
-                        elif not src_p_int:
-                            src_p_int = chunk_page_nums[0]
-
-                        # Clamping / reconciliation: Ensure src_p_int belongs to current chunk
-                        if src_p_int not in chunk_page_nums and chunk_page_nums:
-                            src_p_int = chunk_page_nums[0]
-
-                        by_page.setdefault(src_p_int, {})[fk] = fv
-
-                    for p_num, p_fields in by_page.items():
-                        if p_fields:
-                            page_extractions.append({
-                                "document_id": doc_id,
-                                "filename": filename,
-                                "page_number": p_num,
-                                "fields": p_fields,
-                                "field_scripts": field_scripts,
-                                "ocr_route": route,
-                                "telemetry": meta,
-                                "mismatches": [],
-                                "raw_response": raw_resp,
-                                "raw_ocr_text": raw_resp,
-                                "ocr_confidence": 1.0
-                            })
-                else:
-                    target_cited = []
-                    if isinstance(cited_pages, list):
-                        for p in cited_pages:
-                            try:
-                                p_int = int(p)
-                                if p_int in chunk_page_nums:
-                                    target_cited.append(p_int)
-                            except Exception:
-                                pass
-                    if not target_cited:
-                        target_cited = [chunk_page_nums[0]]
-
-                    for p_num in target_cited:
-                        page_extractions.append({
-                            "document_id": doc_id,
-                            "filename": filename,
-                            "page_number": p_num,
-                            "fields": norm_fields,
-                            "field_scripts": field_scripts,
-                            "ocr_route": route,
-                            "telemetry": meta,
-                            "mismatches": [],
-                            "raw_response": raw_resp,
-                            "raw_ocr_text": raw_resp,
-                            "ocr_confidence": 1.0
-                        })
-
-                record_batch(batch, f"{len(norm_fields)} value{'s' if len(norm_fields) != 1 else ''} found", "PASS",
-                             meta, values=len(norm_fields))
+                page_extractions.extend(batch_records)
+                n_values = sum(len(r["fields"]) for r in batch_records)
+                record_batch(batch, f"{n_values} value{'s' if n_values != 1 else ''} found", "PASS",
+                             meta, values=n_values)
                 doc_ok += 1
 
             if doc_err and not doc_ok and not doc_empty:
@@ -894,6 +909,22 @@ def process_lead(
             continue
 
     phase_timings["document_extraction_ms"] = round((time.perf_counter() - t_ocr) * 1000, 1)
+
+    # People first: every batch numbers the people it finds from one, so records are renumbered to
+    # one stable numbering BEFORE pages are re-attributed (which merges records by page and would
+    # otherwise collide two different "co_borrower_1"s). See consolidate.py.
+    from workspaces.legal.consolidate import consolidate
+    from workspaces.legal.doc_filter import classify_doc_by_filename
+
+    def _doc_type_of(rec: Dict[str, Any]) -> str:
+        return classify_doc_by_filename(rec.get("filename", "") or "")
+
+    first_pass = None                      # who this pass set aside as "mentioned" — the second
+    if page_extractions:                   # pass below no longer sees them
+        try:
+            first_pass = consolidate(page_extractions, run_schema, _doc_type_of)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[pipeline] party consolidation failed for {lead_id}: {e}\n")
 
     # File every value under the page the DOCUMENT says it is on, not the page the model claimed.
     # See page_attribution.py: the model's citation was right 42% of the time on a real run.
@@ -941,38 +972,36 @@ def process_lead(
                     pass
         raw_extractions["_cited_pages"] = sorted(list(cited_pages_set))
 
-        # Merge page extractions into top-level raw_extractions safely:
-        # Prevent institutional lenders from hijacking borrower fields and avoid blind string length overwrites
+        # One set of dossier values from all the page reads: people resolved as people (nobody
+        # dropped because another batch used the same key), single fields by agreement, and every
+        # disagreement kept for review. Pages were proven above, so notes cite the right pages.
+        cons = consolidate(page_extractions, run_schema, _doc_type_of)
+        folder_lan_value = raw_extractions.get("account_no_lan")
+        raw_extractions.update(cons.values)
+        if folder_lan_value:
+            read_lan = cons.values.get("account_no_lan")
+            raw_extractions["account_no_lan"] = folder_lan_value        # the upload's own LAN wins
+            if read_lan and str(read_lan).strip() != str(folder_lan_value).strip():
+                cons.notes.setdefault("account_no_lan", {})["conflict"] =                     f"the documents read {read_lan}; the folder is {folder_lan_value}"
+
+        # what the cleaner removed and the model's evidence, for the field's chosen value
+        field_notes: Dict[str, Dict[str, Any]] = {}
         for px in page_extractions:
-            fields = px.get("fields", {})
-            for k, v in fields.items():
-                if k.startswith("_"):
-                    continue
-                if v is None or v == "" or v == "null" or v == {}:
-                    continue
-                if isinstance(v, str):
-                    clean_v = v.strip()
-                    if ("borrower" in k or k in ("applicant_name", "applicant_address")) and _is_institutional_lender(clean_v):
-                        continue
-                    if "address" in k and _is_institutional_lender(clean_v):
-                        continue
-
-                    if k not in raw_extractions or not raw_extractions[k]:
-                        raw_extractions[k] = clean_v
-                    else:
-                        existing = str(raw_extractions[k]).strip()
-                        if _is_institutional_lender(existing):
-                            raw_extractions[k] = clean_v
-                        elif clean_v.lower().startswith(existing.lower()) or existing.lower() in clean_v.lower():
-                            if len(clean_v) > len(existing):
-                                raw_extractions[k] = clean_v
-                else:
-                    if k not in raw_extractions:
-                        raw_extractions[k] = v
-
-        # Re-normalize full raw_extractions payload
-        clean_top_level = _normalize_extracted_fields(raw_extractions)
-        raw_extractions.update(clean_top_level)
+            for fk, fv in (px.get("fields") or {}).items():
+                if raw_extractions.get(fk) == fv and fk not in field_notes:
+                    merged_note = dict((px.get("field_notes") or {}).get(fk) or {})
+                    evv = (px.get("field_evidence") or {}).get(fk) or {}
+                    for ek in ("legibility", "issue", "script", "original"):
+                        if evv.get(ek):
+                            merged_note[ek] = evv[ek]
+                    merged_note["page"] = px.get("page_number")
+                    field_notes[fk] = merged_note
+        for fk, cn in cons.notes.items():
+            field_notes.setdefault(fk, {}).update(cn)
+        raw_extractions["_field_notes"] = field_notes
+        raw_extractions["_mentioned"] = (first_pass.mentioned if first_pass else []) + cons.mentioned
+        raw_extractions["_extras"] = {**extras_seen, **(first_pass.extras if first_pass else {}), **cons.extras}
+        raw_extractions["_schema"] = run_schema.to_json() if not run_schema.is_empty() else None
 
         # Lead-level aggregated model and token telemetry — summed over every model call
         # (a call that returned nothing still cost tokens and time; and one call citing two

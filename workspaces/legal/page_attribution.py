@@ -153,6 +153,8 @@ def reattribute(page_extractions: List[dict], doc_paths: Dict[str, str]) -> Tupl
                     "page_number": page,
                     "fields": {},
                     "field_scripts": {},
+                    "field_notes": {},
+                    "field_evidence": {},
                     "field_sources": {},
                     "ocr_route": src.get("ocr_route", "vlm"),
                     "telemetry": src.get("telemetry", {}),
@@ -163,11 +165,13 @@ def reattribute(page_extractions: List[dict], doc_paths: Dict[str, str]) -> Tupl
                 }
             rec["fields"][field] = value
             rec["field_sources"][field] = "text_layer" if verified else "model"
-            # the chunk's script flags follow the field to whichever page it lands on, instead of
-            # every page of the chunk carrying the whole chunk's flags
-            fs = src.get("field_scripts") or {}
-            if field in fs:
-                rec["field_scripts"][field] = fs[field]
+            # everything noted about a field follows it to whichever page it lands on — its script,
+            # what the name cleaner removed, the model's legibility verdict — instead of every page
+            # of the batch carrying the whole batch's notes
+            for part in ("field_scripts", "field_notes", "field_evidence"):
+                notes = src.get(part) or {}
+                if field in notes:
+                    rec[part][field] = notes[field]
 
         rebuilt.extend(pages[p] for p in sorted(pages))
 

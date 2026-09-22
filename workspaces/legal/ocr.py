@@ -166,40 +166,66 @@ def detect_language(text: str) -> str:
 # Cache layer removed per user request
 
 
-# ── Extraction Prompt Builder ──────────────────────────────────────────────
+# ── The extraction prompt ──────────────────────────────────────────────────
+# What changed, and why, measured on real runs:
+#   - the old rule "preserve the exact text as written" invited whole party clauses into name
+#     fields ("Ganesh Singh s/o Nainsingh, caste - Rajpoot, age - 32 years, resident - …")
+#   - with no field list the model named its own keys: 108 distinct fields in one run
+#   - vernacular text came back in its own script unless the user remembered to ask otherwise
+#   - three separate bookkeeping maps (pages, sources, scripts) are now one evidence block per
+#     field, which also carries whether the value was legible — the review queue's main signal
+_PROMPT_RULES = """RULES
+1. Return one JSON object and nothing else — no markdown, no commentary.
+2. PARTIES
+   - borrower_*: the primary borrower only — exactly one person or one firm.
+   - co_borrower_N_*: every co-applicant or joint borrower, numbered from 1. Use the same number
+     for a person's name and address.
+   - Never the lender — no bank, NBFC or housing finance company is ever a borrower.
+   - A person is the borrower or a co-borrower, never both.
+   - Sellers, previous owners, witnesses, advocates, officials and neighbours named in deeds are
+     NOT parties to the loan. Never put them in borrower or co-borrower keys.
+3. NAMES: the name only. Leave out honorifics (Mr, Mrs, Shri, Smt, Sh, M/s), the relation clause
+   (S/O, W/O, D/O, son of, wife of …), age, caste, occupation, residence and ID numbers.
+   Report a relation clause in the evidence block instead.
+4. ENGLISH: write every value in English. Transliterate names and addresses into English letters —
+   do not translate their meaning (रामप्रसाद → Ramprasad, not "God Prasad"). Translate
+   descriptive text into English. When the source was not in English, put the original text in
+   the evidence block.
+5. Amounts and numbers exactly as written. Dates exactly as written.
+6. HEADING: if the instructions or focus areas name a heading (e.g. "Schedule"), extract only from
+   pages under that heading — not from powers of attorney, general terms or boilerplate.
+7. If nothing requested is on these pages, return {}.
+8. EVIDENCE (mandatory): for every field you return, add an entry to "_field_evidence":
+   "_field_evidence": {"borrower_name": {"page": 33, "script": "printed", "legibility": "clear"},
+                       "co_borrower_1_name": {"page": 34, "script": "handwritten", "legibility": "partial",
+                                              "issue": "faint ink", "relation": "W/O Mohan Lal",
+                                              "original": "सीता देवी"}}
+   - page: the number in the red PAGE badge on the image you read it from — never a page number
+     printed on the document itself.
+   - script: "printed" (machine-printed or typed) or "handwritten".
+   - legibility: "clear" when you are certain of every character; "partial" when part of it was
+     hard to read (blur, faint or low-contrast ink, a stamp or signature over it, a fold, cut off
+     at the edge, glare, a dark or skewed photo); "illegible" when you are guessing.
+   - issue: when legibility is not "clear", the reason in a few words.
+   - relation: names only — the relation clause you left out of the name.
+   - original: only when the source was not in English — the text in its own script.
+   Judge every field on its own. Be honest about legibility: a value marked "clear" is trusted
+   without a human checking it."""
 
-def _build_extraction_prompt(
-    document_type: str,
-    fields_to_extract: List[str],
-    page_number: int,
-    user_prompt: str = "",
-    heading_hint: str = "",
-) -> str:
-    """Build the prompt that instructs the VLM to extract specific fields."""
-    fields_str = ", ".join(fields_to_extract)
 
-    prompt = (
-        f"You are a legal document extraction specialist for SARFAESI loan dossiers.\n"
-        f"This is page {page_number} of a '{document_type}' document.\n\n"
-        f"Extract the following fields from this document image:\n{fields_str}\n\n"
-        f"IMPORTANT RULES:\n"
-        f"1. Return a JSON object with keys EXACTLY matching the field names listed above.\n"
-        f"2. For currency amounts, return the numeric value (e.g. 4500000, not '₹45,00,000').\n"
-        f"3. For dates, return in DD/MM/YYYY format where possible.\n"
-        f"4. For names and addresses, preserve the exact text as written in the document.\n"
-        f"5. If a field is not found on this page, set its value to null.\n"
-        f"6. You MUST extract 'account_no_lan' (Loan Account Number) if present.\n"
-        f"7. You MUST extract 'applicant_name' (Primary Borrower name) if present.\n"
+def build_extraction_prompt(document_type: str, page_info: str, kw_clause: str = "",
+                            extraction_prompt: str = "", schema_block: str = "") -> str:
+    fields = (f"FIELDS\n{schema_block}\n\n" if schema_block else
+              "FIELDS\nReturn what the instructions ask for, as flat snake_case keys "
+              "(borrower_name, co_borrower_1_name, …). No nested objects or arrays.\n\n")
+    return (
+        "You extract data from the pages of an Indian loan dossier (SARFAESI).\n\n"
+        f"Document: {document_type} ({page_info}).{kw_clause}\n"
+        "Each image carries a red PAGE badge with its page number.\n\n"
+        f"WHAT THE USER ASKED FOR\n\"{extraction_prompt}\"\n\n"
+        f"{fields}"
+        f"{_PROMPT_RULES}\n\nReturn ONLY the JSON object."
     )
-
-    if heading_hint:
-        prompt += f"8. CRITICAL CONSTRAINT: You must ONLY extract these fields from the section under the heading '{heading_hint}'. Ignore any matching information found elsewhere on the page.\n"
-
-    if user_prompt:
-        prompt += f"\nAdditional user instructions: {user_prompt}\n"
-
-    prompt += "\nReturn ONLY the JSON object, no explanations."
-    return prompt
 
 
 # ── VLM Client ─────────────────────────────────────────────────────────────
@@ -226,9 +252,13 @@ class LegalVLMClient:
         keywords: List[str] = None,
         headings: List[str] = None,
         total_pages: int = 0,
+        schema_block: str = "",
     ) -> Dict[str, Any]:
         """
         Extract structured data from multiple document page images in a single call.
+
+        `schema_block` is the run's closed field list (field_schema.RunSchema.prompt_block()). With
+        it the model may only return those keys; without it (no prompt) it names its own.
         """
         if not images:
             return {}
@@ -248,34 +278,9 @@ class LegalVLMClient:
             kw_parts.append(f"Key Terms/Keywords: {', '.join(keywords)}")
         kw_clause = f"\nFocus Areas: {'; '.join(kw_parts)}\n" if kw_parts else ""
 
-        prompt = (
-            f"You are a professional legal document extraction AI.\n\n"
-            f"This is the document being read: {document_type} ({page_info}).{kw_clause}\n\n"
-            f"USER EXTRACTION INSTRUCTIONS:\n"
-            f"\"{extraction_prompt}\"\n\n"
-            f"TASK:\n"
-            f"Visually inspect the provided document page image(s) in this batch and extract all information requested in the USER EXTRACTION INSTRUCTIONS.\n"
-            f"Each image is clearly stamped with its exact page number [PAGE X].\n\n"
-            f"RULES:\n"
-            f"1. Return ONLY a valid JSON object. No preamble, no markdown fences, no conversational text.\n"
-            f"2. BORROWER VS CO-BORROWER DISTINCTION (STRICT & MUTUALLY EXCLUSIVE):\n"
-            f"   - 'borrower_name', 'borrower_address': The PRIMARY applicant / borrower only (the customer, main borrower company or individual). Exactly ONE primary borrower.\n"
-            f"   - 'co_borrower_1_name', 'co_borrower_1_address', 'co_borrower_2_name', 'co_borrower_2_address', etc.: Co-applicants, secondary joint borrowers, directors, or guarantors.\n"
-            f"   - LENDER / FINANCIER EXCLUSION: NEVER extract the Lender, financing company, Bank, or NBFC (e.g. 'UGRO Capital', 'HDFC', 'ICICI', 'Bank of Baroda', etc.) as the borrower or co-borrower! The borrower is the customer obtaining the facility, never the lender.\n"
-            f"   - MUTUAL EXCLUSIVITY: NEVER mark the same person or entity as both primary borrower AND co-borrower! The main borrower goes to 'borrower_name'. All other secondary joint parties go to 'co_borrower_1_name', 'co_borrower_2_name', etc.\n"
-            f"   - CRITICAL: Return flat key-value pairs. DO NOT return nested objects (e.g. no 'borrower': {{'name': ...}}) and DO NOT return arrays of objects (e.g. no 'borrower_details': [...] or 'co_borrower_details': [...]).\n"
-            f"3. PROVENANCE & PAGE CITATION (MANDATORY):\n"
-            f"   - In '_cited_pages' and '_field_page_sources', you MUST ONLY report the exact integer shown in the stamped red badge [PAGE X] in the top-left corner of the image (e.g. if the red badge says [PAGE 33], cite 33).\n"
-            f"   - NEVER report physical page numbers printed on the footer, header, or body of the document page itself (e.g. do NOT cite bottom-center printed numbers). The stamped red badge [PAGE X] is the ONLY source of truth for page citations.\n"
-            f"   - Provide '_cited_pages': a JSON list of integer page numbers from the red badges where the extracted data was found, e.g. [33]. If nothing found, return [].\n"
-            f"   - Provide '_field_page_sources': a JSON object mapping each extracted field name to the red badge page number where it was found, e.g. {{\"borrower_name\": 33, \"borrower_address\": 33}}.\n"
-            f"4. For names and addresses, preserve the exact text as written or printed in the document.\n"
-            f"5. For numbers or monetary amounts, extract the exact figures.\n"
-            f"6. STRICT HEADING CONSTRAINT: If USER EXTRACTION INSTRUCTIONS or Focus Areas specifies a target heading (e.g. 'Schedule'), you must ONLY extract fields from pages displaying or belonging to that heading. If a page does NOT belong to that heading (such as a Power of Attorney, General Terms, or boilerplate clauses), DO NOT extract borrower details from it.\n"
-            f"7. If the requested information is not found in this batch of pages, return an empty JSON object {{}}.\n"
-            f"8. SCRIPT TYPE: Provide '_field_scripts': a JSON object mapping each extracted field name to how that value appears on the page — \"handwritten\" when it is written by hand (ink, filled-in blanks, endorsements) or \"printed\" when it is machine-printed/typed, e.g. {{\"borrower_name\": \"printed\", \"co_borrower_1_name\": \"handwritten\"}}. Judge each value independently; omit a field you are unsure about.\n"
-            f"\nReturn ONLY the JSON object."
-        )
+        prompt = build_extraction_prompt(
+            document_type=document_type, page_info=page_info, kw_clause=kw_clause,
+            extraction_prompt=extraction_prompt, schema_block=schema_block)
 
         parsed = None
         route = ""

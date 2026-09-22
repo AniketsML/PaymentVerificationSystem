@@ -419,12 +419,22 @@ class PgLegalLeadLogger:
                     merged["account_no_lan"] = d.get("account_no_lan") or d.get("account_lan")
 
                 from workspaces.legal.pipeline import _is_meta_key
+                from workspaces.legal.field_schema import IDENTITY_KEYS, RunSchema
+                # a row extracted under a schema shows only the schema's fields — nothing the
+                # prompt did not ask for can resurface as a column, even from a page record
+                row_schema = RunSchema.from_json(extracted.get("_schema"))
+                if row_schema is not None and row_schema.is_empty():
+                    row_schema = None
+                d["_schema"] = extracted.get("_schema")
+                d["_field_notes"] = extracted.get("_field_notes") or {}
                 for key, val in merged.items():
                     if key not in d and not key.startswith("_") and not key.endswith("_page_sources") and key not in (
                         "page_extractions", "telemetry", "borrower_details", "co_borrower_details",
                         "details_of_borrower", "details_of_co_borrower", "details_of_the_borrower",
                         "borrower", "co_borrowers", "co_applicants"
                     ) and not key.startswith("telemetry_") and not _is_meta_key(key):
+                        if row_schema is not None and key not in IDENTITY_KEYS and not row_schema.allows(key):
+                            continue
                         if not isinstance(val, (dict, list)):
                             d[key] = val
                         
