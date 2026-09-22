@@ -414,6 +414,22 @@ def api_legal_lead_detail(lead_id):
         abort(404)
     j["review"] = logger.latest_review(lead_id)
     j["review_history"] = logger.review_history(lead_id)
+    # everything the drawer needs to review values, in one place: the trust verdicts, what was
+    # cleaned or disputed per field, what the model read before a person corrected it, who was
+    # mentioned but isn't a party, and what came back that the prompt never asked for
+    ed = ((j.get("lead") or {}).get("extracted_data") or {}) if isinstance((j.get("lead") or {}).get("extracted_data"), dict) else {}
+    from workspaces.legal.corrections import latest
+    j["assessment"] = {
+        "trust": ed.get("_trust"),
+        "field_notes": ed.get("_field_notes") or {},
+        "model_values": ed.get("_model_values") or {},
+        "overrides": ed.get("_overrides") or {},
+        "mentioned": ed.get("_mentioned") or [],
+        "extras": ed.get("_extras") or {},
+        "page_quality": ed.get("_page_quality") or {},
+        "schema": ed.get("_schema"),
+        "corrections": latest(lead_id),
+    }
     return jsonify(j)
 
 
@@ -468,6 +484,32 @@ def api_legal_review(lead_id):
         corrected_data=corrected_data, reviewer=reviewer, note=note,
         is_test=bool((j.get("final") or {}).get("is_test") or (j.get("lead") or {}).get("is_test")))
     return jsonify(rec)
+
+
+@legal_bp.route("/api/legal/lead/<lead_id>/field", methods=["POST"])
+def api_legal_field_correction(lead_id):
+    """A reviewer's decision about one value: confirm it as read, type the right value, or revert.
+    See workspaces/legal/corrections.py. The reviewer is the logged-in user, never the client's
+    say-so, and `expected` (the value they were looking at) guards against overwriting a colleague."""
+    from workspaces.legal.corrections import CorrectionError, record
+    body = request.get_json(force=True, silent=True) or {}
+    field = str(body.get("field") or "").strip()
+    action = {"correct": "corrected", "confirm": "confirmed", "revert": "reverted"}.get(
+        str(body.get("action") or "").strip().lower(), str(body.get("action") or "").strip().lower())
+    reviewer = (session.get("user") or "").strip() or "reviewer"
+    try:
+        res = record(lead_id, field, action, value=body.get("value"), expected=body.get("expected"),
+                     reviewer=reviewer, note=str(body.get("note") or "")[:500])
+    except CorrectionError as e:
+        return jsonify({"error": str(e)}), e.status
+    return jsonify(res)
+
+
+@legal_bp.route("/api/legal/lead/<lead_id>/corrections")
+def api_legal_field_corrections(lead_id):
+    """Every decision recorded on this dossier's values, newest first."""
+    from workspaces.legal.corrections import history
+    return jsonify({"lead_id": lead_id, "history": history(lead_id, request.args.get("field") or None)})
 
 
 @legal_bp.route("/api/legal/lead/<lead_id>/provenance")

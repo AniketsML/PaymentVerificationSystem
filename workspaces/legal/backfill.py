@@ -156,6 +156,54 @@ def run(apply: bool = False, lead_ids: Optional[List[str]] = None, log=print) ->
     return totals
 
 
+def run_trust(apply: bool = False, lead_ids: Optional[List[str]] = None, rejudge_only: bool = False,
+              log=print) -> Dict[str, Any]:
+    """Judge the pages values were read from and assess every value's trust, for finished dossiers.
+    Additive — values are not touched. With `rejudge_only`, stored page metrics are re-judged
+    against the current thresholds instead of re-rendering pages (for a threshold change)."""
+    from workspaces.legal.corrections import apply_to, latest
+    from workspaces.legal.db import init_schema
+    from workspaces.legal.page_quality import assess, judge
+    from workspaces.legal.trust import cited_pages, evaluate
+    init_schema()
+    where, params = "extracted_data IS NOT NULL AND status = ANY(%s)", [list(_FINISHED)]
+    if lead_ids:
+        where += " AND lead_id = ANY(%s)"
+        params.append(list(lead_ids))
+    with pg.pool().connection() as c:
+        leads = c.execute(f"SELECT lead_id, extracted_data FROM legal_leads WHERE {where} ORDER BY lead_id",
+                          params).fetchall()
+        docs = {d["document_id"]: d["file_path"] for d in
+                c.execute("SELECT document_id, file_path FROM legal_lead_documents").fetchall()}
+    states: Dict[str, int] = {}
+    reasons: Dict[str, int] = {}
+    t0 = time.time()
+    for i, l in enumerate(leads, 1):
+        ed = l["extracted_data"] or {}
+        if rejudge_only and ed.get("_page_quality"):
+            for pages in ed["_page_quality"].values():
+                for q in pages.values():
+                    if q.get("metrics"):
+                        q["flags"] = judge(q["metrics"])
+        else:
+            ed["_page_quality"] = assess(docs, cited_pages(ed))
+        corrections = latest(l["lead_id"])
+        apply_to(ed, corrections)
+        ed["_trust"] = evaluate(ed, corrections=corrections)
+        states[ed["_trust"]["state"]] = states.get(ed["_trust"]["state"], 0) + 1
+        for r, n in ed["_trust"]["reasons"].items():
+            reasons[r] = reasons.get(r, 0) + n
+        if apply:
+            with pg.pool().connection() as c:
+                c.execute("UPDATE legal_leads SET extracted_data = %s WHERE lead_id = %s",
+                          (Jsonb(ed), l["lead_id"]))
+                c.execute("UPDATE legal_lead_results SET raw_extractions = %s WHERE lead_id = %s",
+                          (Jsonb(ed), l["lead_id"]))
+        if i % 50 == 0:
+            log(f"  {i}/{len(leads)}  ({time.time() - t0:.0f}s)")
+    return {"dossiers": len(leads), "states": states, "value_reasons": reasons}
+
+
 def restore(lead_ids: Optional[List[str]] = None, reason: str = REASON) -> int:
     """Put back exactly what a migration replaced."""
     where, params = "reason = %s", [reason]
@@ -179,6 +227,9 @@ def restore(lead_ids: Optional[List[str]] = None, reason: str = REASON) -> int:
 if __name__ == "__main__":
     if "--restore" in sys.argv:
         print(f"restored {restore()} dossiers")
+    elif "--trust" in sys.argv:
+        res = run_trust(apply="--apply" in sys.argv, rejudge_only="--rejudge" in sys.argv)
+        print(("APPLIED" if "--apply" in sys.argv else "DRY RUN (nothing written)"), res)
     else:
         res = run(apply="--apply" in sys.argv)
         print(("APPLIED" if "--apply" in sys.argv else "DRY RUN (nothing written)"), res)

@@ -47,6 +47,22 @@ def _pdf(path, lines):
     d.close()
 
 
+def _scanned_pdf(path, pages):
+    """A PDF of page images with no text layer — what a scan of handwritten pages is."""
+    import io
+    from PIL import Image, ImageDraw
+    d = fitz.open()
+    for text in pages:
+        img = Image.new("L", (1240, 1754), 255)
+        ImageDraw.Draw(img).text((120, 200), text, fill=0)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        page = d.new_page(width=595, height=842)
+        page.insert_image(page.rect, stream=buf.getvalue())
+    d.save(path)
+    d.close()
+
+
 @pytest.fixture
 def saved(monkeypatch, tmp_path):
     """Run process_lead and return the extracted_data it saved."""
@@ -87,7 +103,7 @@ def saved(monkeypatch, tmp_path):
     a = os.path.join(tmp_path, "Loan Agreement.pdf")
     b = os.path.join(tmp_path, "Loan Agreement Annexure.pdf")
     _pdf(a, ["Schedule", "Borrower Bharatlal residing at Kurnool, co-borrower Sharda Bai Beer"])
-    _pdf(b, ["Annexure", "Co-borrower Gopal Lal Beer"])
+    _scanned_pdf(b, ["Annexure", "Co-borrower Gopal Lal Beer"])
     docs = [{"document_id": "DA", "filename": "Loan Agreement.pdf", "file_path": a, "metadata": {}},
             {"document_id": "DB", "filename": "Loan Agreement Annexure.pdf", "file_path": b, "metadata": {}}]
     meta = {"model": "Medha", "prompt_tokens": 900, "completion_tokens": 40, "ms": 5000}
@@ -140,6 +156,16 @@ def test_both_documents_co_borrowers_survive(saved):
     d = saved["data"]
     co = {d.get("co_borrower_1_name"), d.get("co_borrower_2_name")}
     assert co == {"Sharda Bai Beer", "Gopal Lal Beer"}
+
+
+def test_every_value_gets_a_trust_verdict_from_its_evidence(saved):
+    trust = saved["data"]["_trust"]
+    fields = trust["fields"]
+    gopal = next(k for k, v in saved["data"].items() if v == "Gopal Lal Beer")
+    assert fields[gopal]["state"] == "review"
+    assert "handwritten" in fields[gopal]["reasons"] and "partial" in fields[gopal]["reasons"]
+    assert trust["state"] == "needs_review"
+    assert "_page_quality" in saved["data"]
 
 
 def test_the_models_legibility_verdict_reaches_the_dossier(saved):

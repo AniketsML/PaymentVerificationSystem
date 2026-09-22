@@ -211,6 +211,22 @@ CREATE TABLE IF NOT EXISTS legal_run_schemas (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- A person's decisions about individual values (corrections.py): append-only, one row per save.
+-- The standing state of a field is its latest row; a revert is a row, not a deletion.
+CREATE TABLE IF NOT EXISTS legal_field_corrections (
+    id          BIGSERIAL PRIMARY KEY,
+    lead_id     TEXT NOT NULL,
+    field       TEXT NOT NULL,
+    action      TEXT NOT NULL CHECK (action IN ('corrected', 'confirmed', 'reverted')),
+    value       TEXT,
+    previous    TEXT,
+    reviewer    TEXT NOT NULL,
+    note        TEXT,
+    is_test     BOOLEAN NOT NULL DEFAULT FALSE,
+    ts          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_legal_corrections_lead ON legal_field_corrections(lead_id, field, id DESC);
+
 -- A dossier's stored extraction as it was before a data migration rewrote it, so every migration
 -- of extracted values can be undone (backfill.restore). One row per dossier per migration.
 CREATE TABLE IF NOT EXISTS legal_extraction_snapshots (
@@ -358,35 +374,49 @@ def _strip_flattened_meta(conn) -> int:
     return fixed
 
 
+# every table that holds rows belonging to a lead — deleting a lead deletes from all of them, so a
+# purge can never leave orphans behind (the old purge removed only the lead row and its events)
+_LEAD_TABLES = ("legal_processing_events", "legal_reviews", "legal_field_corrections",
+                "legal_lead_documents", "legal_lead_results", "legal_field_provenance",
+                "legal_extraction_snapshots")
+
+
+def _delete_leads(c, lead_ids) -> int:
+    ids = [i for i in lead_ids if i]
+    if not ids:
+        return 0
+    for table in _LEAD_TABLES:
+        c.execute(f"DELETE FROM {table} WHERE lead_id = ANY(%s)", (ids,))
+    return c.execute("DELETE FROM legal_leads WHERE lead_id = ANY(%s)", (ids,)).rowcount
+
+
 def purge_expired_legal_test_data(ttl_days: int = 7) -> Dict[str, int]:
-    """Purge sandbox/test leads older than TTL."""
+    """Purge sandbox/test leads older than TTL, with everything that belongs to them."""
     with pg.pool().connection() as c:
-        r = c.execute(
-            "DELETE FROM legal_leads WHERE is_test=true "
-            "AND created_at < now() - make_interval(days => %s) "
-            "RETURNING lead_id", (ttl_days,)
-        ).fetchall()
+        ids = [r["lead_id"] for r in c.execute(
+            "SELECT lead_id FROM legal_leads WHERE is_test=true "
+            "AND created_at < now() - make_interval(days => %s)", (ttl_days,)).fetchall()]
+        purged = _delete_leads(c, ids)
         c.execute(
             "DELETE FROM legal_processing_events WHERE is_test=true "
             "AND ts < now() - make_interval(days => %s)", (ttl_days,)
         )
-    return {"purged": len(r)}
+    return {"purged": purged}
 
 
 def clear_legal_test_data(batch_id: Optional[str] = None) -> Dict[str, Any]:
-    """Manually clear sandbox/test data for the legal workspace."""
+    """Manually clear sandbox/test data for the legal workspace, with everything that belongs to it."""
     with pg.pool().connection() as c:
         if batch_id:
-            sub = "(SELECT lead_id FROM legal_leads WHERE batch_id=%s AND is_test=true)"
-            c.execute(f"DELETE FROM legal_processing_events WHERE is_test=true AND lead_id IN {sub}", (batch_id,))
-            c.execute(f"DELETE FROM legal_reviews WHERE is_test=true AND lead_id IN {sub}", (batch_id,))
-            c.execute(f"DELETE FROM legal_lead_documents WHERE is_test=true AND lead_id IN {sub}", (batch_id,))
-            c.execute(f"DELETE FROM legal_lead_results WHERE lead_id IN {sub}", (batch_id,))
-            r = c.execute("DELETE FROM legal_leads WHERE batch_id=%s AND is_test=true RETURNING lead_id", (batch_id,)).fetchall()
+            ids = [r["lead_id"] for r in c.execute(
+                "SELECT lead_id FROM legal_leads WHERE batch_id=%s AND is_test=true", (batch_id,)).fetchall()]
         else:
+            ids = [r["lead_id"] for r in c.execute(
+                "SELECT lead_id FROM legal_leads WHERE is_test=true").fetchall()]
+        cleared = _delete_leads(c, ids)
+        if batch_id:
+            c.execute("DELETE FROM legal_manifest_runs WHERE batch_id=%s AND is_test=true", (batch_id,))
+        else:                                 # stray test rows whose lead is already gone
             c.execute("DELETE FROM legal_processing_events WHERE is_test=true")
-            c.execute("DELETE FROM legal_reviews WHERE is_test=true")
-            c.execute("DELETE FROM legal_lead_documents WHERE is_test=true")
-            c.execute("DELETE FROM legal_lead_results WHERE is_test=true")
-            r = c.execute("DELETE FROM legal_leads WHERE is_test=true RETURNING lead_id").fetchall()
-    return {"cleared": len(r), "scope": "test", "workspace": "legal"}
+            c.execute("DELETE FROM legal_manifest_runs WHERE is_test=true")
+    return {"cleared": cleared, "scope": "test", "workspace": "legal"}

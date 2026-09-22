@@ -1033,6 +1033,28 @@ def process_lead(
         raw_extractions["page_extractions"] = page_extractions
         raw_extractions["_cited_pages"] = sorted(list(set(px["page_number"] for px in page_extractions)))
 
+        # Can each value be relied on without a person checking it? The page images values were
+        # read from are judged (page_quality.py), then every value gets a trust state and the
+        # dossier a review state (trust.py). A person's earlier corrections still stand after a
+        # re-run and settle their fields (corrections.py).
+        t_trust = time.perf_counter()
+        try:
+            from workspaces.legal.page_quality import assess
+            from workspaces.legal.trust import cited_pages, evaluate
+            doc_paths_q = {d.get("document_id", ""): d.get("file_path", "") for d in docs_sorted}
+            raw_extractions["_page_quality"] = assess(doc_paths_q, cited_pages(raw_extractions))
+            corrections = {}
+            try:
+                from workspaces.legal.corrections import apply_to, latest
+                corrections = latest(lead_id)
+                apply_to(raw_extractions, corrections)
+            except ImportError:
+                pass
+            raw_extractions["_trust"] = evaluate(raw_extractions, corrections=corrections)
+        except Exception as e:  # noqa: BLE001 — a dossier is never lost over its trust assessment
+            sys.stderr.write(f"[pipeline] trust assessment failed for {lead_id}: {e}\n")
+        phase_timings["trust_ms"] = round((time.perf_counter() - t_trust) * 1000, 1)
+
         with pg.pool().connection() as c:
             c.execute(
                 "UPDATE legal_leads SET status = %s, extracted_data = %s, updated_at = now() WHERE lead_id = %s",

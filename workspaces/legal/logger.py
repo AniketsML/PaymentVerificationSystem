@@ -437,6 +437,15 @@ class PgLegalLeadLogger:
                             continue
                         if not isinstance(val, (dict, list)):
                             d[key] = val
+                # a person's corrections go last, so nothing above — least of all the fallback to
+                # page records — can put back a value someone deliberately changed or cleared
+                for key, val in (extracted.get("_overrides") or {}).items():
+                    if val in (None, ""):
+                        d.pop(key, None)
+                    else:
+                        d[key] = val
+                d["_trust"] = extracted.get("_trust")
+                d["_overrides"] = extracted.get("_overrides") or {}
                         
                 if ("_telemetry" in merged or "telemetry" in merged) and "telemetry" not in d:
                     d["telemetry"] = merged.get("telemetry") or merged.get("_telemetry")
